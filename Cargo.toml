@@ -5,9 +5,9 @@ edition = "2021"
 
 [dependencies]
 nalgebra = "0.33.2"
-rand = { version = "0.9", features = ["os_rng"] }
+rand = { version = "0.9", features = ["os_rng", "thread_rng"] }
 rand_distr = "0.5.0"
-thiserror = "2.0.11"
+thiserror = "2.0.12"
 serde = { version = "1.0", features = ["derive"] }
 plotters = "0.3"
 

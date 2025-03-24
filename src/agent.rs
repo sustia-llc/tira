@@ -1,5 +1,4 @@
 use nalgebra::{DMatrix, DVector, Matrix, Matrix3};
-use rand::prelude::*;
 use rand::{rngs::StdRng, SeedableRng};
 use rand_distr::weighted::WeightedIndex;
 use rand_distr::{Bernoulli, BernoulliError, Distribution};
