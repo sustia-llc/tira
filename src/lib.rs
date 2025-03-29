@@ -10,9 +10,14 @@ use thiserror::Error;
 mod simulation;
 mod plotter;
 mod agent;
+mod communication;
 
 // Re-export the Agent trait and POMDPAgent for tests and external use
 pub use agent::{Agent, POMDPAgent, CopyAgent};
+pub use communication::{CommunicatingAgent, Message, AgentMessage, CommunicationChannel, MessageContent, CommunicatingPOMDPAgent};
+
+// Error type is defined in this file, not in a separate module
+// Environment types are also defined in this file
 
 #[derive(Error, Debug)]
 pub enum OneManyError {
@@ -28,6 +33,8 @@ pub enum OneManyError {
     InvalidAgentId(usize),
     #[error("Resource conflict: Bandit {0} already selected")]
     ResourceConflict(usize),
+    #[error("Communication error: {0}")]
+    Communication(String),
 }
 
 // Environment trait for different bandit environments
