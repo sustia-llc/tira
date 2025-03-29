@@ -11,6 +11,9 @@ mod simulation;
 mod plotter;
 mod agent;
 
+// Re-export the Agent trait and POMDPAgent for tests and external use
+pub use agent::{Agent, POMDPAgent, CopyAgent};
+
 #[derive(Error, Debug)]
 pub enum OneManyError {
     #[error("Invalid probability value: {0}")]
