@@ -1,3 +1,9 @@
+one armed bandit vs rat/cheese vs deal/no deal
+RL vs Active Inference
+
+agent = LLMs, MCP, Inter-Agent Messaging 
+
+
 Critical Optimization Opportunities:
 Leverage Rust's parallelism with rayon for parameter recovery
 Pre-allocate simulation data structures
