@@ -1,23 +1,24 @@
-use nalgebra::{DMatrix, DVector, Matrix, Matrix3};
 use rand::prelude::*;
 use rand::seq::WeightError;
-use rand::{rngs::StdRng, SeedableRng};
-use rand_distr::weighted::WeightedIndex;
 use rand_distr::{Bernoulli, BernoulliError, Distribution};
-use serde::{Deserialize, Serialize};
-use std::ops::AddAssign;
 use thiserror::Error;
-mod simulation;
-mod plotter;
 mod agent;
 mod communication;
+mod group;
+mod plotter;
+mod simulation;
 
-// Re-export the Agent trait and POMDPAgent for tests and external use
-pub use agent::{Agent, POMDPAgent, CopyAgent};
-pub use communication::{CommunicatingAgent, Message, AgentMessage, CommunicationChannel, MessageContent, CommunicatingPOMDPAgent};
-
-// Error type is defined in this file, not in a separate module
-// Environment types are also defined in this file
+pub use agent::{Agent, CopyAgent, POMDPAgent};
+pub use communication::{
+    AgentMessage, CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel, Message,
+    MessageContent,
+};
+pub use group::{GroupAgent, GroupAgentBuilder, VotingAgent};
+pub use simulation::{
+    RecoveryResult, TrialData, experiment_deterministic, experiment_identical,
+    experiment_varying_alpha, experiment_varying_preferences, log_likelihood,
+    parameter_recovery_single, recover_alpha, run_group_simulation, run_single_simulation,
+};
 
 #[derive(Error, Debug)]
 pub enum OneManyError {
@@ -37,29 +38,30 @@ pub enum OneManyError {
     Communication(String),
 }
 
-// Environment trait for different bandit environments
+#[allow(clippy::missing_errors_doc)]
 pub trait Environment {
     fn step(&mut self, action: usize) -> Result<usize, OneManyError>;
 }
 
-// Multi-agent environment trait with agent identification
+#[allow(clippy::missing_errors_doc)]
 pub trait MultiAgentEnvironment {
-    fn step(&mut self, agent_id: usize, action: usize) -> Result<(usize, Option<StateChange>), OneManyError>;
+    fn step(
+        &mut self,
+        agent_id: usize,
+        action: usize,
+    ) -> Result<(usize, Option<StateChange>), OneManyError>;
     fn reset(&mut self);
     fn num_agents(&self) -> usize;
     fn num_actions(&self) -> usize;
 }
 
-// Struct to represent changes in environment state that might be relevant to other agents
 #[derive(Debug, Clone)]
 pub struct StateChange {
-    // Changes in resource availability, agent positions, etc.
     pub bandit_selected: Option<usize>,
     pub reward_obtained: bool,
     pub agent_id: usize,
 }
 
-// Basic multi-armed bandit environment
 #[derive(Debug, Clone)]
 pub struct BanditEnvironment {
     probabilities: Vec<f64>,
@@ -67,14 +69,13 @@ pub struct BanditEnvironment {
 }
 
 impl BanditEnvironment {
+    #[allow(clippy::missing_errors_doc)]
     pub fn new(probabilities: Vec<f64>) -> Result<Self, OneManyError> {
-        // Validate probabilities are between 0 and 1
         for p in &probabilities {
-            if *p < 0.0 || *p > 1.0 {
+            if !(0.0..=1.0).contains(p) {
                 return Err(OneManyError::InvalidProbability(*p));
             }
         }
-
         Ok(Self {
             probabilities,
             rng: rand::rng(),
@@ -87,123 +88,100 @@ impl Environment for BanditEnvironment {
         if action >= self.probabilities.len() {
             return Err(OneManyError::InvalidAction(action));
         }
-
         let prob = self.probabilities[action];
         let dist = Bernoulli::new(prob).map_err(OneManyError::Distribution)?;
-
-        Ok(if dist.sample(&mut self.rng) { 1 } else { 0 })
+        Ok(usize::from(dist.sample(&mut self.rng)))
     }
 }
 
-// Shared multi-armed bandit environment for multi-agent scenarios
-// This environment implements competition for resources and adaptive probabilities
 #[derive(Debug, Clone)]
 pub struct SharedBanditEnvironment {
-    // Base probabilities for each bandit
     base_probabilities: Vec<f64>,
-    // Current probabilities (may be affected by other agents' actions)
     current_probabilities: Vec<f64>,
-    // Which agent selected which bandit in current round
-    bandit_selection: Vec<Option<usize>>, // None = not selected, Some(agent_id) = selected by agent_id
-    // Number of agents in the environment
+    bandit_selection: Vec<Option<usize>>,
     n_agents: usize,
-    // Are we using competitive mode? (agents can't select same bandit in one round)
     competitive: bool,
-    // Random number generator
     rng: ThreadRng,
-    // Current round/step
     step_counter: usize,
 }
 
 impl SharedBanditEnvironment {
+    #[allow(clippy::missing_errors_doc)]
     pub fn new(probabilities: Vec<f64>, n_agents: usize) -> Result<Self, OneManyError> {
-        // Validate probabilities
         for p in &probabilities {
-            if *p < 0.0 || *p > 1.0 {
+            if !(0.0..=1.0).contains(p) {
                 return Err(OneManyError::InvalidProbability(*p));
             }
         }
-
         if n_agents == 0 {
             return Err(OneManyError::InvalidAgentId(0));
         }
-
         let n_bandits = probabilities.len();
-        
         Ok(Self {
             base_probabilities: probabilities.clone(),
             current_probabilities: probabilities,
             bandit_selection: vec![None; n_bandits],
             n_agents,
-            competitive: true, // Default to competitive mode
+            competitive: true,
             rng: rand::rng(),
             step_counter: 0,
         })
     }
 
-    /// Set whether the environment is competitive (agents compete for bandits)
     pub fn set_competitive(&mut self, competitive: bool) {
         self.competitive = competitive;
     }
 
-    /// Check if a bandit is available (not selected by any agent in this round)
+    #[must_use]
     pub fn is_bandit_available(&self, bandit: usize) -> bool {
-        self.bandit_selection.get(bandit).map_or(false, |agent| agent.is_none())
+        self.bandit_selection
+            .get(bandit)
+            .is_some_and(Option::is_none)
     }
 
-    /// Reset the environment for a new round
     fn next_round(&mut self) {
         self.bandit_selection = vec![None; self.base_probabilities.len()];
         self.step_counter += 1;
-
-        // Reset probabilities to base values (could implement more complex dynamics here)
-        self.current_probabilities = self.base_probabilities.clone();
+        self.current_probabilities.clone_from(&self.base_probabilities);
     }
 
-    /// Get the number of rounds that have passed
+    #[must_use]
     pub fn rounds(&self) -> usize {
         self.step_counter
     }
 }
 
 impl MultiAgentEnvironment for SharedBanditEnvironment {
-    fn step(&mut self, agent_id: usize, action: usize) -> Result<(usize, Option<StateChange>), OneManyError> {
-        // Validate agent_id
+    fn step(
+        &mut self,
+        agent_id: usize,
+        action: usize,
+    ) -> Result<(usize, Option<StateChange>), OneManyError> {
         if agent_id >= self.n_agents {
             return Err(OneManyError::InvalidAgentId(agent_id));
         }
-
-        // Validate action
         if action >= self.current_probabilities.len() {
             return Err(OneManyError::InvalidAction(action));
         }
-
-        // In competitive mode, check if bandit is already selected
         if self.competitive && self.bandit_selection[action].is_some() {
             return Err(OneManyError::ResourceConflict(action));
         }
 
-        // Mark bandit as selected by this agent
         self.bandit_selection[action] = Some(agent_id);
 
-        // Sample reward from probability distribution
         let prob = self.current_probabilities[action];
         let dist = Bernoulli::new(prob).map_err(OneManyError::Distribution)?;
-        let reward = if dist.sample(&mut self.rng) { 1 } else { 0 };
+        let reward = usize::from(dist.sample(&mut self.rng));
 
-        // Create state change notification for other agents
         let state_change = StateChange {
             bandit_selected: Some(action),
             reward_obtained: reward == 1,
             agent_id,
         };
 
-        // Check if all agents have acted
-        let all_acted = (0..self.n_agents).all(|id| {
-            self.bandit_selection.iter().any(|&selection| selection == Some(id))
-        });
+        let all_acted = (0..self.n_agents)
+            .all(|id| self.bandit_selection.contains(&Some(id)));
 
-        // If all agents have acted, prepare for next round
         if all_acted {
             self.next_round();
         }
@@ -213,7 +191,7 @@ impl MultiAgentEnvironment for SharedBanditEnvironment {
 
     fn reset(&mut self) {
         self.bandit_selection = vec![None; self.base_probabilities.len()];
-        self.current_probabilities = self.base_probabilities.clone();
+        self.current_probabilities.clone_from(&self.base_probabilities);
         self.step_counter = 0;
     }
 
@@ -226,21 +204,10 @@ impl MultiAgentEnvironment for SharedBanditEnvironment {
     }
 }
 
-// For standard Environment trait compatibility 
-// (allows using it with single-agent code)
 impl Environment for SharedBanditEnvironment {
     fn step(&mut self, action: usize) -> Result<usize, OneManyError> {
-        // Use agent_id 0 when called through the single-agent interface
-        let (reward, _) = self.step_as_agent(0, action)?;
+        let (reward, _) =
+            <Self as MultiAgentEnvironment>::step(self, 0, action)?;
         Ok(reward)
     }
 }
-
-// Implement with a different method name to avoid conflict
-impl SharedBanditEnvironment {
-    fn step_as_agent(&mut self, agent_id: usize, action: usize) -> Result<(usize, Option<StateChange>), OneManyError> {
-        // Delegate to the MultiAgentEnvironment implementation
-        <Self as MultiAgentEnvironment>::step(self, agent_id, action)
-    }
-}
-

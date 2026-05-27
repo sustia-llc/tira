@@ -1,16 +1,21 @@
 [package]
 name = "one_many_rs"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-nalgebra = "0.33.2"
-rand = { version = "0.9", features = ["os_rng", "thread_rng"] }
-rand_distr = "0.5.0"
-thiserror = "2.0.12"
+nalgebra = "0.35"
+rand = { version = "0.10", features = ["sys_rng", "thread_rng"] }
+rand_distr = "0.6"
+thiserror = "2"
 serde = { version = "1.0", features = ["derive"] }
 plotters = "0.3"
-flume = "0.11.1"
+flume = "0.12"
+rayon = "1.10"
 
 [dev-dependencies]
 approx = "0.5"
+
+[[bin]]
+name = "reproduce"
+path = "src/bin/reproduce.rs"
