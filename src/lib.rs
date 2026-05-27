@@ -99,6 +99,7 @@ pub struct SharedBanditEnvironment {
     base_probabilities: Vec<f64>,
     current_probabilities: Vec<f64>,
     bandit_selection: Vec<Option<usize>>,
+    agents_acted: Vec<bool>,
     n_agents: usize,
     competitive: bool,
     rng: ThreadRng,
@@ -121,6 +122,7 @@ impl SharedBanditEnvironment {
             base_probabilities: probabilities.clone(),
             current_probabilities: probabilities,
             bandit_selection: vec![None; n_bandits],
+            agents_acted: vec![false; n_agents],
             n_agents,
             competitive: true,
             rng: rand::rng(),
@@ -141,6 +143,7 @@ impl SharedBanditEnvironment {
 
     fn next_round(&mut self) {
         self.bandit_selection = vec![None; self.base_probabilities.len()];
+        self.agents_acted = vec![false; self.n_agents];
         self.step_counter += 1;
         self.current_probabilities.clone_from(&self.base_probabilities);
     }
@@ -168,6 +171,7 @@ impl MultiAgentEnvironment for SharedBanditEnvironment {
         }
 
         self.bandit_selection[action] = Some(agent_id);
+        self.agents_acted[agent_id] = true;
 
         let prob = self.current_probabilities[action];
         let dist = Bernoulli::new(prob).map_err(OneManyError::Distribution)?;
@@ -179,10 +183,7 @@ impl MultiAgentEnvironment for SharedBanditEnvironment {
             agent_id,
         };
 
-        let all_acted = (0..self.n_agents)
-            .all(|id| self.bandit_selection.contains(&Some(id)));
-
-        if all_acted {
+        if self.agents_acted.iter().all(|&acted| acted) {
             self.next_round();
         }
 
@@ -191,6 +192,7 @@ impl MultiAgentEnvironment for SharedBanditEnvironment {
 
     fn reset(&mut self) {
         self.bandit_selection = vec![None; self.base_probabilities.len()];
+        self.agents_acted = vec![false; self.n_agents];
         self.current_probabilities.clone_from(&self.base_probabilities);
         self.step_counter = 0;
     }

@@ -56,7 +56,6 @@ impl fmt::Display for Message {
 pub struct CommunicationChannel {
     senders: HashMap<usize, Sender<Message>>,
     receivers: HashMap<usize, Receiver<Message>>,
-    broadcast_rx: HashMap<usize, Receiver<Message>>,
     current_step: usize,
 }
 
@@ -64,7 +63,6 @@ impl CommunicationChannel {
     pub fn new(n_agents: usize) -> Self {
         let mut senders = HashMap::new();
         let mut receivers = HashMap::new();
-        let broadcast_rx = HashMap::new();
 
         for i in 0..n_agents {
             let (tx, rx) = flume::unbounded();
@@ -75,7 +73,6 @@ impl CommunicationChannel {
         Self {
             senders,
             receivers,
-            broadcast_rx,
             current_step: 0,
         }
     }
@@ -121,14 +118,6 @@ impl CommunicationChannel {
             }
         } else {
             return Err(OneManyError::InvalidAgentId(agent_id));
-        }
-
-        if let Some(rx) = self.broadcast_rx.get(&agent_id) {
-            while let Ok(msg) = rx.try_recv() {
-                if msg.sender_id != agent_id {
-                    messages.push(msg);
-                }
-            }
         }
 
         messages.sort_by(|a, b| {

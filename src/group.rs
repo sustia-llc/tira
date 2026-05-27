@@ -207,7 +207,7 @@ impl GroupAgentBuilder {
                     self.preferences.clone(),
                     None,
                     self.alpha,
-                    false,
+                    self.learn_a,
                 )
             })
             .collect::<Result<_, _>>()?;
@@ -231,7 +231,7 @@ impl GroupAgentBuilder {
                     self.preferences.clone(),
                     None,
                     a,
-                    false,
+                    self.learn_a,
                 )
             })
             .collect::<Result<_, _>>()?;
@@ -259,7 +259,7 @@ impl GroupAgentBuilder {
                     prefs.clone(),
                     None,
                     self.alpha,
-                    false,
+                    self.learn_a,
                 )
             })
             .collect::<Result<_, _>>()?;

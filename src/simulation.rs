@@ -142,14 +142,11 @@ pub fn recover_alpha(
 
     let mut best_alpha = 0.01;
     let mut best_log_posterior = f64::NEG_INFINITY;
-    let mut log_posteriors = Vec::with_capacity(grid.len());
 
     for &alpha in &grid {
         let ll = log_likelihood(data, alpha, n_bandits, observation_probs, preferences)?;
-        // Half-normal prior: ln p(α) = -α²/(2σ²) + const
         let log_prior = -(alpha * alpha) / (2.0 * prior_sd * prior_sd);
         let lp = ll + log_prior;
-        log_posteriors.push(lp);
         if lp > best_log_posterior {
             best_log_posterior = lp;
             best_alpha = alpha;
@@ -285,6 +282,9 @@ pub fn parameter_recovery_single(
 /// Generate α values from a Dirichlet distribution with controlled mean (§2.4).
 /// Weights drawn from Dirichlet(1.5, ..., 1.5), multiplied by n × mean.
 fn dirichlet_alphas(n: usize, mean: f64) -> Vec<f64> {
+    if n < 2 {
+        return vec![mean; n];
+    }
     let mut rng = StdRng::from_rng(&mut rand::rng());
     let alpha_param = vec![1.5; n];
     let dirichlet = Dirichlet::new(&alpha_param).expect("valid Dirichlet params");

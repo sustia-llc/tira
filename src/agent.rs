@@ -69,6 +69,17 @@ impl POMDPAgent {
             return Err(OneManyError::InvalidAction(0));
         }
 
+        if let Some(ref probs) = observation_probs
+            && probs.len() != n_states
+        {
+            return Err(OneManyError::InvalidAction(probs.len()));
+        }
+        if let Some(ref belief) = initial_belief
+            && belief.len() != n_states
+        {
+            return Err(OneManyError::InvalidAction(belief.len()));
+        }
+
         // A matrix: (n_obs × n_states), column j = [p_j, 1-p_j]
         let a_matrix = if let Some(probs) = observation_probs {
             let mut data = Vec::with_capacity(n_obs * n_states);
@@ -82,6 +93,7 @@ impl POMDPAgent {
         };
 
         // B matrices: one per action, deterministic state transitions
+        // B[i][s', s] = P(s'=i | s) = delta(s', i) for all s
         let b_matrix: Vec<DMatrix<f64>> = (0..n_states)
             .map(|i| {
                 let mut b = DMatrix::zeros(n_states, n_states);
@@ -160,7 +172,6 @@ impl POMDPAgent {
         agent.gamma = gamma;
         agent.policy_depth = policy_depth;
 
-        // For depth > 1, regenerate E as uniform over all policy sequences
         if policy_depth > 1 {
             let n_policies = agent.n_actions.pow(policy_depth as u32);
             let n_pol_f = n_policies as f64;
@@ -187,7 +198,8 @@ impl POMDPAgent {
 
     fn infer_states(&mut self, observation: usize) {
         if let Some(action) = self.last_action {
-            let prior = self.b_matrix[action].transpose() * &self.state_belief;
+            // B * state_belief: prior(s') = sum_s P(s'|s, action) * belief(s)
+            let prior = &self.b_matrix[action] * &self.state_belief;
             let likelihood = self.a_matrix.row(observation).transpose();
             let mut posterior = prior.component_mul(&likelihood);
             let sum = posterior.sum().max(1e-10);
@@ -196,35 +208,41 @@ impl POMDPAgent {
         }
     }
 
+    /// Update pA concentration parameters and recompute A matrix from the posterior.
     fn update_a(&mut self, observation: usize) {
         if let Some(ref mut pa) = self.pa_matrix {
             for col in 0..pa.ncols() {
                 pa[(observation, col)] += self.state_belief[col];
             }
+            // Recompute A from pA: A[o,s] = pA[o,s] / sum_o'(pA[o',s])
+            for col in 0..pa.ncols() {
+                let col_sum: f64 = (0..pa.nrows()).map(|row| pa[(row, col)]).sum();
+                if col_sum > 1e-10 {
+                    for row in 0..pa.nrows() {
+                        self.a_matrix[(row, col)] = pa[(row, col)] / col_sum;
+                    }
+                }
+            }
         }
     }
 
-    /// Compute expected free energy G for a single-step policy (one action).
-    /// G_a = information_gain(a) + pragmatic_value(a)
-    ///
-    /// Information gain: expected reduction in uncertainty about states
-    /// Pragmatic value: expected log-preference of observations under C
-    fn expected_free_energy_single(&self, action: usize) -> f64 {
-        let qs_next = &self.b_matrix[action] * &self.state_belief;
+    /// Compute neg-G for a single step: predicted state qs_next → (neg_g, qs_next).
+    /// Returns the negative expected free energy contribution (higher = preferred)
+    /// and the predicted next-state distribution.
+    fn efe_step(&self, qs: &DVector<f64>, action: usize) -> (f64, DVector<f64>) {
+        let qs_next = &self.b_matrix[action] * qs;
+        let qo = &self.a_matrix * &qs_next;
 
         // Pragmatic value: E_q(o|π)[ln p(o|C)]
-        // q(o|π) = A · q(s')
-        let qo = &self.a_matrix * &qs_next;
         let pragmatic: f64 = qo
             .iter()
             .zip(self.c_vector.iter())
             .map(|(&qo_i, &c_i)| qo_i * c_i)
             .sum();
 
-        // Information gain: E_q(o|π)[D_KL[q(s|o,π) || q(s|π)]]
-        // Approximated as negative entropy of predicted observations
-        // H[q(o|π)] = -sum q(o_i) ln q(o_i)
-        let info_gain: f64 = qo
+        // Information gain approximation: H[q(o|π)] (observation entropy)
+        // Upper bound on mutual information I(s;o|π) = H(o|π) - H(o|s,π)
+        let obs_entropy: f64 = qo
             .iter()
             .map(|&qo_i| {
                 if qo_i > 1e-10 {
@@ -235,16 +253,17 @@ impl POMDPAgent {
             })
             .sum();
 
-        // G = -info_gain - pragmatic (we want to minimize G, so more negative = better)
-        // Return negative G so higher = preferred (used in softmax)
-        info_gain + pragmatic
+        (obs_entropy + pragmatic, qs_next)
     }
 
-    /// Enumerate all length-`depth` action sequences and compute G for each.
+    /// Enumerate all length-`depth` action sequences and compute neg-G for each.
     fn enumerate_policies(&self) -> Vec<(Vec<usize>, f64)> {
         if self.policy_depth <= 1 {
             return (0..self.n_actions)
-                .map(|a| (vec![a], self.expected_free_energy_single(a)))
+                .map(|a| {
+                    let (g, _) = self.efe_step(&self.state_belief, a);
+                    (vec![a], g)
+                })
                 .collect();
         }
 
@@ -259,31 +278,11 @@ impl POMDPAgent {
                 remainder /= self.n_actions;
             }
 
-            // Evaluate G over the trajectory
             let mut g = 0.0;
             let mut qs = self.state_belief.clone();
             for &a in &seq {
-                let qs_next = &self.b_matrix[a] * &qs;
-                let qo = &self.a_matrix * &qs_next;
-
-                let pragmatic: f64 = qo
-                    .iter()
-                    .zip(self.c_vector.iter())
-                    .map(|(&qo_i, &c_i)| qo_i * c_i)
-                    .sum();
-
-                let info_gain: f64 = qo
-                    .iter()
-                    .map(|&qo_i| {
-                        if qo_i > 1e-10 {
-                            -qo_i * qo_i.ln()
-                        } else {
-                            0.0
-                        }
-                    })
-                    .sum();
-
-                g += info_gain + pragmatic;
+                let (step_g, qs_next) = self.efe_step(&qs, a);
+                g += step_g;
                 qs = qs_next;
             }
 
@@ -301,7 +300,7 @@ impl POMDPAgent {
         let neg_g_values: Vec<f64> = policies.iter().map(|(_, g)| *g).collect();
         let max_g = neg_g_values
             .iter()
-            .cloned()
+            .copied()
             .fold(f64::NEG_INFINITY, f64::max);
 
         let mut policy_posterior: Vec<f64> = neg_g_values
@@ -331,16 +330,18 @@ impl POMDPAgent {
             action_probs[first_action] += prob;
         }
 
-        // Apply α (action precision) softmax
+        // Apply α (action precision): P(a)^α / Σ P(a_j)^α
         let max_a = action_probs
             .iter()
-            .cloned()
+            .copied()
             .fold(f64::NEG_INFINITY, f64::max);
+        let log_max = if max_a > 1e-10 { max_a.ln() } else { -23.0 };
+
         let exp_probs: Vec<f64> = action_probs
             .iter()
             .map(|&p| {
                 let log_p = if p > 1e-10 { p.ln() } else { -23.0 };
-                ((log_p - max_a.ln().max(-23.0)) * self.alpha).exp()
+                ((log_p - log_max) * self.alpha).exp()
             })
             .collect();
 
@@ -349,7 +350,6 @@ impl POMDPAgent {
     }
 
     /// Update beliefs given observation and return action probabilities without sampling.
-    /// Used by parameter recovery to compute log-likelihood of observed (obs, action) pairs.
     pub fn action_probabilities(&mut self, observation: usize) -> DVector<f64> {
         if self.last_action.is_none() {
             self.state_belief = self.d_vector.clone();
@@ -444,6 +444,41 @@ mod tests {
     }
 
     #[test]
+    fn test_observation_probs_length_validated() {
+        let result = POMDPAgent::new(3, Some(vec![0.8, 0.2]), None, vec![0.7, 0.3], None, 1.0, false);
+        assert!(result.is_err(), "Should reject observation_probs.len() != n_states");
+    }
+
+    #[test]
+    fn test_initial_belief_length_validated() {
+        let result = POMDPAgent::new(3, None, None, vec![0.7, 0.3], Some(vec![0.5, 0.5]), 1.0, false);
+        assert!(result.is_err(), "Should reject initial_belief.len() != n_states");
+    }
+
+    #[test]
+    fn test_state_inference_deterministic_transition() -> Result<(), OneManyError> {
+        // After choosing action 0, state belief should be concentrated at state 0
+        let mut agent = POMDPAgent::new(
+            3,
+            Some(vec![0.8, 0.2, 0.2]),
+            None,
+            vec![0.7, 0.3],
+            None,
+            8.0,
+            false,
+        )?;
+        // Force action 0
+        agent.last_action = Some(0);
+        agent.infer_states(0);
+        // After B * belief for deterministic transition to state 0,
+        // prior = [1, 0, 0], posterior ∝ [A[0,0], 0, 0] = [0.8, 0, 0] → [1, 0, 0]
+        assert_relative_eq!(agent.state_belief[0], 1.0, epsilon = 1e-6);
+        assert_relative_eq!(agent.state_belief[1], 0.0, epsilon = 1e-6);
+        assert_relative_eq!(agent.state_belief[2], 0.0, epsilon = 1e-6);
+        Ok(())
+    }
+
+    #[test]
     fn test_pomdp_agent_state_inference() -> Result<(), OneManyError> {
         let mut agent = POMDPAgent::new(
             3,
@@ -463,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pomdp_agent_learning() -> Result<(), OneManyError> {
+    fn test_pomdp_agent_learning_updates_a_matrix() -> Result<(), OneManyError> {
         let mut agent = POMDPAgent::new(
             3,
             Some(vec![0.5, 0.5, 0.5]),
@@ -474,22 +509,28 @@ mod tests {
             true,
         )?;
         agent.rng = StdRng::seed_from_u64(42);
+
+        let a_before = agent.a_matrix.clone();
         for _ in 0..10 {
             agent.act(1)?;
         }
+
+        // pA should have accumulated counts
         if let Some(pa) = &agent.pa_matrix {
-            // Row 1 should have accumulated counts
             for col in 0..3 {
                 assert!(pa[(1, col)] > 1.0, "pA should accumulate for observation 1");
             }
         }
+
+        // A matrix should have been updated from pA (not frozen at initial values)
+        let a_changed = (0..agent.a_matrix.nrows())
+            .any(|r| (0..agent.a_matrix.ncols()).any(|c| (agent.a_matrix[(r, c)] - a_before[(r, c)]).abs() > 1e-6));
+        assert!(a_changed, "A matrix should be updated from pA during learning");
         Ok(())
     }
 
     #[test]
     fn test_pomdp_agent_policy_preference() -> Result<(), OneManyError> {
-        // preferences vec is now [p(obs1), p(obs2)] = log-transformed internally
-        // Bandit 0 has prob 0.9 of obs 1 → strong preference toward bandit 0
         let mut agent = POMDPAgent::new(
             2,
             Some(vec![0.9, 0.1]),
@@ -534,8 +575,6 @@ mod tests {
 
     #[test]
     fn test_expected_free_energy_prefers_informative_actions() -> Result<(), OneManyError> {
-        // Bandit 0: 0.9 prob of obs 1, Bandit 1: 0.1 prob of obs 1
-        // With strong preference for obs 1, agent should prefer bandit 0
         let agent = POMDPAgent::new(
             2,
             Some(vec![0.9, 0.1]),
@@ -545,8 +584,8 @@ mod tests {
             8.0,
             false,
         )?;
-        let g0 = agent.expected_free_energy_single(0);
-        let g1 = agent.expected_free_energy_single(1);
+        let (g0, _) = agent.efe_step(&agent.state_belief, 0);
+        let (g1, _) = agent.efe_step(&agent.state_belief, 1);
         assert!(
             g0 > g1,
             "Action 0 should have higher neg-G (preferred): g0={g0}, g1={g1}"
@@ -562,15 +601,14 @@ mod tests {
             None,
             vec![0.7, 0.3],
             None,
-            0.5,  // alpha
-            16.0, // gamma
-            2,    // policy_depth
+            0.5,
+            16.0,
+            2,
             false,
         )?;
         assert_relative_eq!(agent.alpha(), 0.5);
         assert_relative_eq!(agent.gamma(), 16.0);
         assert_eq!(agent.policy_depth, 2);
-        // 3 actions, depth 2 → 9 policies
         assert_eq!(agent.e_vector.len(), 9);
         Ok(())
     }

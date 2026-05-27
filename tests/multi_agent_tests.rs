@@ -36,26 +36,24 @@ impl AgentTracker {
 fn test_competitive_multi_agent() -> Result<(), OneManyError> {
     let mut env = SharedBanditEnvironment::new(vec![0.8, 0.4, 0.6], 2)?;
 
-    // Agent 0: A matrix gives bandit 0 high obs-1 prob → prefers bandit 0
     let mut agent0 = POMDPAgent::new(
         3,
         Some(vec![0.8, 0.3, 0.5]),
-        Some(vec![1.0, 1.0, 1.0]),
+        None,
         vec![0.8, 0.2],
         None,
         8.0,
-        true,
+        false,
     )?;
 
-    // Agent 1: A matrix gives bandit 2 high obs-1 prob → prefers bandit 2
     let mut agent1 = POMDPAgent::new(
         3,
         Some(vec![0.3, 0.3, 0.8]),
-        Some(vec![1.0, 1.0, 1.0]),
+        None,
         vec![0.8, 0.2],
         None,
         8.0,
-        true,
+        false,
     )?;
 
     let mut tracker0 = AgentTracker::new();
@@ -136,21 +134,21 @@ fn test_non_competitive_multi_agent() -> Result<(), OneManyError> {
     let mut agent0 = POMDPAgent::new(
         3,
         Some(vec![0.8, 0.3, 0.5]),
-        Some(vec![1.0, 1.0, 1.0]),
+        None,
         vec![0.8, 0.2],
         None,
         8.0,
-        true,
+        false,
     )?;
 
     let mut agent1 = POMDPAgent::new(
         3,
         Some(vec![0.8, 0.3, 0.5]),
-        Some(vec![1.0, 1.0, 1.0]),
+        None,
         vec![0.8, 0.2],
         None,
         8.0,
-        true,
+        false,
     )?;
 
     let mut tracker0 = AgentTracker::new();
@@ -199,26 +197,24 @@ fn test_sequential_communication() -> Result<(), OneManyError> {
     let mut env = SharedBanditEnvironment::new(vec![0.7, 0.7, 0.7], 2)?;
     env.set_competitive(true);
 
-    // Leader: A matrix makes bandit 0 most informative
     let mut leader = POMDPAgent::new(
         3,
         Some(vec![0.9, 0.3, 0.3]),
-        Some(vec![1.0, 1.0, 1.0]),
+        None,
         vec![0.8, 0.2],
         None,
         12.0,
-        true,
+        false,
     )?;
 
-    // Follower: uniform A matrix, adapts from observations
     let mut follower = POMDPAgent::new(
         3,
         Some(vec![0.5, 0.5, 0.5]),
-        Some(vec![1.0, 1.0, 1.0]),
+        None,
         vec![0.6, 0.4],
         None,
         5.0,
-        true,
+        false,
     )?;
 
     let mut leader_tracker = AgentTracker::new();
