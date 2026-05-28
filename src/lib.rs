@@ -13,10 +13,10 @@ pub use communication::{
     AgentMessage, CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel, Message,
     MessageContent,
 };
-pub use group::{GroupAgent, GroupAgentBuilder, VotingAgent};
+pub use group::{GroupAgent, GroupAgentBuilder, VotingAgent, VotingMode};
 pub use simulation::{
-    RecoveryResult, TrialData, experiment_deterministic, experiment_identical,
-    experiment_varying_alpha, experiment_varying_preferences, log_likelihood,
+    RecoveryResult, TrialData, experiment_certainty_weighted, experiment_deterministic,
+    experiment_identical, experiment_varying_alpha, experiment_varying_preferences, log_likelihood,
     parameter_recovery_single, recover_alpha, run_group_simulation, run_single_simulation,
 };
 

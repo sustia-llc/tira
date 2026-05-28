@@ -255,6 +255,29 @@ pub fn experiment_varying_preferences(
     Ok((data, result))
 }
 
+/// Extension 5: certainty-weighted voting with varying α.
+/// Agents report full action distributions; the active agent forms a
+/// confidence-weighted mixture (§4.1: "certainty-weighted Bayesian model average").
+#[allow(clippy::missing_errors_doc)]
+pub fn experiment_certainty_weighted(
+    n_internal: usize,
+    mean_alpha: f64,
+    n_trials: usize,
+) -> Result<(TrialData, RecoveryResult), OneManyError> {
+    let alphas = dirichlet_alphas(n_internal, mean_alpha);
+    let mut group = GroupAgentBuilder::new(3)
+        .n_internal(n_internal)
+        .observation_probs(BANDIT_PROBS.to_vec())
+        .preferences(PREFERENCES.to_vec())
+        .certainty_weighted(true)
+        .build_varying_alpha(&alphas)?;
+
+    let mut env = BanditEnvironment::new(BANDIT_PROBS.to_vec())?;
+    let data = run_group_simulation(&mut group, &mut env, n_trials)?;
+    let result = recover_alpha(&data, 3, &BANDIT_PROBS, &PREFERENCES)?;
+    Ok((data, result))
+}
+
 /// Single-agent parameter recovery for validation (§3.1 / Figure 4).
 #[allow(clippy::missing_errors_doc)]
 pub fn parameter_recovery_single(
@@ -417,6 +440,17 @@ mod tests {
         assert_eq!(data.len(), 200);
         println!(
             "Exp4: n=8, α=0.5 (varying prefs), group α={:.3}",
+            result.estimated_alpha
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_experiment_certainty_weighted_runs() -> Result<(), OneManyError> {
+        let (data, result) = experiment_certainty_weighted(8, 0.5, 200)?;
+        assert_eq!(data.len(), 200);
+        println!(
+            "Exp5-CW: n=8, mean α=0.5 (certainty-weighted), group α={:.3}",
             result.estimated_alpha
         );
         Ok(())

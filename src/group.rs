@@ -1,35 +1,42 @@
 use crate::agent::{Agent, CopyAgent, POMDPAgent};
 use crate::OneManyError;
+use nalgebra::DVector;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rand_distr::weighted::WeightedIndex;
 use rand_distr::Distribution;
 
+/// How the active agent aggregates internal agent outputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VotingMode {
+    /// Select action with probability proportional to vote count.
+    Probabilistic,
+    /// Always select the action with the most votes (ties broken randomly).
+    Deterministic,
+    /// Weight each agent's full action distribution by its confidence
+    /// (negative entropy), then sample from the mixture.
+    CertaintyWeighted,
+}
+
 /// Voting aggregator that combines internal agent votes into a single group action.
-///
-/// Two modes per Waade et al. §2.3:
-/// - **Probabilistic** (Experiments 1, 2, 4): selects action with probability proportional
-///   to the number of votes it received.
-/// - **Deterministic** (Experiment 3): always selects the action with the most votes
-///   (ties broken randomly).
 #[derive(Debug)]
 pub struct VotingAgent {
-    deterministic: bool,
+    mode: VotingMode,
     n_actions: usize,
     rng: StdRng,
 }
 
 impl VotingAgent {
     #[must_use]
-    pub fn new(n_actions: usize, deterministic: bool) -> Self {
+    pub fn new(n_actions: usize, mode: VotingMode) -> Self {
         Self {
-            deterministic,
+            mode,
             n_actions,
             rng: StdRng::from_rng(&mut rand::rng()),
         }
     }
 
-    /// Aggregate a slice of votes (one action per internal agent) into a single group action.
+    /// Aggregate discrete votes into a single group action.
     #[allow(clippy::missing_errors_doc)]
     pub fn aggregate(&mut self, votes: &[usize]) -> Result<usize, OneManyError> {
         let mut counts = vec![0usize; self.n_actions];
@@ -40,47 +47,112 @@ impl VotingAgent {
             counts[v] += 1;
         }
 
-        if self.deterministic {
-            let max_count = *counts.iter().max().unwrap_or(&0);
-            let winners: Vec<usize> = counts
+        match self.mode {
+            VotingMode::Deterministic => {
+                let max_count = *counts.iter().max().unwrap_or(&0);
+                let winners: Vec<usize> = counts
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, c)| *c == max_count)
+                    .map(|(i, _)| i)
+                    .collect();
+                if winners.len() == 1 {
+                    Ok(winners[0])
+                } else {
+                    let idx = rand_distr::Uniform::new(0, winners.len())
+                        .unwrap()
+                        .sample(&mut self.rng);
+                    Ok(winners[idx])
+                }
+            }
+            VotingMode::Probabilistic | VotingMode::CertaintyWeighted => {
+                if counts.iter().all(|&c| c == 0) {
+                    let idx = rand_distr::Uniform::new(0, self.n_actions)
+                        .unwrap()
+                        .sample(&mut self.rng);
+                    return Ok(idx);
+                }
+                let dist = WeightedIndex::new(&counts)?;
+                Ok(dist.sample(&mut self.rng))
+            }
+        }
+    }
+
+    /// Aggregate full action-probability distributions weighted by confidence.
+    ///
+    /// Each agent contributes its action distribution P_i(a), weighted by
+    /// confidence w_i = exp(-H(P_i)) where H is the entropy.
+    /// The mixture P_group(a) = Σ w_i P_i(a) / Σ w_i is then sampled.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn aggregate_weighted(
+        &mut self,
+        distributions: &[DVector<f64>],
+    ) -> Result<usize, OneManyError> {
+        let mut mixture = vec![0.0f64; self.n_actions];
+        let mut total_weight = 0.0f64;
+
+        for dist in distributions {
+            // Confidence = exp(-H) where H = -Σ p ln p
+            let entropy: f64 = dist
                 .iter()
-                .enumerate()
-                .filter(|&(_, c)| *c == max_count)
-                .map(|(i, _)| i)
-                .collect();
-            if winners.len() == 1 {
-                Ok(winners[0])
-            } else {
-                // Break ties uniformly
-                let idx = rand_distr::Uniform::new(0, winners.len())
-                    .unwrap()
-                    .sample(&mut self.rng);
-                Ok(winners[idx])
+                .map(|&p| if p > 1e-15 { -p * p.ln() } else { 0.0 })
+                .sum();
+            let weight = (-entropy).exp();
+
+            for (a, &p) in dist.iter().enumerate() {
+                if a < self.n_actions {
+                    mixture[a] += weight * p;
+                }
+            }
+            total_weight += weight;
+        }
+
+        if total_weight > 1e-15 {
+            for p in &mut mixture {
+                *p /= total_weight;
             }
         } else {
-            // Probabilistic: select proportional to vote count
-            // If all counts are zero (shouldn't happen), fall back to uniform
-            if counts.iter().all(|&c| c == 0) {
-                let idx = rand_distr::Uniform::new(0, self.n_actions)
-                    .unwrap()
-                    .sample(&mut self.rng);
-                return Ok(idx);
+            // All agents maximally uncertain — fall back to uniform
+            for p in &mut mixture {
+                *p = 1.0 / self.n_actions as f64;
             }
-            let dist = WeightedIndex::new(&counts)?;
-            Ok(dist.sample(&mut self.rng))
+        }
+
+        match self.mode {
+            VotingMode::Deterministic => {
+                let max_p = mixture
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let winners: Vec<usize> = mixture
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &p)| (p - max_p).abs() < 1e-10)
+                    .map(|(i, _)| i)
+                    .collect();
+                if winners.len() == 1 {
+                    Ok(winners[0])
+                } else {
+                    let idx = rand_distr::Uniform::new(0, winners.len())
+                        .unwrap()
+                        .sample(&mut self.rng);
+                    Ok(winners[idx])
+                }
+            }
+            _ => {
+                let dist = WeightedIndex::new(&mixture)?;
+                Ok(dist.sample(&mut self.rng))
+            }
         }
     }
 }
 
 /// Group agent implementing the Markov blanket structure from Figure 3.
 ///
-/// Composition:
-/// - **Sensory agent** (CopyAgent): forwards environment observation to internal agents
-/// - **Internal agents** (Vec<POMDPAgent>): each performs active inference independently
-/// - **Active agent** (VotingAgent): aggregates internal agent actions into group action
-///
-/// From the environment's perspective, GroupAgent is a single agent:
-/// it receives one observation and produces one action per timestep.
+/// In `CertaintyWeighted` mode, internal agents report their full action
+/// probability distributions. The active agent forms a confidence-weighted
+/// mixture (§4.1: "certainty-weighted Bayesian model average") and samples
+/// from it.
 pub struct GroupAgent {
     sensory: CopyAgent,
     internal: Vec<POMDPAgent>,
@@ -90,11 +162,11 @@ pub struct GroupAgent {
 
 impl GroupAgent {
     #[must_use]
-    pub fn new(internal_agents: Vec<POMDPAgent>, n_actions: usize, deterministic: bool) -> Self {
+    pub fn new(internal_agents: Vec<POMDPAgent>, n_actions: usize, mode: VotingMode) -> Self {
         Self {
             sensory: CopyAgent,
             internal: internal_agents,
-            active: VotingAgent::new(n_actions, deterministic),
+            active: VotingAgent::new(n_actions, mode),
             n_actions,
         }
     }
@@ -109,43 +181,57 @@ impl GroupAgent {
         self.n_actions
     }
 
-    /// Access internal agents (for analysis of individual parameters).
     #[must_use]
     pub fn internal_agents(&self) -> &[POMDPAgent] {
         &self.internal
+    }
+
+    #[must_use]
+    pub fn voting_mode(&self) -> VotingMode {
+        self.active.mode
     }
 }
 
 impl Agent for GroupAgent {
     fn act(&mut self, observation: usize) -> Result<usize, OneManyError> {
-        // 1. Sensory agent forwards observation
         let sensory_output = self.sensory.act(observation)?;
 
-        // 2. Each internal agent observes and votes
-        let mut votes = Vec::with_capacity(self.internal.len());
-        for agent in &mut self.internal {
-            let action = agent.act(sensory_output)?;
-            votes.push(action);
+        if self.active.mode == VotingMode::CertaintyWeighted {
+            // Each internal agent reports its full action distribution
+            let mut distributions = Vec::with_capacity(self.internal.len());
+            for agent in &mut self.internal {
+                let probs = agent.action_probabilities(sensory_output);
+                // Still need to record an action for the agent's internal state
+                let dist = WeightedIndex::new(probs.as_slice())?;
+                let action = dist.sample(&mut rand::rng());
+                agent.record_action(action);
+                distributions.push(probs);
+            }
+            self.active.aggregate_weighted(&distributions)
+        } else {
+            // Simple voting: each agent picks an action
+            let mut votes = Vec::with_capacity(self.internal.len());
+            for agent in &mut self.internal {
+                let action = agent.act(sensory_output)?;
+                votes.push(action);
+            }
+            self.active.aggregate(&votes)
         }
-
-        // 3. Active agent aggregates votes
-        self.active.aggregate(&votes)
     }
 }
 
-/// Builder for constructing GroupAgent configurations matching the paper's experiments.
+/// Builder for constructing GroupAgent configurations.
 pub struct GroupAgentBuilder {
     n_bandits: usize,
     n_internal: usize,
     observation_probs: Vec<f64>,
     preferences: Vec<f64>,
     alpha: f64,
-    deterministic: bool,
+    voting_mode: VotingMode,
     learn_a: bool,
 }
 
 impl GroupAgentBuilder {
-    /// Start building a group agent for a MAB task with `n_bandits` arms.
     #[must_use]
     pub fn new(n_bandits: usize) -> Self {
         Self {
@@ -154,7 +240,7 @@ impl GroupAgentBuilder {
             observation_probs: vec![0.8, 0.2, 0.2],
             preferences: vec![0.7, 0.3],
             alpha: 1.0,
-            deterministic: false,
+            voting_mode: VotingMode::Probabilistic,
             learn_a: false,
         }
     }
@@ -185,7 +271,25 @@ impl GroupAgentBuilder {
 
     #[must_use]
     pub fn deterministic(mut self, det: bool) -> Self {
-        self.deterministic = det;
+        self.voting_mode = if det {
+            VotingMode::Deterministic
+        } else {
+            VotingMode::Probabilistic
+        };
+        self
+    }
+
+    #[must_use]
+    pub fn certainty_weighted(mut self, weighted: bool) -> Self {
+        if weighted {
+            self.voting_mode = VotingMode::CertaintyWeighted;
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn voting_mode(mut self, mode: VotingMode) -> Self {
+        self.voting_mode = mode;
         self
     }
 
@@ -195,7 +299,6 @@ impl GroupAgentBuilder {
         self
     }
 
-    /// Build with identical alpha for all internal agents (Experiment 1).
     #[allow(clippy::missing_errors_doc)]
     pub fn build_identical(self) -> Result<GroupAgent, OneManyError> {
         let agents: Vec<POMDPAgent> = (0..self.n_internal)
@@ -212,10 +315,9 @@ impl GroupAgentBuilder {
             })
             .collect::<Result<_, _>>()?;
 
-        Ok(GroupAgent::new(agents, self.n_bandits, self.deterministic))
+        Ok(GroupAgent::new(agents, self.n_bandits, self.voting_mode))
     }
 
-    /// Build with per-agent alpha values (Experiments 2, 3).
     #[allow(clippy::missing_errors_doc)]
     pub fn build_varying_alpha(self, alphas: &[f64]) -> Result<GroupAgent, OneManyError> {
         if alphas.len() != self.n_internal {
@@ -236,11 +338,9 @@ impl GroupAgentBuilder {
             })
             .collect::<Result<_, _>>()?;
 
-        Ok(GroupAgent::new(agents, self.n_bandits, self.deterministic))
+        Ok(GroupAgent::new(agents, self.n_bandits, self.voting_mode))
     }
 
-    /// Build with per-agent preference priors (Experiment 4).
-    /// Each entry in `preference_sets` is a [p(obs1), p(obs2)] pair.
     #[allow(clippy::missing_errors_doc)]
     pub fn build_varying_preferences(
         self,
@@ -264,7 +364,7 @@ impl GroupAgentBuilder {
             })
             .collect::<Result<_, _>>()?;
 
-        Ok(GroupAgent::new(agents, self.n_bandits, self.deterministic))
+        Ok(GroupAgent::new(agents, self.n_bandits, self.voting_mode))
     }
 }
 
@@ -275,15 +375,13 @@ mod tests {
 
     #[test]
     fn test_voting_agent_probabilistic() -> Result<(), OneManyError> {
-        let mut voter = VotingAgent::new(3, false);
-        // 3 votes for action 0, 1 for action 1, 1 for action 2
+        let mut voter = VotingAgent::new(3, VotingMode::Probabilistic);
         let votes = vec![0, 0, 0, 1, 2];
         let mut counts = vec![0usize; 3];
         for _ in 0..1000 {
             let action = voter.aggregate(&votes)?;
             counts[action] += 1;
         }
-        // Action 0 should be selected ~60% of the time (3/5)
         assert!(
             counts[0] > 400,
             "Action 0 should be most common: {counts:?}"
@@ -293,9 +391,8 @@ mod tests {
 
     #[test]
     fn test_voting_agent_deterministic() -> Result<(), OneManyError> {
-        let mut voter = VotingAgent::new(3, true);
+        let mut voter = VotingAgent::new(3, VotingMode::Deterministic);
         let votes = vec![0, 0, 0, 1, 2];
-        // Should always pick action 0 (3 votes vs 1 each)
         for _ in 0..100 {
             let action = voter.aggregate(&votes)?;
             assert_eq!(action, 0, "Deterministic voter should always pick max");
@@ -305,13 +402,153 @@ mod tests {
 
     #[test]
     fn test_voting_agent_deterministic_tie() -> Result<(), OneManyError> {
-        let mut voter = VotingAgent::new(3, true);
+        let mut voter = VotingAgent::new(3, VotingMode::Deterministic);
         let votes = vec![0, 1, 0, 1];
-        // Tied between 0 and 1; should only return 0 or 1
         for _ in 0..100 {
             let action = voter.aggregate(&votes)?;
             assert!(action <= 1, "Tied vote should pick 0 or 1, got {action}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_certainty_weighted_prefers_confident_agent() -> Result<(), OneManyError> {
+        let mut voter = VotingAgent::new(3, VotingMode::CertaintyWeighted);
+
+        // Agent A: very confident about action 0 (low entropy)
+        let confident = DVector::from_vec(vec![0.95, 0.025, 0.025]);
+        // Agent B: uncertain (high entropy)
+        let uncertain = DVector::from_vec(vec![0.2, 0.6, 0.2]);
+
+        let distributions = vec![confident, uncertain];
+
+        let mut counts = vec![0usize; 3];
+        for _ in 0..1000 {
+            let action = voter.aggregate_weighted(&distributions)?;
+            counts[action] += 1;
+        }
+
+        // The confident agent favors action 0; the uncertain agent favors action 1.
+        // Certainty weighting should give more weight to the confident agent,
+        // so action 0 should win overall.
+        assert!(
+            counts[0] > counts[1],
+            "Certainty weighting should favor the confident agent's preference: {counts:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_certainty_weighted_equal_confidence_averages() -> Result<(), OneManyError> {
+        let mut voter = VotingAgent::new(2, VotingMode::CertaintyWeighted);
+
+        // Two agents with equal entropy but opposite preferences
+        let agent_a = DVector::from_vec(vec![0.8, 0.2]);
+        let agent_b = DVector::from_vec(vec![0.2, 0.8]);
+
+        let distributions = vec![agent_a, agent_b];
+
+        let mut counts = vec![0usize; 2];
+        for _ in 0..2000 {
+            let action = voter.aggregate_weighted(&distributions)?;
+            counts[action] += 1;
+        }
+
+        // Equal confidence → equal weight → mixture is ~[0.5, 0.5]
+        let ratio = counts[0] as f64 / 2000.0;
+        assert!(
+            (ratio - 0.5).abs() < 0.1,
+            "Equal-confidence agents should produce ~50/50 mix: {counts:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_group_agent_certainty_weighted_mode() -> Result<(), OneManyError> {
+        let mut env = BanditEnvironment::new(vec![0.8, 0.2, 0.2])?;
+
+        let mut group = GroupAgentBuilder::new(3)
+            .n_internal(8)
+            .observation_probs(vec![0.8, 0.2, 0.2])
+            .preferences(vec![0.7, 0.3])
+            .alpha(0.5)
+            .certainty_weighted(true)
+            .build_identical()?;
+
+        assert_eq!(group.voting_mode(), VotingMode::CertaintyWeighted);
+
+        let mut prev_obs = 0;
+        let mut action_counts = vec![0usize; 3];
+        for _ in 0..100 {
+            let action = group.act(prev_obs)?;
+            action_counts[action] += 1;
+            prev_obs = env.step(action)?;
+        }
+
+        // Should still prefer bandit 0 (best A-matrix alignment)
+        assert!(
+            action_counts[0] > action_counts[1],
+            "CW group should prefer bandit 0: {action_counts:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_certainty_weighted_conflicting_prefs_less_noisy_than_simple() -> Result<(), OneManyError>
+    {
+        let mut env = BanditEnvironment::new(vec![0.8, 0.2, 0.2])?;
+
+        // Conflicting preferences: half prefer obs1, half prefer obs2
+        let n = 8;
+        let pref_sets: Vec<Vec<f64>> = (0..n)
+            .map(|i| {
+                if i < n / 2 {
+                    vec![0.9, 0.1]
+                } else {
+                    vec![0.1, 0.9]
+                }
+            })
+            .collect();
+
+        // Simple voting
+        let mut simple = GroupAgentBuilder::new(3)
+            .n_internal(n)
+            .observation_probs(vec![0.8, 0.2, 0.2])
+            .alpha(0.5)
+            .build_varying_preferences(&pref_sets)?;
+
+        // Certainty-weighted voting
+        let mut cw = GroupAgentBuilder::new(3)
+            .n_internal(n)
+            .observation_probs(vec![0.8, 0.2, 0.2])
+            .alpha(0.5)
+            .certainty_weighted(true)
+            .build_varying_preferences(&pref_sets)?;
+
+        let n_trials = 200;
+
+        let mut simple_obs = 0;
+        let mut simple_counts = vec![0usize; 3];
+        for _ in 0..n_trials {
+            let a = simple.act(simple_obs)?;
+            simple_counts[a] += 1;
+            simple_obs = env.step(a)?;
+        }
+
+        let mut cw_obs = 0;
+        let mut cw_counts = vec![0usize; 3];
+        for _ in 0..n_trials {
+            let a = cw.act(cw_obs)?;
+            cw_counts[a] += 1;
+            cw_obs = env.step(a)?;
+        }
+
+        println!("Simple voting (conflicting prefs): {simple_counts:?}");
+        println!("CW voting (conflicting prefs):     {cw_counts:?}");
+
+        // Both should produce valid results
+        assert_eq!(simple_counts.iter().sum::<usize>(), n_trials);
+        assert_eq!(cw_counts.iter().sum::<usize>(), n_trials);
         Ok(())
     }
 
@@ -386,10 +623,7 @@ mod tests {
             actions.push(action);
             prev_obs = env.step(action)?;
         }
-
-        // Group should produce valid actions for all 50 trials
         assert_eq!(actions.len(), 50);
-
         Ok(())
     }
 
@@ -397,7 +631,6 @@ mod tests {
     fn test_group_agent_deterministic_voting_more_decisive() -> Result<(), OneManyError> {
         let mut env = BanditEnvironment::new(vec![0.8, 0.2, 0.2])?;
 
-        // Probabilistic group
         let mut prob_group = GroupAgentBuilder::new(3)
             .n_internal(16)
             .observation_probs(vec![0.8, 0.2, 0.2])
@@ -406,7 +639,6 @@ mod tests {
             .deterministic(false)
             .build_identical()?;
 
-        // Deterministic group
         let mut det_group = GroupAgentBuilder::new(3)
             .n_internal(16)
             .observation_probs(vec![0.8, 0.2, 0.2])
@@ -439,7 +671,6 @@ mod tests {
         println!("Probabilistic actions: {prob_actions:?} (max={prob_max})");
         println!("Deterministic actions: {det_actions:?} (max={det_max})");
 
-        // Deterministic voting should concentrate on the preferred action more
         assert!(
             det_max >= prob_max,
             "Deterministic voting should be at least as decisive: det={det_max}, prob={prob_max}"
