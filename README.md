@@ -12,14 +12,15 @@ A collective of active inference agents, arranged in a Markov blanket structure,
 
 ## Results
 
-All four qualitative findings from the paper are reproduced:
+All four qualitative findings from the paper are reproduced, plus an extension:
 
-| Experiment | Setup | Paper prediction | Result |
-|------------|-------|-----------------|--------|
+| Experiment | Setup | Prediction | Result |
+|------------|-------|------------|--------|
 | 1 | Identical agents | group α ≈ individual α | Tracks identity line |
 | 2 | Varying α (Dirichlet) | Sub-linear scaling | Below identity line |
 | 3 | Deterministic voting | Super-linear scaling | Steep increase, saturates with n |
 | 4 | Varying preferences (Beta) | Strongly reduced group α | Crushed near 0 |
+| 5 | Certainty-weighted voting | More faithful average (§4.1) | Closer to identity than Exp 2 |
 
 ### Figure 4 — Parameter Recovery
 
@@ -30,6 +31,13 @@ All four qualitative findings from the paper are reproduced:
 ### Figure 5 — Simulation Experiments
 
 ![Experiment results](plots/figure5_experiments.png)
+
+### Figure 6 — Certainty-Weighted Voting vs Simple Voting
+
+Agents report full action distributions; the active agent weights by confidence (exp(-entropy)).
+CW voting (right) tracks closer to the identity line than simple probabilistic voting (left).
+
+![Certainty-weighted comparison](plots/figure6_certainty_weighted.png)
 
 ## Architecture
 
@@ -54,8 +62,8 @@ Environment (BanditEnvironment)
 | Module | Role |
 |--------|------|
 | `src/agent.rs` | POMDP active inference agent (A-E matrices, expected free energy G, α/γ precision) |
-| `src/group.rs` | GroupAgent, VotingAgent, GroupAgentBuilder |
-| `src/simulation.rs` | Simulation runner, parameter recovery (grid search + half-normal prior), experiment factories |
+| `src/group.rs` | VotingMode, GroupAgent, VotingAgent (discrete + certainty-weighted), GroupAgentBuilder |
+| `src/simulation.rs` | Simulation runner, parameter recovery (grid search + half-normal prior), 5 experiment factories |
 | `src/communication.rs` | Flume-based inter-agent messaging (for extended scenarios) |
 | `src/plotter.rs` | Plotters-based scatter plot generation |
 | `src/bin/reproduce.rs` | Full paper reproduction binary |
@@ -68,7 +76,7 @@ Run the full reproduction (~16s in release mode):
 cargo run --release --bin reproduce
 ```
 
-Outputs `plots/figure4_recovery.png` and `plots/figure5_experiments.png`.
+Outputs `plots/figure4_recovery.png`, `figure5_experiments.png`, and `figure6_certainty_weighted.png`.
 
 Run all tests:
 
@@ -97,6 +105,15 @@ let group = GroupAgentBuilder::new(3)
     .preferences(vec![0.7, 0.3])
     .alpha(0.5)
     .deterministic(false)  // true for Experiment 3
+    .build_identical()?;
+
+// Certainty-weighted voting (Extension 5)
+let cw_group = GroupAgentBuilder::new(3)
+    .n_internal(16)
+    .observation_probs(vec![0.8, 0.2, 0.2])
+    .preferences(vec![0.7, 0.3])
+    .alpha(0.5)
+    .certainty_weighted(true)
     .build_identical()?;
 
 // Run simulation and recover group-level α

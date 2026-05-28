@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.3.0] - 2026-05-27
+
+Certainty-weighted voting extension and correctness fixes from code review.
+
+### Added
+- **Certainty-weighted voting** (Extension 5 from paper §4.1): `VotingMode::CertaintyWeighted`
+  — agents report full action probability distributions, active agent forms confidence-weighted
+  mixture P_group(a) = Σ w_i P_i(a) / Σ w_i where w_i = exp(-entropy(P_i))
+- **`VotingMode` enum** — replaces `deterministic: bool` with Probabilistic, Deterministic, CertaintyWeighted
+- `VotingAgent::aggregate_weighted()` for distribution-level aggregation
+- `GroupAgentBuilder::certainty_weighted(true)` and `.voting_mode()` builder methods
+- `experiment_certainty_weighted()` factory function
+- **Figure 6** — side-by-side comparison of simple vs certainty-weighted voting (`plots/figure6_certainty_weighted.png`)
+- Input validation: `observation_probs.len()` and `initial_belief.len()` checked against `n_states`
+- Dirichlet guard for `n_internal < 2`
+- `efe_step()` helper — single source of truth for per-step EFE computation
+- `GroupAgent::voting_mode()` accessor
+- 46 total tests (was 38)
+
+### Fixed
+- **B matrix in infer_states**: was using B^T × belief (uniform prior, lost action info); now B × belief (correct deterministic transition). EFE functions already used B correctly — now consistent.
+- **A-matrix learning propagation**: `update_a()` now writes column-normalized pA back to `a_matrix`. Previously pA accumulated counts but a_matrix was never updated (learning was dead code).
+- **GroupAgentBuilder::build_* methods** now pass `self.learn_a` (was hardcoded `false`).
+- **SharedBanditEnvironment non-competitive mode**: tracks agent participation via `agents_acted` vec instead of scanning `bandit_selection` (which lost agent ids when two agents picked the same bandit, preventing round advancement).
+- Alpha softmax: `log_max` computed once instead of per-element.
+- Removed dead `broadcast_rx` field and drain loop from `CommunicationChannel`.
+- Removed unused `log_posteriors` allocation in `recover_alpha()`.
+
+### Changed
+- `reproduce.rs` refactored: extracted `run_experiment()` and `plot_panel()` helpers, eliminating 4× copy-paste experiment loops
+
 ## [0.2.0] - 2026-05-27
 
 Full implementation of Waade et al. (Entropy 2025, 27, 143) with paper reproduction.
@@ -23,7 +54,6 @@ Full implementation of Waade et al. (Entropy 2025, 27, 143) with paper reproduct
 - `rayon` dependency for parallel parameter sweeps
 - `src/group.rs`, `src/bin/reproduce.rs` modules
 - `tests/group_agent_tests.rs` — 4 integration tests for group experiments
-- 38 total tests (was 17)
 
 ### Changed
 - **Edition 2021 → 2024**

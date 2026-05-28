@@ -20,31 +20,33 @@ Use these when working on matrix-heavy extensions (continuous state-space models
 
 ## Project state
 
-All 5 implementation phases complete. The four simulation experiments from the paper are
-reproduced with matching qualitative results (Figures 4 and 5 in `plots/`).
+All 5 paper implementation phases complete + Extension 5 (certainty-weighted voting).
+Four paper experiments reproduced (Figures 4-5) plus CW comparison (Figure 6).
 
-- **38 tests**, 0 clippy warnings, edition 2024
+- **46 tests**, 0 clippy warnings, edition 2024
 - `cargo run --release --bin reproduce` — full reproduction in ~16s
 
 ## Module map
 
 | File | Contents |
 |------|----------|
-| `src/agent.rs` | `Agent` trait, `CopyAgent`, `POMDPAgent` (A-E matrices, expected free energy G with info gain + pragmatic value, α/γ separation, multi-step policies, A-matrix learning, `action_probabilities()` for replay) |
-| `src/group.rs` | `VotingAgent` (probabilistic / deterministic), `GroupAgent` (Markov blanket: sensory→internal→active), `GroupAgentBuilder` |
-| `src/simulation.rs` | `run_group_simulation()`, `run_single_simulation()`, `log_likelihood()`, `recover_alpha()` (grid search, half-normal prior), experiment factories for all 4 experiments, `dirichlet_alphas()`, `beta_preferences()` |
+| `src/agent.rs` | `Agent` trait, `CopyAgent`, `POMDPAgent` (A-E matrices, `efe_step()` for expected free energy G, α/γ separation, multi-step policies, A-matrix learning with pA→A propagation, `action_probabilities()` for replay, input validation) |
+| `src/group.rs` | `VotingMode` enum (Probabilistic/Deterministic/CertaintyWeighted), `VotingAgent` (discrete votes + confidence-weighted distribution mixing), `GroupAgent` (Markov blanket: sensory→internal→active), `GroupAgentBuilder` |
+| `src/simulation.rs` | `run_group_simulation()`, `run_single_simulation()`, `log_likelihood()`, `recover_alpha()` (grid search, half-normal prior), experiment factories for 5 experiments, `dirichlet_alphas()`, `beta_preferences()` |
 | `src/communication.rs` | `CommunicationChannel` (flume), `Message`, `MessageContent`, `CommunicatingPOMDPAgent` — used by multi-agent tests, not by the group-agent pipeline |
-| `src/plotter.rs` | Reusable `plotters`-based scatter/panel functions (the binary has its own inline plotting) |
-| `src/lib.rs` | `BanditEnvironment`, `SharedBanditEnvironment`, `OneManyError`, re-exports |
-| `src/bin/reproduce.rs` | Full paper reproduction: parameter recovery (Fig 4) + 4 experiments (Fig 5), rayon-parallelized |
+| `src/plotter.rs` | Reusable `plotters`-based scatter/panel functions |
+| `src/lib.rs` | `BanditEnvironment`, `SharedBanditEnvironment` (with `agents_acted` tracking), `OneManyError`, re-exports |
+| `src/bin/reproduce.rs` | Full reproduction: parameter recovery (Fig 4) + 4 paper experiments (Fig 5) + CW extension (Fig 6), rayon-parallelized, refactored with `run_experiment()` + `plot_panel()` helpers |
 
 ## Key design decisions
 
 - **Preferences are 2-element** `[p(obs1), p(obs2)]` — matches paper's binary observations. Internally log-transformed to `C = [ln p1, ln p2]` for the pragmatic value term.
 - **α vs γ**: `gamma` (default 16.0) is the softmax temperature over expected free energy G → policy posterior. `alpha` is the softmax temperature over marginalized action probabilities. The paper uses both; many active inference implementations conflate them.
 - **Parameter recovery uses grid search** over α ∈ [0.01, 5.00] with step 0.01 and a half-normal(0, 4) prior. MAP point estimate. MCMC was deferred — grid search reproduces the paper's findings.
-- **VotingAgent** aggregates votes, not beliefs. In probabilistic mode, action is sampled proportional to vote count. In deterministic mode, max-vote wins (random tie-break). The paper calls these the "active agent."
+- **VotingMode** governs how the active agent aggregates internal agent outputs. `Probabilistic` and `Deterministic` use discrete votes (original paper). `CertaintyWeighted` uses full action distributions weighted by `exp(-entropy)` — confident agents dominate the mixture.
 - **GroupAgent implements Agent** — the simulation loop doesn't know whether it's talking to a single POMDP or a group. This makes the parameter recovery code work identically for both.
+- **B × state_belief** (not B^T) — deterministic MAB transitions produce delta-function priors. The EFE step function `efe_step()` and `infer_states()` both use the same convention.
+- **A-matrix learning propagates** — `update_a()` accumulates pA counts then writes column-normalized pA back to A, so the observation model actually changes during learning.
 
 ## Running experiments
 
@@ -56,8 +58,9 @@ cargo run --release --bin reproduce
 cargo test
 
 # Single experiment from Rust
-use one_many_rs::{experiment_identical, experiment_varying_alpha};
+use one_many_rs::{experiment_identical, experiment_certainty_weighted};
 let (data, result) = experiment_identical(16, 0.5, 300)?;
+let (data, result) = experiment_certainty_weighted(16, 0.5, 300)?;
 ```
 
 ## Possible extensions
@@ -100,15 +103,18 @@ votes by confidence.
 generative models. `GroupAgent::new()` would accept `Box<dyn Agent>` for sensory/active slots
 instead of concrete types.
 
-### 5. Certainty-weighted voting
-Internal agents express confidence in their action choices (via entropy of action probabilities).
-The active agent weighs votes by confidence — producing a certainty-weighted Bayesian model
-average at the group level. The paper predicts this would make the group agent's generative
-model a certainty-weighted average of individual models.
+### 5. Certainty-weighted voting ✅ IMPLEMENTED
 
-**Where**: `POMDPAgent` already exposes `action_probabilities()`. Add a `WeightedVotingAgent`
-that receives `(action, confidence)` pairs. `GroupAgent::act()` would pass action probability
-entropy alongside the vote.
+Internal agents report full action probability distributions. The active agent computes
+confidence weights as `exp(-H(P_i))` and forms the mixture `P_group(a) = Σ w_i P_i(a) / Σ w_i`.
+
+**Result**: CW voting with Dirichlet-varying α tracks closer to the identity line than simple
+probabilistic voting, especially for larger agent groups. This confirms the paper's §4.1
+prediction that certainty weighting produces a more faithful Bayesian model average. See
+Figure 6 (`plots/figure6_certainty_weighted.png`) for the side-by-side comparison.
+
+**Implemented in**: `VotingMode::CertaintyWeighted`, `VotingAgent::aggregate_weighted()`,
+`GroupAgentBuilder::certainty_weighted(true)`, `experiment_certainty_weighted()`.
 
 ### 6. Network communication structures
 Replace simple all-to-active-agent voting with network topologies where only some internal

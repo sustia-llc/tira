@@ -107,53 +107,60 @@ cognitive modelling; multi-scale; collective intelligence; emergence
 
 ### Core POMDP Agent (src/agent.rs)
 - [x] POMDP agent with A-E matrices following paper specification
-- [x] Expected free energy G (Eq. 2): information gain + pragmatic value
+- [x] Expected free energy G (Eq. 2): information gain (observation entropy) + pragmatic value
+- [x] Extracted `efe_step()` helper — single source of truth for per-step G computation
 - [x] C vector as log-preference prior (ln P(o|C))
 - [x] Separate α (action precision) and γ (policy posterior precision, default 16)
 - [x] E vector (policy prior) participates in policy posterior
 - [x] Multi-step policy evaluation (configurable policy_depth)
-- [x] State inference (Bayesian belief updating via B-transpose × prior × likelihood)
-- [x] A-matrix learning (pA concentration parameter updates)
+- [x] State inference (Bayesian belief updating via B × prior × likelihood)
+- [x] A-matrix learning (pA concentration updates propagated back to A via column normalization)
 - [x] action_probabilities() / record_action() / reset() for parameter recovery replay
+- [x] Input validation: observation_probs.len() and initial_belief.len() must match n_states
 
 ### Environments (src/lib.rs)
 - [x] BanditEnvironment (single-agent)
 - [x] SharedBanditEnvironment (multi-agent, competitive/non-competitive modes)
+- [x] Non-competitive round tracking via agents_acted vec (not bandit_selection scan)
 
 ### Group Agent (src/group.rs)
-- [x] VotingAgent: probabilistic and deterministic vote aggregation
+- [x] VotingMode enum: Probabilistic, Deterministic, CertaintyWeighted
+- [x] VotingAgent: discrete vote aggregation + confidence-weighted distribution mixing
 - [x] GroupAgent: Markov blanket composition (CopyAgent → Vec<POMDPAgent> → VotingAgent)
-- [x] GroupAgentBuilder with factory methods for all 4 experiments
+- [x] CertaintyWeighted mode: agents report full action distributions, active agent forms
+      confidence-weighted mixture P_group(a) = Σ w_i P_i(a) / Σ w_i where w_i = exp(-H(P_i))
+- [x] GroupAgentBuilder with factory methods for all experiments + .certainty_weighted(true)
 
 ### Simulation & Parameter Recovery (src/simulation.rs)
 - [x] run_group_simulation() / run_single_simulation()
 - [x] log_likelihood() — replay-based log-likelihood for candidate α
 - [x] recover_alpha() — grid search with half-normal prior (MAP estimate)
-- [x] Experiment factory functions: experiment_identical, experiment_varying_alpha,
-      experiment_deterministic, experiment_varying_preferences
+- [x] Experiment factories: experiment_identical, experiment_varying_alpha,
+      experiment_deterministic, experiment_varying_preferences, experiment_certainty_weighted
 - [x] parameter_recovery_single() for Figure 4 validation
-- [x] Dirichlet-constructed α distributions, Beta(0.8, 0.8) preference distributions
+- [x] Dirichlet-constructed α distributions (with n<2 guard), Beta(0.8, 0.8) preferences
 
 ### Paper Reproduction (src/bin/reproduce.rs)
-- [x] Full sweep: parameter recovery (Figure 4) + 4 experiments (Figure 5)
+- [x] Full sweep: parameter recovery (Fig 4) + 4 paper experiments (Fig 5) + CW extension (Fig 6)
 - [x] Rayon-parallelized, ~16s in release mode
-- [x] Generates plots/figure4_recovery.png and plots/figure5_experiments.png
+- [x] Generates plots/figure4_recovery.png, figure5_experiments.png, figure6_certainty_weighted.png
 - [x] All qualitative findings from paper reproduced:
   - Exp 1: group α ≈ individual α (identity line)
   - Exp 2: sub-linear scaling (below identity)
   - Exp 3: super-linear scaling, slope ↑ with n_agents
   - Exp 4: group α crushed near 0 (conflicting preferences)
+  - Exp 5 (extension): CW voting tracks closer to identity than simple voting
 
 ### Communication Framework (src/communication.rs)
 - [x] Flume-based message channels, CommunicatingPOMDPAgent
 
 ### Tests
-- [x] 38 tests total (26 unit + 12 integration), all passing
+- [x] 46 tests total (34 unit + 12 integration), all passing, 0 clippy warnings
 
 ### Possible Extensions
+- [x] ~~Certainty-weighted voting (agents signal confidence)~~ — implemented as VotingMode::CertaintyWeighted
 - [ ] MCMC parameter estimation (Metropolis-Hastings instead of grid search)
 - [ ] Network communication structures (beyond simple voting)
-- [ ] Certainty-weighted voting (agents signal confidence)
 - [ ] Greater-than-two-scale nesting (group of groups)
 - [ ] Game-theoretic inter-group competition
 - [ ] Evolutionary selection pressure on individual vs group level
