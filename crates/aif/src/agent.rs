@@ -108,16 +108,17 @@ impl POMDPAgent {
             preferences.iter().map(|&p| p.max(1e-10).ln()),
         );
 
-        // D vector: uniform state prior
+        // D vector: state prior — caller override via `initial_belief`, else uniform.
         let n = n_states as f64;
-        let d_vector = DVector::from_element(n_states, 1.0 / n);
-
-        // E vector: uniform policy prior (over single actions for depth-1)
-        let e_vector = if let Some(h) = initial_belief {
+        let d_vector = if let Some(h) = initial_belief {
             DVector::from_vec(h)
         } else {
             DVector::from_element(n_states, 1.0 / n)
         };
+
+        // E vector: uniform policy prior (over single actions for depth-1).
+        // `with_params` overrides this for policy_depth > 1.
+        let e_vector = DVector::from_element(n_states, 1.0 / n);
 
         let pa_matrix = if learn_a {
             initial_precision.map(|prec| {
@@ -327,6 +328,11 @@ impl POMDPAgent {
             for p in &mut policy_posterior {
                 *p /= sum;
             }
+        } else {
+            // Degenerate (all-zero E or total underflow): fall back to a uniform
+            // posterior so expected_free_energy / infer_policies stay well-defined.
+            let uniform = 1.0 / policy_posterior.len() as f64;
+            policy_posterior.fill(uniform);
         }
 
         (policies, policy_posterior)

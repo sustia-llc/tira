@@ -41,9 +41,9 @@ pub trait CapabilityProvider {
     /// Preferences `[p(obs1), p(obs2)]` for `agent`, possibly modulated by coalition
     /// membership.
     ///
-    /// `members` empty (or `[agent]`) means the agent acting alone. A domain models
-    /// synergy or conflict by shifting these preferences when `members` contains other
-    /// agents. Length must be 2 (binary outcomes), matching the paper's model.
+    /// `members` is **empty** when the agent acts alone; otherwise it lists the coalition's
+    /// members. A domain models synergy or conflict by shifting these preferences based on
+    /// `members`. Length must be 2 (binary outcomes), matching the paper's model.
     fn preferences(&self, agent: AgentId, members: &[AgentId]) -> Vec<f64>;
 
     /// Action-precision parameter α for `agent`'s POMDP agent.
@@ -83,7 +83,7 @@ impl<'a, P: CapabilityProvider> CoalitionEvaluator<'a, P> {
         Ok(agent.expected_free_energy())
     }
 
-    /// Expected free energy G of `agent` acting alone (`members = &[agent]`).
+    /// Expected free energy G of `agent` acting alone (`members = &[]`).
     ///
     /// LOWER G is better (the engine minimizes G).
     ///
@@ -91,7 +91,7 @@ impl<'a, P: CapabilityProvider> CoalitionEvaluator<'a, P> {
     /// Returns [`OneManyError`] if the provider's data is invalid for
     /// [`POMDPAgent::new`] (e.g. wrong-length observation or preference vectors).
     pub fn individual_efe(&self, agent: AgentId) -> Result<f64, OneManyError> {
-        self.efe(agent, &[agent])
+        self.efe(agent, &[])
     }
 
     /// Expected free energy G of `agent` as a member of the coalition `members`.
