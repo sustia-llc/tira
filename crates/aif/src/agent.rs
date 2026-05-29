@@ -292,8 +292,14 @@ impl POMDPAgent {
         policies
     }
 
-    /// Select action using expected free energy with γ and α precision.
-    fn infer_policies(&self) -> DVector<f64> {
+    /// Enumerate policies and form the γ-softmax policy posterior `∝ exp(γ·neg_G)·E`.
+    ///
+    /// Returns the enumerated policies (each `(action_sequence, neg_g)`) alongside the
+    /// normalized posterior `q(π)`, index-aligned with the policy vector. This is the
+    /// shared computation behind both [`Self::infer_policies`] (which marginalizes the
+    /// posterior to actions) and [`Self::expected_free_energy`] (which takes the
+    /// posterior-weighted average of `G = −neg_g`).
+    fn policy_posterior(&self) -> (Vec<(Vec<usize>, f64)>, Vec<f64>) {
         let policies = self.enumerate_policies();
 
         // Posterior over policies: softmax(γ · neg_G) × E
@@ -322,6 +328,35 @@ impl POMDPAgent {
                 *p /= sum;
             }
         }
+
+        (policies, policy_posterior)
+    }
+
+    /// Expected free energy G under the current belief, as the policy-posterior-weighted
+    /// average over enumerated policies.
+    ///
+    /// LOWER is better (agents minimize G — standard active inference). It is computed as
+    /// `G = −E_{q(π)}[neg_g]`, where `neg_g` is the value [`Self::efe_step`] already
+    /// produces (higher `neg_g` = more preferred) and `q(π)` is the same γ-softmax policy
+    /// posterior that [`Self::infer_policies`] forms. This surfaces the engine's existing
+    /// EFE math as a single scalar; it introduces no new free-energy computation.
+    #[must_use]
+    pub fn expected_free_energy(&self) -> f64 {
+        let (policies, policy_posterior) = self.policy_posterior();
+
+        // Posterior-weighted expected neg-G, then negate so LOWER G = better.
+        let expected_neg_g: f64 = policies
+            .iter()
+            .zip(policy_posterior.iter())
+            .map(|((_, neg_g), &q)| q * neg_g)
+            .sum();
+
+        -expected_neg_g
+    }
+
+    /// Select action using expected free energy with γ and α precision.
+    fn infer_policies(&self) -> DVector<f64> {
+        let (policies, policy_posterior) = self.policy_posterior();
 
         // Marginalize to next-action probabilities
         let mut action_probs = vec![0.0f64; self.n_actions];
@@ -572,6 +607,51 @@ mod tests {
         assert!(
             g0 > g1,
             "Action 0 should have higher neg-G (preferred): g0={g0}, g1={g1}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_expected_free_energy_sign_convention() -> Result<(), OneManyError> {
+        // An agent whose observation model and preferences are ALIGNED should have
+        // LOWER expected free energy G than one whose preferences CONFLICT with the
+        // same observation model. This pins the sign convention (LOWER G = better).
+        //
+        // NOTE: the observation model is UNIFORM across arms ([0.9, 0.9, 0.9]) so every
+        // arm emits the same observation distribution. This is deliberate: G is the
+        // policy-posterior-weighted average, so with a NON-uniform obs model a
+        // conflicting agent could simply pick whichever arm best matches its
+        // preferences, routing around the conflict and driving G back to ~0. A uniform
+        // obs model removes that escape hatch, so preference (mis)alignment shows up
+        // directly in G. (Deviation from the brief's suggested [0.9,0.1,0.1] obs model
+        // for exactly this reason — see report.)
+        let aligned = POMDPAgent::new(
+            3,
+            Some(vec![0.9, 0.9, 0.9]),
+            None,
+            vec![0.9, 0.1],
+            None,
+            8.0,
+            false,
+        )?;
+        let conflicting = POMDPAgent::new(
+            3,
+            Some(vec![0.9, 0.9, 0.9]),
+            None,
+            vec![0.1, 0.9],
+            None,
+            8.0,
+            false,
+        )?;
+
+        let g_aligned = aligned.expected_free_energy();
+        let g_conflicting = conflicting.expected_free_energy();
+
+        assert!(g_aligned.is_finite(), "G must be finite: {g_aligned}");
+        assert!(g_conflicting.is_finite(), "G must be finite: {g_conflicting}");
+        assert!(
+            g_aligned < g_conflicting,
+            "Aligned prefs must yield LOWER G (better): aligned={g_aligned}, conflicting={g_conflicting}"
         );
         Ok(())
     }

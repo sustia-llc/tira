@@ -3,10 +3,15 @@ use rand_distr::BernoulliError;
 use thiserror::Error;
 
 mod agent;
+mod coalition;
 mod communication;
 mod group;
 
 pub use agent::{Agent, CopyAgent, POMDPAgent};
+pub use coalition::{
+    AgentId, CapabilityProvider, CoalitionEvaluator, CoalitionHistory, CompatibilityBeliefs,
+    TrustBeliefs,
+};
 pub use communication::{
     AgentMessage, CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel, Message,
     MessageContent,
