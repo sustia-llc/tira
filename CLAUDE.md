@@ -1,4 +1,7 @@
-# one_many_rs
+# tira
+
+(Formerly `one_many_rs`. GitHub repo and local dir renamed to `tira` 2026-05-29;
+the Cargo workspace and crate names remain `aif` + `reproduce`.)
 
 Rust implementation of Waade et al., "As One and Many: Relating Individual and Emergent
 Group-Level Generative Models in Active Inference" (*Entropy* 2025, 27, 143).
