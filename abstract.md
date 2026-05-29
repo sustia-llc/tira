@@ -103,9 +103,13 @@ cognitive modelling; multi-scale; collective intelligence; emergence
   - Renormalization group for slow-timescale blankets
   - Application to dishbrains and organoids
 
-## Implementation Status (one_many_rs)
+## Implementation Status (tira)
 
-### Core POMDP Agent (src/agent.rs)
+*(Repo renamed `one_many_rs` → `tira` 2026-05-29. Now a Cargo workspace: the engine
+lives in `crates/aif/src/` and the paper-reproduction harness in `crates/reproduce/src/`.
+File paths below are relative to those crate roots.)*
+
+### Core POMDP Agent (crates/aif/src/agent.rs)
 - [x] POMDP agent with A-E matrices following paper specification
 - [x] Expected free energy G (Eq. 2): information gain (observation entropy) + pragmatic value
 - [x] Extracted `efe_step()` helper — single source of truth for per-step G computation
@@ -118,12 +122,12 @@ cognitive modelling; multi-scale; collective intelligence; emergence
 - [x] action_probabilities() / record_action() / reset() for parameter recovery replay
 - [x] Input validation: observation_probs.len() and initial_belief.len() must match n_states
 
-### Environments (src/lib.rs)
+### Environments (crates/reproduce/src/lib.rs)
 - [x] BanditEnvironment (single-agent)
 - [x] SharedBanditEnvironment (multi-agent, competitive/non-competitive modes)
 - [x] Non-competitive round tracking via agents_acted vec (not bandit_selection scan)
 
-### Group Agent (src/group.rs)
+### Group Agent (crates/aif/src/group.rs)
 - [x] VotingMode enum: Probabilistic, Deterministic, CertaintyWeighted
 - [x] VotingAgent: discrete vote aggregation + confidence-weighted distribution mixing
 - [x] GroupAgent: Markov blanket composition (CopyAgent → Vec<POMDPAgent> → VotingAgent)
@@ -131,7 +135,7 @@ cognitive modelling; multi-scale; collective intelligence; emergence
       confidence-weighted mixture P_group(a) = Σ w_i P_i(a) / Σ w_i where w_i = exp(-H(P_i))
 - [x] GroupAgentBuilder with factory methods for all experiments + .certainty_weighted(true)
 
-### Simulation & Parameter Recovery (src/simulation.rs)
+### Simulation & Parameter Recovery (crates/reproduce/src/simulation.rs)
 - [x] run_group_simulation() / run_single_simulation()
 - [x] log_likelihood() — replay-based log-likelihood for candidate α
 - [x] recover_alpha() — grid search with half-normal prior (MAP estimate)
@@ -140,7 +144,7 @@ cognitive modelling; multi-scale; collective intelligence; emergence
 - [x] parameter_recovery_single() for Figure 4 validation
 - [x] Dirichlet-constructed α distributions (with n<2 guard), Beta(0.8, 0.8) preferences
 
-### Paper Reproduction (src/bin/reproduce.rs)
+### Paper Reproduction (crates/reproduce/src/bin/reproduce.rs)
 - [x] Full sweep: parameter recovery (Fig 4) + 4 paper experiments (Fig 5) + CW extension (Fig 6)
 - [x] Rayon-parallelized, ~16s in release mode
 - [x] Generates plots/figure4_recovery.png, figure5_experiments.png, figure6_certainty_weighted.png
@@ -151,14 +155,24 @@ cognitive modelling; multi-scale; collective intelligence; emergence
   - Exp 4: group α crushed near 0 (conflicting preferences)
   - Exp 5 (extension): CW voting tracks closer to identity than simple voting
 
-### Communication Framework (src/communication.rs)
+### Communication Framework (crates/aif/src/communication.rs)
 - [x] Flume-based message channels, CommunicatingPOMDPAgent
 
+### Coalition Layer (crates/aif/src/coalition.rs) — v0.4.0
+- [x] `CapabilityProvider` trait — domain supplies per-agent generative-model inputs
+- [x] `CoalitionEvaluator` — `individual_efe` / `coalition_efe` / `decide_join`
+      (join iff coalition G < individual G), built on `POMDPAgent::expected_free_energy()`
+- [x] `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory` — normalized belief
+      structures re-expressing the retired `coalition_aif` prototype's ideas
+- [x] Consumed downstream by the koalisi coalition runtime as a pluggable, optional AIF
+      decision strategy (koalisi v0.6.0, behind its `decision` feature)
+
 ### Tests
-- [x] 46 tests total (34 unit + 12 integration), all passing, 0 clippy warnings
+- [x] 51 tests total, all passing, 0 clippy warnings (workspace: `cargo test`)
 
 ### Possible Extensions
 - [x] ~~Certainty-weighted voting (agents signal confidence)~~ — implemented as VotingMode::CertaintyWeighted
+- [x] ~~Coalition-formation decision layer~~ — `aif::coalition` (v0.4.0); consumed by koalisi v0.6.0
 - [ ] MCMC parameter estimation (Metropolis-Hastings instead of grid search)
 - [ ] Network communication structures (beyond simple voting)
 - [ ] Greater-than-two-scale nesting (group of groups)
