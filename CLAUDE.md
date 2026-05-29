@@ -22,21 +22,29 @@ Use these when working on matrix-heavy extensions (continuous state-space models
 
 All 5 paper implementation phases complete + Extension 5 (certainty-weighted voting).
 Four paper experiments reproduced (Figures 4-5) plus CW comparison (Figure 6).
+Now a **Cargo workspace** (`crates/aif` engine + `crates/reproduce` harness) being prepared
+as the reference active-inference engine for the koalisi coalition runtime — see
+[.claude/plans/aif-merge-koalisi-integration.md](.claude/plans/aif-merge-koalisi-integration.md).
 
-- **46 tests**, 0 clippy warnings, edition 2024
-- `cargo run --release --bin reproduce` — full reproduction in ~16s
+- **51 tests**, 0 clippy warnings, edition 2024
+- `cargo run --release -p reproduce --bin reproduce` — full reproduction in ~16s
 
 ## Module map
 
+`aif` is the reusable, domain-agnostic engine (no plotting/environment coupling); `reproduce`
+is the paper-reproduction harness and depends on `aif`.
+
 | File | Contents |
 |------|----------|
-| `src/agent.rs` | `Agent` trait, `CopyAgent`, `POMDPAgent` (A-E matrices, `efe_step()` for expected free energy G, α/γ separation, multi-step policies, A-matrix learning with pA→A propagation, `action_probabilities()` for replay, input validation) |
-| `src/group.rs` | `VotingMode` enum (Probabilistic/Deterministic/CertaintyWeighted), `VotingAgent` (discrete votes + confidence-weighted distribution mixing), `GroupAgent` (Markov blanket: sensory→internal→active), `GroupAgentBuilder` |
-| `src/simulation.rs` | `run_group_simulation()`, `run_single_simulation()`, `log_likelihood()`, `recover_alpha()` (grid search, half-normal prior), experiment factories for 5 experiments, `dirichlet_alphas()`, `beta_preferences()` |
-| `src/communication.rs` | `CommunicationChannel` (flume), `Message`, `MessageContent`, `CommunicatingPOMDPAgent` — used by multi-agent tests, not by the group-agent pipeline |
-| `src/plotter.rs` | Reusable `plotters`-based scatter/panel functions |
-| `src/lib.rs` | `BanditEnvironment`, `SharedBanditEnvironment` (with `agents_acted` tracking), `OneManyError`, re-exports |
-| `src/bin/reproduce.rs` | Full reproduction: parameter recovery (Fig 4) + 4 paper experiments (Fig 5) + CW extension (Fig 6), rayon-parallelized, refactored with `run_experiment()` + `plot_panel()` helpers |
+| `crates/aif/src/agent.rs` | `Agent` trait, `CopyAgent`, `POMDPAgent` (A-E matrices, `efe_step()` for expected free energy G, `expected_free_energy()` scalar accessor, shared `policy_posterior()` helper, α/γ separation, multi-step policies, A-matrix learning with pA→A propagation, `action_probabilities()` for replay, input validation) |
+| `crates/aif/src/group.rs` | `VotingMode` enum (Probabilistic/Deterministic/CertaintyWeighted), `VotingAgent` (discrete votes + confidence-weighted distribution mixing), `GroupAgent` (Markov blanket: sensory→internal→active), `GroupAgentBuilder` |
+| `crates/aif/src/coalition.rs` | `CapabilityProvider` trait, `CoalitionEvaluator` (`individual_efe`/`coalition_efe`/`decide_join` = join iff coalition G < individual G), `TrustBeliefs`/`CompatibilityBeliefs`/`CoalitionHistory`. Re-expresses the retired `coalition_aif` prototype on the correct engine |
+| `crates/aif/src/communication.rs` | `CommunicationChannel` (flume), `Message`, `MessageContent`, `CommunicatingPOMDPAgent` — used by multi-agent tests, not by the group-agent pipeline |
+| `crates/aif/src/lib.rs` | `OneManyError`, re-exports of the engine + coalition surface |
+| `crates/reproduce/src/lib.rs` | `BanditEnvironment`, `SharedBanditEnvironment` (with `agents_acted` tracking), `Environment`/`MultiAgentEnvironment` traits, re-exports from `aif` + simulation |
+| `crates/reproduce/src/simulation.rs` | `run_group_simulation()`, `run_single_simulation()`, `log_likelihood()`, `recover_alpha()` (grid search, half-normal prior), experiment factories for 5 experiments, `dirichlet_alphas()`, `beta_preferences()` |
+| `crates/reproduce/src/plotter.rs` | Reusable `plotters`-based scatter/panel functions |
+| `crates/reproduce/src/bin/reproduce.rs` | Full reproduction: parameter recovery (Fig 4) + 4 paper experiments (Fig 5) + CW extension (Fig 6), rayon-parallelized, refactored with `run_experiment()` + `plot_panel()` helpers |
 
 ## Key design decisions
 
@@ -47,18 +55,20 @@ Four paper experiments reproduced (Figures 4-5) plus CW comparison (Figure 6).
 - **GroupAgent implements Agent** — the simulation loop doesn't know whether it's talking to a single POMDP or a group. This makes the parameter recovery code work identically for both.
 - **B × state_belief** (not B^T) — deterministic MAB transitions produce delta-function priors. The EFE step function `efe_step()` and `infer_states()` both use the same convention.
 - **A-matrix learning propagates** — `update_a()` accumulates pA counts then writes column-normalized pA back to A, so the observation model actually changes during learning.
+- **EFE sign convention** — `efe_step()` returns *neg-G* (higher = more preferred); the public `expected_free_energy()` returns `G = −E_q(π)[neg_g]` (LOWER = better, standard active inference). `coalition::decide_join` joins iff `coalition_efe < individual_efe`. `expected_free_energy` is policy-posterior weighted, so a coalition only changes G if it alters achievable outcomes (observation model / available options), not merely preferences over a flexible obs model.
+- **`initial_belief` sets the D-vector** (state prior / initial `state_belief`), not E. The E-vector is always the uniform policy prior (overridden only by `with_params` for policy_depth > 1).
 
 ## Running experiments
 
 ```sh
 # Full reproduction (~16s release)
-cargo run --release --bin reproduce
+cargo run --release -p reproduce --bin reproduce
 
-# Tests
+# Tests (whole workspace)
 cargo test
 
-# Single experiment from Rust
-use one_many_rs::{experiment_identical, experiment_certainty_weighted};
+# Single experiment from Rust (reproduce crate)
+use reproduce::{experiment_identical, experiment_certainty_weighted};
 let (data, result) = experiment_identical(16, 0.5, 300)?;
 let (data, result) = experiment_certainty_weighted(16, 0.5, 300)?;
 ```

@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.4.0] - 2026-05-29
+
+Restructure into a Cargo workspace and add a coalition-formation decision layer, in
+preparation for use as the reference active-inference engine of a downstream coalition
+runtime. Retires the separate `coalition_aif` prototype (its ideas are re-expressed here
+on the correct engine).
+
+### Added
+- **Workspace split**: `crates/aif` (reusable, domain-agnostic engine — `POMDPAgent`,
+  `GroupAgent`, communication, coalition layer; no plotting/environment coupling) and
+  `crates/reproduce` (bandit environments, simulation, parameter recovery, plotting, the
+  `reproduce` binary). Shared deps hoisted to `[workspace.dependencies]`.
+- **`POMDPAgent::expected_free_energy() -> f64`** — scalar expected free energy G under the
+  current belief (lower = better), as the policy-posterior-weighted average over enumerated
+  policies. Surfaces existing `efe_step` math via a shared `policy_posterior()` helper.
+- **`aif::coalition` module** — `CapabilityProvider` trait, `CoalitionEvaluator`
+  (`individual_efe` / `coalition_efe` / `decide_join` = join iff coalition G < individual G),
+  and normalized `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory`. Re-expresses
+  the retired `coalition_aif` prototype's ideas on the correct engine.
+- 51 total tests (was 46).
+
+### Fixed
+- **`initial_belief` was misrouted to the E-vector** (policy prior) instead of the
+  D-vector (state prior), contradicting the code comment and README which both document it
+  as the state prior. `initial_belief` now initializes `d_vector`/`state_belief`; `e_vector`
+  is always the uniform policy prior. Behaviorally inert for the paper experiments (all
+  callers pass `None`); fixes a latent bug for callers that set an initial state belief.
+- **Degenerate policy posterior** (all-zero E or total softmax underflow) now falls back to
+  a uniform posterior instead of returning unnormalized near-zero values — makes the new
+  `expected_free_energy` path well-defined in the degenerate case.
+- **`CoalitionEvaluator::individual_efe`** now passes an empty `members` slice (canonical
+  "acting alone"); the `CapabilityProvider::preferences` contract is tightened to "empty =
+  alone" so domain implementors can't misclassify the individual case.
+
 ## [0.3.0] - 2026-05-27
 
 Certainty-weighted voting extension and correctness fixes from code review.

@@ -6,6 +6,15 @@ Paper: https://doi.org/10.3390/e27020143
 
 See [abstract.md](abstract.md) for a structured breakdown of the paper, methodology, and full implementation status.
 
+## Workspace layout
+
+This is a Cargo workspace with two crates:
+
+| Crate | Role |
+|-------|------|
+| [`crates/aif`](crates/aif) | Reusable, domain-agnostic active-inference engine: `POMDPAgent` (A–E matrices, expected free energy, α/γ precision), `GroupAgent` (Markov-blanket nesting), and a `coalition` layer (`CoalitionEvaluator`, trust/compatibility/history beliefs). No plotting or environment coupling — this is the crate downstream projects depend on. |
+| [`crates/reproduce`](crates/reproduce) | The paper-reproduction harness: bandit environments, simulation/parameter-recovery, plotting, and the `reproduce` binary. Depends on `aif`. |
+
 ## What this does
 
 A collective of active inference agents, arranged in a Markov blanket structure, constitutes a group-level agent with an emergent generative model. This project simulates such collectives on a Multi-Armed Bandit task and uses parameter recovery (cognitive modelling) to infer the group-level action precision α from observed behaviour — then compares it to the individual agents' parameters.
@@ -61,24 +70,25 @@ Environment (BanditEnvironment)
 
 | Module | Role |
 |--------|------|
-| `src/agent.rs` | POMDP active inference agent (A-E matrices, expected free energy G, α/γ precision) |
-| `src/group.rs` | VotingMode, GroupAgent, VotingAgent (discrete + certainty-weighted), GroupAgentBuilder |
-| `src/simulation.rs` | Simulation runner, parameter recovery (grid search + half-normal prior), 5 experiment factories |
-| `src/communication.rs` | Flume-based inter-agent messaging (for extended scenarios) |
-| `src/plotter.rs` | Plotters-based scatter plot generation |
-| `src/bin/reproduce.rs` | Full paper reproduction binary |
+| `crates/aif/src/agent.rs` | POMDP active inference agent (A-E matrices, expected free energy G, α/γ precision, `expected_free_energy()`) |
+| `crates/aif/src/group.rs` | VotingMode, GroupAgent, VotingAgent (discrete + certainty-weighted), GroupAgentBuilder |
+| `crates/aif/src/coalition.rs` | `CapabilityProvider`, `CoalitionEvaluator` (join decision via coalition vs individual EFE), `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory` |
+| `crates/aif/src/communication.rs` | Flume-based inter-agent messaging (for extended scenarios) |
+| `crates/reproduce/src/simulation.rs` | Simulation runner, parameter recovery (grid search + half-normal prior), 5 experiment factories |
+| `crates/reproduce/src/plotter.rs` | Plotters-based scatter plot generation |
+| `crates/reproduce/src/bin/reproduce.rs` | Full paper reproduction binary |
 
 ## Usage
 
 Run the full reproduction (~16s in release mode):
 
 ```sh
-cargo run --release --bin reproduce
+cargo run --release -p reproduce --bin reproduce
 ```
 
 Outputs `plots/figure4_recovery.png`, `figure5_experiments.png`, and `figure6_certainty_weighted.png`.
 
-Run all tests:
+Run all tests (whole workspace):
 
 ```sh
 cargo test
@@ -120,6 +130,37 @@ let cw_group = GroupAgentBuilder::new(3)
 let (data, result) = experiment_identical(16, 0.5, 300)?;
 println!("Group α = {:.3}", result.estimated_alpha);
 ```
+
+## Coalition layer (`aif::coalition`)
+
+The `aif` crate also exposes a coalition-formation decision primitive built on the same
+engine: an agent should join a coalition iff membership *lowers* its expected free energy.
+A domain implements `CapabilityProvider` to supply each agent's generative-model inputs
+(and to model how coalition membership shifts them); `CoalitionEvaluator` then compares
+`coalition_efe` against `individual_efe`:
+
+```rust
+use aif::{CapabilityProvider, CoalitionEvaluator, AgentId};
+
+struct MyDomain { /* ... */ }
+impl CapabilityProvider for MyDomain {
+    fn n_states(&self) -> usize { 3 }
+    fn observation_probs(&self, _a: AgentId) -> Vec<f64> { vec![0.9, 0.9, 0.9] }
+    fn preferences(&self, _a: AgentId, members: &[AgentId]) -> Vec<f64> {
+        if members.is_empty() { vec![0.5, 0.5] } else { vec![0.9, 0.1] } // synergy in-coalition
+    }
+    fn alpha(&self, _a: AgentId) -> f64 { 0.5 }
+}
+
+let domain = MyDomain { /* ... */ };
+let eval = CoalitionEvaluator::new(&domain);
+let join = eval.decide_join(0, &[0, 1, 2])?; // true if coalition G < individual G
+```
+
+This is the surface a downstream coalition runtime (e.g. an external swarm) consumes as a
+pluggable active-inference decision strategy. `expected_free_energy()` is policy-posterior
+weighted, so membership must genuinely change the achievable G (alter `observation_probs`
+or constrain options) — not merely shift preferences over a flexible observation model.
 
 ## Dependencies
 
