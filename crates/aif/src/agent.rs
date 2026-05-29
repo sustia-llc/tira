@@ -393,27 +393,10 @@ impl Agent for POMDPAgent {
 
 #[cfg(test)]
 mod tests {
-    use crate::{BanditEnvironment, Environment};
-
     use super::*;
     use approx::assert_relative_eq;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
-
-    #[test]
-    fn test_bandit_environment() -> Result<(), OneManyError> {
-        let mut env = BanditEnvironment::new(vec![0.8, 0.4, 0.4])?;
-        let n_trials = 10000;
-        let mut successes = 0;
-        for _ in 0..n_trials {
-            if env.step(0)? == 1 {
-                successes += 1;
-            }
-        }
-        let observed_prob = successes as f64 / n_trials as f64;
-        assert_relative_eq!(observed_prob, 0.8, epsilon = 0.05);
-        Ok(())
-    }
 
     #[test]
     fn test_copy_agent() {
@@ -541,7 +524,7 @@ mod tests {
             false,
         )?;
         agent.rng = StdRng::seed_from_u64(123);
-        let mut action_counts = vec![0; 2];
+        let mut action_counts = [0usize; 2];
         for _ in 0..1000 {
             let action = agent.act(1)?;
             action_counts[action] += 1;

@@ -1,4 +1,4 @@
-use one_many_rs::{
+use reproduce::{
     Agent, MultiAgentEnvironment, OneManyError, POMDPAgent, SharedBanditEnvironment,
 };
 

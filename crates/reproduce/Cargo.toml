@@ -1,0 +1,20 @@
+[package]
+name = "reproduce"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aif = { path = "../aif" }
+nalgebra = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }
+serde = { workspace = true }
+plotters = { workspace = true }
+rayon = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+
+[[bin]]
+name = "reproduce"
+path = "src/bin/reproduce.rs"

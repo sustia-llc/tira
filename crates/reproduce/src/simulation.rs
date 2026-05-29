@@ -1,6 +1,5 @@
-use crate::agent::{Agent, POMDPAgent};
-use crate::group::{GroupAgent, GroupAgentBuilder};
-use crate::{BanditEnvironment, Environment, OneManyError};
+use aif::{Agent, GroupAgent, GroupAgentBuilder, OneManyError, POMDPAgent};
+use crate::{BanditEnvironment, Environment};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rand_distr::multi::Dirichlet;

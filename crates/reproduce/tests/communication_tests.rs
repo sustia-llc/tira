@@ -1,4 +1,4 @@
-use one_many_rs::{
+use reproduce::{
     CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel, Message, MessageContent,
     MultiAgentEnvironment, OneManyError, POMDPAgent, SharedBanditEnvironment,
 };

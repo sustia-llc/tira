@@ -1,42 +1,23 @@
+pub use aif::{
+    Agent, CopyAgent, CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel,
+    AgentMessage, Message, MessageContent,
+    GroupAgent, GroupAgentBuilder, VotingAgent, VotingMode,
+    OneManyError, POMDPAgent,
+};
+
 use rand::prelude::*;
-use rand::seq::WeightError;
-use rand_distr::{Bernoulli, BernoulliError, Distribution};
-use thiserror::Error;
-mod agent;
-mod communication;
-mod group;
+use rand_distr::{Bernoulli, Distribution};
+
 mod plotter;
 mod simulation;
 
-pub use agent::{Agent, CopyAgent, POMDPAgent};
-pub use communication::{
-    AgentMessage, CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel, Message,
-    MessageContent,
-};
-pub use group::{GroupAgent, GroupAgentBuilder, VotingAgent, VotingMode};
 pub use simulation::{
     RecoveryResult, TrialData, experiment_certainty_weighted, experiment_deterministic,
     experiment_identical, experiment_varying_alpha, experiment_varying_preferences, log_likelihood,
     parameter_recovery_single, recover_alpha, run_group_simulation, run_single_simulation,
 };
 
-#[derive(Error, Debug)]
-pub enum OneManyError {
-    #[error("Invalid probability value: {0}")]
-    InvalidProbability(f64),
-    #[error("Invalid action: {0}")]
-    InvalidAction(usize),
-    #[error("Distribution error: {0}")]
-    Distribution(#[from] BernoulliError),
-    #[error("Weight error: {0}")]
-    Weight(#[from] WeightError),
-    #[error("Invalid agent ID: {0}")]
-    InvalidAgentId(usize),
-    #[error("Resource conflict: Bandit {0} already selected")]
-    ResourceConflict(usize),
-    #[error("Communication error: {0}")]
-    Communication(String),
-}
+pub use plotter::ScatterPoint;
 
 #[allow(clippy::missing_errors_doc)]
 pub trait Environment {

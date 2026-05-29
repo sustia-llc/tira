@@ -1,0 +1,15 @@
+[package]
+name = "aif"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nalgebra = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+flume = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }

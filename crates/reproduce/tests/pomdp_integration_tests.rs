@@ -1,4 +1,4 @@
-use one_many_rs::{Agent, BanditEnvironment, Environment, OneManyError, POMDPAgent};
+use reproduce::{Agent, BanditEnvironment, Environment, OneManyError, POMDPAgent};
 
 #[test]
 fn test_complete_pomdp_cycle() -> Result<(), OneManyError> {
