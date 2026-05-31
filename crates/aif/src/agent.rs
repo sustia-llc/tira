@@ -655,6 +655,29 @@ mod tests {
         let a_changed = (0..agent.a_matrix.nrows())
             .any(|r| (0..agent.a_matrix.ncols()).any(|c| (agent.a_matrix[(r, c)] - a_before[(r, c)]).abs() > 1e-6));
         assert!(a_changed, "A matrix should be updated from pA during learning");
+
+        // Directional + normalization check (deterministic, seed-fixed above).
+        // Observation 1 was fed every step, so for every column the row-1 mass must
+        // have risen above its 0.5 start, the row-0 mass fallen below 0.5, and each
+        // column must remain a valid distribution (column-normalized to 1).
+        for col in 0..3 {
+            let col_sum = agent.a_matrix[(0, col)] + agent.a_matrix[(1, col)];
+            assert!(
+                (col_sum - 1.0).abs() < 1e-9,
+                "A column {col} must stay column-normalized, got sum {col_sum}"
+            );
+            assert!(
+                agent.a_matrix[(1, col)] > a_before[(1, col)] && agent.a_matrix[(1, col)] > 0.5,
+                "A[1,{col}] should rise toward the observed row (was {}, now {})",
+                a_before[(1, col)],
+                agent.a_matrix[(1, col)]
+            );
+            assert!(
+                agent.a_matrix[(0, col)] < 0.5,
+                "A[0,{col}] should fall below 0.5 as mass shifts to the observed row, got {}",
+                agent.a_matrix[(0, col)]
+            );
+        }
         Ok(())
     }
 

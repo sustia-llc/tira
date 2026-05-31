@@ -21,6 +21,11 @@ the local (gitignored) `.claude/docs/review-2026-05-31.md` and
       (`BanditEnvironment`/`SharedBanditEnvironment`). This is a feature-sized
       change (touches every `POMDPAgent::new` call site) — do it as one pass with
       `Option<u64>` seeds on the experiment factories, enabling golden-value tests.
+  - **Blocks a fast CW-faithfulness unit test.** The Extension-5 / Fig-6 claim that
+    certainty-weighted voting recovers a group α closer to the mean than probabilistic
+    voting is a large-n statistical tendency — unseeded it flakes at small n, and a robust
+    averaged version is too slow for the default suite. Once factories are seedable, add a
+    seeded assertion (`cw_err <= prob_err`). For now it is validated only by Figure 6.
 
 ## Phase 4 — test strengthening (test-only; from the review)
 

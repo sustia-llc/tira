@@ -390,21 +390,55 @@ mod tests {
             ll_correct > ll_wrong,
             "LL at true α should be higher: correct={ll_correct:.2}, wrong={ll_wrong:.2}"
         );
+
+        // Stronger: the likelihood peak (grid argmax, prior excluded) should sit near
+        // the true α=0.5. Unseeded, so use a generous band with 200 trials. (Tighter
+        // assertions await full RNG seeding — see TODO.md.)
+        let grid: Vec<f64> = (1..=200).map(|i| f64::from(i) * 0.01).collect(); // 0.01..2.00
+        let mut best = (f64::NAN, f64::NEG_INFINITY);
+        for &a in &grid {
+            let ll = log_likelihood(&data, a, 3, &[0.8, 0.2, 0.2], &[0.7, 0.3])?;
+            if ll > best.1 {
+                best = (a, ll);
+            }
+        }
+        assert!(
+            best.0 > 0.1 && best.0 < 1.2,
+            "LL grid argmax should sit near true α=0.5, got {:.3}",
+            best.0
+        );
         Ok(())
     }
 
     #[test]
     fn test_parameter_recovery_single() -> Result<(), AifError> {
-        let result = parameter_recovery_single(0.5, 300)?;
-        println!(
-            "True α=0.5, recovered α={:.3}",
-            result.estimated_alpha
-        );
-        // Should recover within reasonable range
+        // Identifiable region (α ≤ 1, paper §3.1): recovery should land near the truth.
+        // Unseeded → generous ±0.4 band with 300 trials. (See TODO.md re: seeding.)
+        for &true_alpha in &[0.2_f64, 0.5] {
+            let r = parameter_recovery_single(true_alpha, 300)?;
+            println!("true α={true_alpha}, recovered α={:.3}", r.estimated_alpha);
+            assert!(
+                (r.estimated_alpha - true_alpha).abs() < 0.4,
+                "α={true_alpha} should recover within 0.4, got {:.3}",
+                r.estimated_alpha
+            );
+        }
+
+        // Degenerate region (α > 1): behaviour saturates so the value cannot be pinned —
+        // the paper shows estimates clustering high. Assert it recovers HIGH but is pulled
+        // BELOW the true value by identifiability + the half-normal(0, SD=4) prior
+        // (prior shrinkage), rather than landing at 1.5.
+        let high = parameter_recovery_single(1.5, 300)?;
+        println!("true α=1.5 (degenerate), recovered α={:.3}", high.estimated_alpha);
         assert!(
-            result.estimated_alpha > 0.1 && result.estimated_alpha < 1.5,
-            "Recovered α={:.3} should be near 0.5",
-            result.estimated_alpha
+            high.estimated_alpha > 0.8,
+            "α=1.5 should still recover as high (saturated), got {:.3}",
+            high.estimated_alpha
+        );
+        assert!(
+            high.estimated_alpha < 1.5,
+            "prior shrinkage + degeneracy should pull the α=1.5 estimate below 1.5, got {:.3}",
+            high.estimated_alpha
         );
         Ok(())
     }
@@ -417,8 +451,31 @@ mod tests {
             "Exp1: n=4, true α=0.5, group α={:.3}",
             result.estimated_alpha
         );
+
+        // Exp 1 (Fig 5A): with identical internal α the group α tracks the identity line
+        // (group α ≈ individual α). Unseeded, so average 3 runs at n=8 to damp variance
+        // and assert the mean recovered group α sits in a band around the true 0.5.
+        // (Tighter, seeded assertions are tracked in TODO.md.)
+        let mut sum = 0.0;
+        for _ in 0..3 {
+            let (_, r) = experiment_identical(8, 0.5, 250)?;
+            sum += r.estimated_alpha;
+        }
+        let mean = sum / 3.0;
+        assert!(
+            (0.25..=0.85).contains(&mean),
+            "Exp1 group α should track the identity near 0.5, got mean {mean:.3}"
+        );
         Ok(())
     }
+
+    // NOTE: the Extension-5 / Fig-6 claim that certainty-weighted voting recovers a group
+    // α *closer to the mean than probabilistic voting* is intentionally NOT asserted as a
+    // unit test here. It is a large-n statistical tendency (per the paper, "especially for
+    // larger agent groups") that is not reliable per-realization at small n — an unseeded
+    // assertion flakes, and a robust averaged version is too slow for the default suite.
+    // It is validated empirically by Figure 6, and a seeded fast assertion is tracked in
+    // TODO.md under the deferred RNG-seeding work.
 
     #[test]
     fn test_experiment_varying_alpha_runs() -> Result<(), AifError> {

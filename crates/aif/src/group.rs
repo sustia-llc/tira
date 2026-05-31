@@ -488,11 +488,21 @@ mod tests {
     #[test]
     fn test_voting_agent_deterministic_tie() -> Result<(), AifError> {
         let mut voter = VotingAgent::new(3, VotingMode::Deterministic);
-        let votes = vec![0, 1, 0, 1];
-        for _ in 0..100 {
+        let votes = vec![0, 1, 0, 1]; // actions 0 and 1 tie at 2 votes each; 2 has none
+        let mut counts = [0usize; 3];
+        for _ in 0..200 {
             let action = voter.aggregate(&votes)?;
-            assert!(action <= 1, "Tied vote should pick 0 or 1, got {action}");
+            assert!(action <= 1, "Tied vote must pick a winner (0 or 1), got {action}");
+            counts[action] += 1;
         }
+        // The tie is broken uniformly at random between the two winners, so across 200
+        // draws BOTH must appear and the non-winner (2) must never be chosen.
+        // P(either winner missing) = 2·2^-200 — effectively zero, so this is non-flaky.
+        assert!(
+            counts[0] > 0 && counts[1] > 0,
+            "both tied winners must occur over 200 draws: {counts:?}"
+        );
+        assert_eq!(counts[2], 0, "a non-winner must never be selected: {counts:?}");
         Ok(())
     }
 
