@@ -10,7 +10,7 @@ mod group;
 pub use agent::{Agent, CopyAgent, POMDPAgent};
 pub use coalition::{
     AgentId, CapabilityProvider, CoalitionEvaluator, CoalitionHistory, CompatibilityBeliefs,
-    TrustBeliefs, belief_weighted_preference,
+    ObsPrecisionParams, TrustBeliefs, belief_weighted_preference, competence_efe,
 };
 pub use communication::{
     AgentMessage, CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel, Message,

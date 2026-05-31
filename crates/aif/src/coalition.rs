@@ -13,6 +13,13 @@
 //!    an agent's [`CapabilityProvider::preferences`]. The core primitive is the EFE
 //!    comparison, not the beliefs.
 //!
+//! For **coalition-value** use cases (scoring a whole coalition by a scalar competence /
+//! capability coverage, rather than per-agent preference comparisons), use the
+//! [`competence_efe`] primitive: it maps a competence `c ∈ [0, 1]` to `G` via the
+//! *observation model*, so the value is non-degenerate as membership changes. This is the
+//! reusable bridge for downstream value calculators (koalisi and others), replacing the
+//! need to hand-roll a POMDP per crate.
+//!
 //! The module is topology-agnostic: it knows nothing about hypergraphs and adds no new
 //! dependencies. The domain (e.g. koalisi) plugs in via the [`CapabilityProvider`] trait,
 //! supplying each agent's generative-model inputs as plain `f64` data.
@@ -50,12 +57,25 @@ pub trait CapabilityProvider {
     fn alpha(&self, agent: AgentId) -> f64;
 }
 
-/// Builds a [`POMDPAgent`] from a [`CapabilityProvider`] and reads its expected free
-/// energy, exposing the join decision primitive.
+/// Per-agent, **preference-based** coalition evaluator: builds one [`POMDPAgent`] per agent
+/// from a [`CapabilityProvider`] and compares its expected free energy `G` alone vs. in a
+/// coalition.
 ///
 /// All EFE computation is delegated to the engine ([`POMDPAgent::expected_free_energy`]);
-/// this type only constructs agents from provider data and compares the resulting G
-/// values. It holds a borrow of the provider and is therefore cheap to create per query.
+/// this type only constructs agents from provider data and compares the resulting G values.
+/// It holds a borrow of the provider and is cheap to create per query.
+///
+/// # Scope / limitation
+/// Coalition membership reaches the model **only through [`CapabilityProvider::preferences`]**
+/// — [`CapabilityProvider::observation_probs`] does not take `members`, so the *observation
+/// model* is fixed across coalitions. Because `expected_free_energy` is policy-posterior
+/// weighted, a preference shift moves `G` only under a low-discriminability observation model;
+/// under a discriminative one the agent routes around preference conflict and `G` barely
+/// changes (it can collapse to `G ≈ 0` for every coalition). **For coalition-*value* use
+/// cases where membership should change *achievable outcomes* (capability/competence
+/// coverage), prefer the [`competence_efe`] primitive**, which makes the observation model
+/// depend on a scalar competence. This type is best suited to genuinely preference-driven,
+/// per-agent comparisons.
 pub struct CoalitionEvaluator<'a, P: CapabilityProvider> {
     provider: &'a P,
 }
@@ -126,6 +146,63 @@ impl<'a, P: CapabilityProvider> CoalitionEvaluator<'a, P> {
         let individual = self.individual_efe(agent)?;
         Ok(coalition < individual)
     }
+}
+
+/// Tunables for the [`competence_efe`] coalition-value primitive.
+///
+/// `max_precision` is the observation-model precision at full competence (`1.0`), in
+/// `(0.5, 1.0)`; `success_preference` is the preference mass on the "success" observation,
+/// in `(0.5, 1.0)`; `alpha` is the action precision passed to the POMDP agent.
+#[derive(Debug, Clone, Copy)]
+pub struct ObsPrecisionParams {
+    /// Observation-model precision at full competence. In `(0.5, 1.0)`.
+    pub max_precision: f64,
+    /// Preference mass on the success observation. In `(0.5, 1.0)`.
+    pub success_preference: f64,
+    /// Action precision for the POMDP agent.
+    pub alpha: f64,
+}
+
+impl Default for ObsPrecisionParams {
+    fn default() -> Self {
+        Self {
+            max_precision: 0.95,
+            success_preference: 0.9,
+            alpha: 8.0,
+        }
+    }
+}
+
+/// Coalition-value primitive: map a scalar **competence** `c ∈ [0, 1]` to the expected
+/// free energy `G` of a minimal two-state / two-observation POMDP, where competence drives
+/// the observation-model precision `p = 0.5 + (max_precision − 0.5)·c`.
+///
+/// This is the reusable, domain-agnostic bridge for capability/competence-driven coalition
+/// value: a downstream crate computes `c` from its own world (e.g. the fraction of a task's
+/// required capabilities a coalition covers, a trust aggregate, …) and turns it into a `G`
+/// (LOWER = better) without re-implementing the active-inference math. Higher competence ⇒
+/// more informative observation model ⇒ lower `G`. At `c == 0` the model is uninformative
+/// (`p = 0.5`); at `c == 1` it is maximally informative (`p = max_precision`).
+///
+/// Wrap the negated result (`-G`) to obtain a "higher is better" coalition score.
+///
+/// Prefer this over [`CoalitionEvaluator`] for coalition-*value* use cases: it makes the
+/// **observation model** (not just preferences) depend on the coalition, so the value is
+/// non-degenerate as membership changes (see the module docs).
+///
+/// # Errors
+/// Returns [`AifError::InvalidProbability`] if `competence` is not a finite value in `[0, 1]`,
+/// or [`AifError`] if the resulting POMDP parameters are otherwise rejected by the engine
+/// (e.g. degenerate `params`).
+pub fn competence_efe(competence: f64, params: ObsPrecisionParams) -> Result<f64, AifError> {
+    if !competence.is_finite() || !(0.0..=1.0).contains(&competence) {
+        return Err(AifError::InvalidProbability(competence));
+    }
+    let p = 0.5 + (params.max_precision - 0.5) * competence;
+    let obs = vec![p, 1.0 - p];
+    let prefs = vec![params.success_preference, 1.0 - params.success_preference];
+    let agent = POMDPAgent::new(2, Some(obs), None, prefs, None, params.alpha, false)?;
+    Ok(agent.expected_free_energy())
 }
 
 /// Derive a coalition preference vector `[p(obs1), p(obs2)]` from the supporting belief
@@ -579,5 +656,43 @@ mod tests {
             p_lo[0] < p_base[0],
             "low history moves alignment down: {p_lo:?} vs {p_base:?}"
         );
+    }
+
+    #[test]
+    fn test_competence_efe_monotonic_lower_g_with_more_competence() -> Result<(), AifError> {
+        // Higher competence ⇒ more informative observation model ⇒ lower G.
+        let params = ObsPrecisionParams::default();
+        let g0 = competence_efe(0.0, params)?;
+        let g_half = competence_efe(0.5, params)?;
+        let g1 = competence_efe(1.0, params)?;
+        assert!(
+            g1 < g_half && g_half < g0,
+            "expected higher competence ⇒ lower G, got 0.0={g0} 0.5={g_half} 1.0={g1}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_competence_efe_equal_competence_equal_g() -> Result<(), AifError> {
+        // G is a pure function of competence (+ params): equal competence ⇒ equal G.
+        // This underpins the downstream "redundant member adds no value" (degenerate) case,
+        // where a clone leaves coverage — and thus competence — unchanged.
+        let params = ObsPrecisionParams::default();
+        let a = competence_efe(0.4, params)?;
+        let b = competence_efe(0.4, params)?;
+        assert!((a - b).abs() < 1e-12, "equal competence must give equal G: {a} vs {b}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_competence_efe_rejects_out_of_range() {
+        // Competence must be a finite value in [0, 1]; out-of-range is rejected rather than
+        // silently producing a result (consistent with the engine's validate-don't-clamp posture).
+        let params = ObsPrecisionParams::default();
+        assert!(competence_efe(5.0, params).is_err(), "competence > 1 must be rejected");
+        assert!(competence_efe(-0.5, params).is_err(), "negative competence must be rejected");
+        assert!(competence_efe(f64::NAN, params).is_err(), "NaN competence must be rejected");
+        // The valid boundary values are accepted.
+        assert!(competence_efe(0.0, params).is_ok() && competence_efe(1.0, params).is_ok());
     }
 }
