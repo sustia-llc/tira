@@ -2,7 +2,7 @@ pub use aif::{
     Agent, CopyAgent, CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel,
     AgentMessage, Message, MessageContent,
     GroupAgent, GroupAgentBuilder, VotingAgent, VotingMode,
-    OneManyError, POMDPAgent,
+    AifError, POMDPAgent,
 };
 
 use rand::prelude::*;
@@ -21,7 +21,7 @@ pub use plotter::ScatterPoint;
 
 #[allow(clippy::missing_errors_doc)]
 pub trait Environment {
-    fn step(&mut self, action: usize) -> Result<usize, OneManyError>;
+    fn step(&mut self, action: usize) -> Result<usize, AifError>;
 }
 
 #[allow(clippy::missing_errors_doc)]
@@ -30,7 +30,7 @@ pub trait MultiAgentEnvironment {
         &mut self,
         agent_id: usize,
         action: usize,
-    ) -> Result<(usize, Option<StateChange>), OneManyError>;
+    ) -> Result<(usize, Option<StateChange>), AifError>;
     fn reset(&mut self);
     fn num_agents(&self) -> usize;
     fn num_actions(&self) -> usize;
@@ -51,10 +51,10 @@ pub struct BanditEnvironment {
 
 impl BanditEnvironment {
     #[allow(clippy::missing_errors_doc)]
-    pub fn new(probabilities: Vec<f64>) -> Result<Self, OneManyError> {
+    pub fn new(probabilities: Vec<f64>) -> Result<Self, AifError> {
         for p in &probabilities {
             if !(0.0..=1.0).contains(p) {
-                return Err(OneManyError::InvalidProbability(*p));
+                return Err(AifError::InvalidProbability(*p));
             }
         }
         Ok(Self {
@@ -65,12 +65,12 @@ impl BanditEnvironment {
 }
 
 impl Environment for BanditEnvironment {
-    fn step(&mut self, action: usize) -> Result<usize, OneManyError> {
+    fn step(&mut self, action: usize) -> Result<usize, AifError> {
         if action >= self.probabilities.len() {
-            return Err(OneManyError::InvalidAction(action));
+            return Err(AifError::InvalidAction(action));
         }
         let prob = self.probabilities[action];
-        let dist = Bernoulli::new(prob).map_err(OneManyError::Distribution)?;
+        let dist = Bernoulli::new(prob).map_err(AifError::Distribution)?;
         let won = dist.sample(&mut self.rng);
         // Observation index follows the agent's generative model: index 0 = preferred
         // (high-probability) outcome. Bernoulli(prob) is true iff that outcome occurred.
@@ -92,14 +92,14 @@ pub struct SharedBanditEnvironment {
 
 impl SharedBanditEnvironment {
     #[allow(clippy::missing_errors_doc)]
-    pub fn new(probabilities: Vec<f64>, n_agents: usize) -> Result<Self, OneManyError> {
+    pub fn new(probabilities: Vec<f64>, n_agents: usize) -> Result<Self, AifError> {
         for p in &probabilities {
             if !(0.0..=1.0).contains(p) {
-                return Err(OneManyError::InvalidProbability(*p));
+                return Err(AifError::InvalidProbability(*p));
             }
         }
         if n_agents == 0 {
-            return Err(OneManyError::InvalidAgentId(0));
+            return Err(AifError::InvalidAgentId(0));
         }
         let n_bandits = probabilities.len();
         Ok(Self {
@@ -143,22 +143,22 @@ impl MultiAgentEnvironment for SharedBanditEnvironment {
         &mut self,
         agent_id: usize,
         action: usize,
-    ) -> Result<(usize, Option<StateChange>), OneManyError> {
+    ) -> Result<(usize, Option<StateChange>), AifError> {
         if agent_id >= self.n_agents {
-            return Err(OneManyError::InvalidAgentId(agent_id));
+            return Err(AifError::InvalidAgentId(agent_id));
         }
         if action >= self.current_probabilities.len() {
-            return Err(OneManyError::InvalidAction(action));
+            return Err(AifError::InvalidAction(action));
         }
         if self.competitive && self.bandit_selection[action].is_some() {
-            return Err(OneManyError::ResourceConflict(action));
+            return Err(AifError::ResourceConflict(action));
         }
 
         self.bandit_selection[action] = Some(agent_id);
         self.agents_acted[agent_id] = true;
 
         let prob = self.current_probabilities[action];
-        let dist = Bernoulli::new(prob).map_err(OneManyError::Distribution)?;
+        let dist = Bernoulli::new(prob).map_err(AifError::Distribution)?;
         let won = dist.sample(&mut self.rng);
         // Observation index 0 = preferred outcome (agent's generative-model convention);
         // reward_obtained keeps reward semantics (true == win).
@@ -194,7 +194,7 @@ impl MultiAgentEnvironment for SharedBanditEnvironment {
 }
 
 impl Environment for SharedBanditEnvironment {
-    fn step(&mut self, action: usize) -> Result<usize, OneManyError> {
+    fn step(&mut self, action: usize) -> Result<usize, AifError> {
         let (observation, _) =
             <Self as MultiAgentEnvironment>::step(self, 0, action)?;
         Ok(observation)

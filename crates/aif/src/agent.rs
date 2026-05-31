@@ -1,4 +1,4 @@
-use crate::OneManyError;
+use crate::AifError;
 use nalgebra::{DMatrix, DVector};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -7,14 +7,14 @@ use rand_distr::Distribution;
 
 #[allow(clippy::missing_errors_doc)]
 pub trait Agent {
-    fn act(&mut self, observation: usize) -> Result<usize, OneManyError>;
+    fn act(&mut self, observation: usize) -> Result<usize, AifError>;
 }
 
 #[derive(Debug)]
 pub struct CopyAgent;
 
 impl Agent for CopyAgent {
-    fn act(&mut self, observation: usize) -> Result<usize, OneManyError> {
+    fn act(&mut self, observation: usize) -> Result<usize, AifError> {
         Ok(observation)
     }
 }
@@ -59,27 +59,27 @@ impl POMDPAgent {
         initial_belief: Option<Vec<f64>>,
         alpha: f64,
         learn_a: bool,
-    ) -> Result<Self, OneManyError> {
+    ) -> Result<Self, AifError> {
         let n_obs = 2;
         // One bandit arm per state in the MAB model: actions and states are coupled here.
         let n_actions = n_states;
 
         if preferences.len() != n_obs {
-            return Err(OneManyError::InvalidAction(preferences.len()));
+            return Err(AifError::InvalidAction(preferences.len()));
         }
         if learn_a && initial_precision.is_none() {
-            return Err(OneManyError::InvalidAction(0));
+            return Err(AifError::InvalidAction(0));
         }
 
         if let Some(ref probs) = observation_probs
             && probs.len() != n_states
         {
-            return Err(OneManyError::InvalidAction(probs.len()));
+            return Err(AifError::InvalidAction(probs.len()));
         }
         if let Some(ref belief) = initial_belief
             && belief.len() != n_states
         {
-            return Err(OneManyError::InvalidAction(belief.len()));
+            return Err(AifError::InvalidAction(belief.len()));
         }
 
         // Value validation (after length checks, before matrices are built).
@@ -88,7 +88,7 @@ impl POMDPAgent {
         if let Some(ref probs) = observation_probs {
             for &p in probs {
                 if !p.is_finite() || !(0.0..=1.0).contains(&p) {
-                    return Err(OneManyError::InvalidProbability(p));
+                    return Err(AifError::InvalidProbability(p));
                 }
             }
         }
@@ -97,20 +97,20 @@ impl POMDPAgent {
         // value in (0.0, 1.0] so its log is well-defined and non-positive.
         for &p in &preferences {
             if !(p.is_finite() && p > 0.0 && p <= 1.0) {
-                return Err(OneManyError::InvalidProbability(p));
+                return Err(AifError::InvalidProbability(p));
             }
         }
         // initial_belief (D): a valid distribution over states — finite, non-negative,
         // summing to 1.0.
         if let Some(ref belief) = initial_belief {
             if belief.iter().any(|&p| !p.is_finite() || p < 0.0) {
-                return Err(OneManyError::InvalidDistribution(
+                return Err(AifError::InvalidDistribution(
                     "initial_belief entries must be finite and non-negative".to_owned(),
                 ));
             }
             let sum: f64 = belief.iter().sum();
             if (sum - 1.0).abs() > 1e-6 {
-                return Err(OneManyError::InvalidDistribution(format!(
+                return Err(AifError::InvalidDistribution(format!(
                     "initial_belief must sum to 1.0 (got {sum})"
                 )));
             }
@@ -197,7 +197,7 @@ impl POMDPAgent {
         gamma: f64,
         policy_depth: usize,
         learn_a: bool,
-    ) -> Result<Self, OneManyError> {
+    ) -> Result<Self, AifError> {
         let mut agent = Self::new(
             n_states,
             observation_probs,
@@ -453,16 +453,10 @@ impl POMDPAgent {
     pub fn record_action(&mut self, action: usize) {
         self.last_action = Some(action);
     }
-
-    /// Reset agent to initial state (for parameter recovery replays).
-    pub fn reset(&mut self) {
-        self.state_belief = self.d_vector.clone();
-        self.last_action = None;
-    }
 }
 
 impl Agent for POMDPAgent {
-    fn act(&mut self, observation: usize) -> Result<usize, OneManyError> {
+    fn act(&mut self, observation: usize) -> Result<usize, AifError> {
         if self.last_action.is_none() {
             self.state_belief = self.d_vector.clone();
         } else {
@@ -496,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pomdp_agent_initialization() -> Result<(), OneManyError> {
+    fn test_pomdp_agent_initialization() -> Result<(), AifError> {
         let agent = POMDPAgent::new(
             3,
             Some(vec![0.8, 0.4, 0.4]),
@@ -529,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn test_e_vector_sized_by_n_actions() -> Result<(), OneManyError> {
+    fn test_e_vector_sized_by_n_actions() -> Result<(), AifError> {
         let agent = POMDPAgent::new(
             3,
             Some(vec![0.8, 0.2, 0.2]),
@@ -548,7 +542,7 @@ mod tests {
         let result =
             POMDPAgent::new(3, Some(vec![1.5, 0.2, 0.2]), None, vec![0.7, 0.3], None, 1.0, false);
         assert!(
-            matches!(result, Err(OneManyError::InvalidProbability(_))),
+            matches!(result, Err(AifError::InvalidProbability(_))),
             "Should reject observation_probs outside [0, 1]"
         );
     }
@@ -557,12 +551,12 @@ mod tests {
     fn test_new_rejects_out_of_range_preferences() {
         let too_high = POMDPAgent::new(3, None, None, vec![1.2, 0.3], None, 1.0, false);
         assert!(
-            matches!(too_high, Err(OneManyError::InvalidProbability(_))),
+            matches!(too_high, Err(AifError::InvalidProbability(_))),
             "Should reject preference > 1.0"
         );
         let non_positive = POMDPAgent::new(3, None, None, vec![0.0, 0.3], None, 1.0, false);
         assert!(
-            matches!(non_positive, Err(OneManyError::InvalidProbability(_))),
+            matches!(non_positive, Err(AifError::InvalidProbability(_))),
             "Should reject preference <= 0.0"
         );
     }
@@ -572,13 +566,13 @@ mod tests {
         let bad_sum =
             POMDPAgent::new(3, None, None, vec![0.7, 0.3], Some(vec![0.5, 0.2, 0.2]), 1.0, false);
         assert!(
-            matches!(bad_sum, Err(OneManyError::InvalidDistribution(_))),
+            matches!(bad_sum, Err(AifError::InvalidDistribution(_))),
             "Should reject initial_belief not summing to 1.0"
         );
         let negative =
             POMDPAgent::new(3, None, None, vec![0.7, 0.3], Some(vec![1.2, -0.1, -0.1]), 1.0, false);
         assert!(
-            matches!(negative, Err(OneManyError::InvalidDistribution(_))),
+            matches!(negative, Err(AifError::InvalidDistribution(_))),
             "Should reject negative initial_belief entry"
         );
     }
@@ -591,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn test_state_inference_deterministic_transition() -> Result<(), OneManyError> {
+    fn test_state_inference_deterministic_transition() -> Result<(), AifError> {
         // After choosing action 0, state belief should be concentrated at state 0
         let mut agent = POMDPAgent::new(
             3,
@@ -614,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pomdp_agent_state_inference() -> Result<(), OneManyError> {
+    fn test_pomdp_agent_state_inference() -> Result<(), AifError> {
         let mut agent = POMDPAgent::new(
             3,
             Some(vec![0.8, 0.4, 0.4]),
@@ -633,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pomdp_agent_learning_updates_a_matrix() -> Result<(), OneManyError> {
+    fn test_pomdp_agent_learning_updates_a_matrix() -> Result<(), AifError> {
         let mut agent = POMDPAgent::new(
             3,
             Some(vec![0.5, 0.5, 0.5]),
@@ -665,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pomdp_agent_policy_preference() -> Result<(), OneManyError> {
+    fn test_pomdp_agent_policy_preference() -> Result<(), AifError> {
         let mut agent = POMDPAgent::new(
             2,
             Some(vec![0.9, 0.1]),
@@ -689,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pomdp_agent_state_belief_update() -> Result<(), OneManyError> {
+    fn test_pomdp_agent_state_belief_update() -> Result<(), AifError> {
         let mut agent = POMDPAgent::new(
             3,
             Some(vec![0.5, 0.5, 0.5]),
@@ -709,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn test_expected_free_energy_prefers_informative_actions() -> Result<(), OneManyError> {
+    fn test_expected_free_energy_prefers_informative_actions() -> Result<(), AifError> {
         let agent = POMDPAgent::new(
             2,
             Some(vec![0.9, 0.1]),
@@ -729,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn test_efe_step_exact_mi_differs_on_heterogeneous_entropy() -> Result<(), OneManyError> {
+    fn test_efe_step_exact_mi_differs_on_heterogeneous_entropy() -> Result<(), AifError> {
         // A columns with different marginal entropies: arm 0 = [0.5,0.5] (max entropy),
         // arms 1/2 = [0.9,0.1] (lower). Deterministic B makes efe_step(state, a) predict a
         // delta on state a, so the epistemic term reduces to H[A[:,a]] − H[A[:,a]] handling.
@@ -795,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn test_expected_free_energy_sign_convention() -> Result<(), OneManyError> {
+    fn test_expected_free_energy_sign_convention() -> Result<(), AifError> {
         // An agent whose observation model and preferences are ALIGNED should have
         // LOWER expected free energy G than one whose preferences CONFLICT with the
         // same observation model. This pins the sign convention (LOWER G = better).
@@ -840,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn test_with_params_gamma_alpha() -> Result<(), OneManyError> {
+    fn test_with_params_gamma_alpha() -> Result<(), AifError> {
         let agent = POMDPAgent::with_params(
             3,
             Some(vec![0.8, 0.2, 0.2]),

@@ -1,5 +1,5 @@
 use reproduce::{
-    Agent, MultiAgentEnvironment, OneManyError, POMDPAgent, SharedBanditEnvironment,
+    Agent, MultiAgentEnvironment, AifError, POMDPAgent, SharedBanditEnvironment,
 };
 
 struct AgentTracker {
@@ -33,7 +33,7 @@ impl AgentTracker {
 }
 
 #[test]
-fn test_competitive_multi_agent() -> Result<(), OneManyError> {
+fn test_competitive_multi_agent() -> Result<(), AifError> {
     let mut env = SharedBanditEnvironment::new(vec![0.8, 0.4, 0.6], 2)?;
 
     let mut agent0 = POMDPAgent::new(
@@ -76,7 +76,7 @@ fn test_competitive_multi_agent() -> Result<(), OneManyError> {
                 tracker1.record(action1, reward1);
                 prev_obs1 = reward1;
             }
-            Err(OneManyError::ResourceConflict(_)) => {
+            Err(AifError::ResourceConflict(_)) => {
                 let mut found = false;
                 for alt in 0..3 {
                     if alt != action1 {
@@ -89,7 +89,7 @@ fn test_competitive_multi_agent() -> Result<(), OneManyError> {
                                 found = true;
                                 break;
                             }
-                            Err(OneManyError::ResourceConflict(_)) => continue,
+                            Err(AifError::ResourceConflict(_)) => continue,
                             Err(e) => return Err(e),
                         }
                     }
@@ -127,7 +127,7 @@ fn test_competitive_multi_agent() -> Result<(), OneManyError> {
 }
 
 #[test]
-fn test_non_competitive_multi_agent() -> Result<(), OneManyError> {
+fn test_non_competitive_multi_agent() -> Result<(), AifError> {
     let mut env = SharedBanditEnvironment::new(vec![0.8, 0.4, 0.6], 2)?;
     env.set_competitive(false);
 
@@ -193,7 +193,7 @@ fn test_non_competitive_multi_agent() -> Result<(), OneManyError> {
 }
 
 #[test]
-fn test_sequential_communication() -> Result<(), OneManyError> {
+fn test_sequential_communication() -> Result<(), AifError> {
     let mut env = SharedBanditEnvironment::new(vec![0.7, 0.7, 0.7], 2)?;
     env.set_competitive(true);
 
@@ -247,7 +247,7 @@ fn test_sequential_communication() -> Result<(), OneManyError> {
                     done = true;
                     break;
                 }
-                Err(OneManyError::ResourceConflict(_)) => continue,
+                Err(AifError::ResourceConflict(_)) => continue,
                 Err(e) => return Err(e),
             }
         }

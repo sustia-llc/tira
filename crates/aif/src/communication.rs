@@ -1,4 +1,10 @@
-use crate::{Agent, OneManyError};
+//! Reserved infrastructure for the paper's §4.1 network-communication extension
+//! (Extension #6): network topologies where only some internal agents communicate
+//! directly with the active agent, with influence routed through intermediate
+//! connections. This module is currently exercised only by tests — it is not yet
+//! wired into the group-agent pipeline.
+
+use crate::{Agent, AifError};
 use flume::{Receiver, Sender};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -83,7 +89,7 @@ impl CommunicationChannel {
         sender_id: usize,
         recipient_id: usize,
         content: MessageContent,
-    ) -> Result<(), OneManyError> {
+    ) -> Result<(), AifError> {
         if let Some(tx) = self.senders.get(&recipient_id) {
             let message = Message {
                 sender_id,
@@ -93,23 +99,23 @@ impl CommunicationChannel {
                 timestamp: self.current_step,
             };
             tx.send(message)
-                .map_err(|e| OneManyError::Communication(e.to_string()))
+                .map_err(|e| AifError::Communication(e.to_string()))
         } else {
-            Err(OneManyError::InvalidAgentId(recipient_id))
+            Err(AifError::InvalidAgentId(recipient_id))
         }
     }
 
     #[allow(clippy::missing_errors_doc)]
-    pub fn has_messages(&self, agent_id: usize) -> Result<bool, OneManyError> {
+    pub fn has_messages(&self, agent_id: usize) -> Result<bool, AifError> {
         if let Some(rx) = self.receivers.get(&agent_id) {
             Ok(!rx.is_empty())
         } else {
-            Err(OneManyError::InvalidAgentId(agent_id))
+            Err(AifError::InvalidAgentId(agent_id))
         }
     }
 
     #[allow(clippy::missing_errors_doc)]
-    pub fn receive_all(&self, agent_id: usize) -> Result<Vec<Message>, OneManyError> {
+    pub fn receive_all(&self, agent_id: usize) -> Result<Vec<Message>, AifError> {
         let mut messages = Vec::new();
 
         if let Some(rx) = self.receivers.get(&agent_id) {
@@ -117,7 +123,7 @@ impl CommunicationChannel {
                 messages.push(msg);
             }
         } else {
-            return Err(OneManyError::InvalidAgentId(agent_id));
+            return Err(AifError::InvalidAgentId(agent_id));
         }
 
         messages.sort_by(|a, b| {
@@ -142,13 +148,13 @@ pub struct AgentMessage {
 
 #[allow(clippy::missing_errors_doc)]
 pub trait CommunicatingAgent: Agent {
-    fn process_messages(&mut self, messages: Vec<Message>) -> Result<(), OneManyError>;
+    fn process_messages(&mut self, messages: Vec<Message>) -> Result<(), AifError>;
     fn generate_messages(&self) -> Vec<AgentMessage>;
     fn act_with_communication(
         &mut self,
         observation: usize,
         messages: Vec<Message>,
-    ) -> Result<usize, OneManyError>;
+    ) -> Result<usize, AifError>;
 }
 
 pub struct CommunicatingPOMDPAgent {
@@ -230,7 +236,7 @@ impl CommunicatingPOMDPAgent {
 }
 
 impl Agent for CommunicatingPOMDPAgent {
-    fn act(&mut self, observation: usize) -> Result<usize, OneManyError> {
+    fn act(&mut self, observation: usize) -> Result<usize, AifError> {
         let action = self.agent.act(observation)?;
         self.last_selected_action = Some(action);
         Ok(action)
@@ -238,18 +244,14 @@ impl Agent for CommunicatingPOMDPAgent {
 }
 
 impl CommunicatingAgent for CommunicatingPOMDPAgent {
-    fn process_messages(&mut self, messages: Vec<Message>) -> Result<(), OneManyError> {
-        self.message_history.extend(messages.clone());
+    fn process_messages(&mut self, messages: Vec<Message>) -> Result<(), AifError> {
+        self.message_history.extend(messages.iter().cloned());
         if self.message_history.len() > 100 {
             self.message_history.drain(0..50);
         }
-        for message in messages {
-            match message.content {
-                MessageContent::Action(action) => {
-                    self.update_agent_beliefs(message.sender_id, action);
-                }
-                MessageContent::Beliefs(_) | MessageContent::RequestInfo(_) => {}
-                _ => {}
+        for message in &messages {
+            if let MessageContent::Action(action) = &message.content {
+                self.update_agent_beliefs(message.sender_id, *action);
             }
         }
         Ok(())
@@ -283,7 +285,7 @@ impl CommunicatingAgent for CommunicatingPOMDPAgent {
         &mut self,
         observation: usize,
         messages: Vec<Message>,
-    ) -> Result<usize, OneManyError> {
+    ) -> Result<usize, AifError> {
         self.process_messages(messages)?;
         let action = self.agent.act(observation)?;
         self.last_selected_action = Some(action);

@@ -1,10 +1,10 @@
 // Tests from aif/src/group.rs that require BanditEnvironment (lives in reproduce).
 use reproduce::{
-    Agent, BanditEnvironment, Environment, GroupAgentBuilder, OneManyError, VotingMode,
+    Agent, BanditEnvironment, Environment, GroupAgentBuilder, AifError, VotingMode,
 };
 
 #[test]
-fn test_group_agent_certainty_weighted_mode() -> Result<(), OneManyError> {
+fn test_group_agent_certainty_weighted_mode() -> Result<(), AifError> {
     let mut env = BanditEnvironment::new(vec![0.8, 0.2, 0.2])?;
 
     let mut group = GroupAgentBuilder::new(3)
@@ -34,7 +34,7 @@ fn test_group_agent_certainty_weighted_mode() -> Result<(), OneManyError> {
 }
 
 #[test]
-fn test_certainty_weighted_conflicting_prefs_less_noisy_than_simple() -> Result<(), OneManyError>
+fn test_certainty_weighted_conflicting_prefs_less_noisy_than_simple() -> Result<(), AifError>
 {
     let mut env = BanditEnvironment::new(vec![0.8, 0.2, 0.2])?;
 
@@ -93,7 +93,7 @@ fn test_certainty_weighted_conflicting_prefs_less_noisy_than_simple() -> Result<
 }
 
 #[test]
-fn test_group_agent_acts_in_environment() -> Result<(), OneManyError> {
+fn test_group_agent_acts_in_environment() -> Result<(), AifError> {
     let mut env = BanditEnvironment::new(vec![0.8, 0.2, 0.2])?;
     let mut group = GroupAgentBuilder::new(3)
         .n_internal(8)
@@ -115,7 +115,7 @@ fn test_group_agent_acts_in_environment() -> Result<(), OneManyError> {
 }
 
 #[test]
-fn test_group_agent_deterministic_voting_more_decisive() -> Result<(), OneManyError> {
+fn test_group_agent_deterministic_voting_more_decisive() -> Result<(), AifError> {
     let mut env = BanditEnvironment::new(vec![0.8, 0.2, 0.2])?;
 
     let mut prob_group = GroupAgentBuilder::new(3)
@@ -168,7 +168,7 @@ fn test_group_agent_deterministic_voting_more_decisive() -> Result<(), OneManyEr
 
 // Test relocated from aif/src/agent.rs (requires BanditEnvironment)
 #[test]
-fn test_bandit_environment() -> Result<(), OneManyError> {
+fn test_bandit_environment() -> Result<(), AifError> {
     use approx::assert_relative_eq;
     use reproduce::Environment;
     let mut env = BanditEnvironment::new(vec![0.8, 0.4, 0.4])?;

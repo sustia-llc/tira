@@ -1,4 +1,4 @@
-use aif::{Agent, GroupAgent, GroupAgentBuilder, OneManyError, POMDPAgent};
+use aif::{Agent, GroupAgent, GroupAgentBuilder, AifError, POMDPAgent};
 use crate::{BanditEnvironment, Environment};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -55,7 +55,7 @@ pub fn run_group_simulation(
     group: &mut GroupAgent,
     env: &mut BanditEnvironment,
     n_trials: usize,
-) -> Result<TrialData, OneManyError> {
+) -> Result<TrialData, AifError> {
     let mut data = TrialData::new();
     let mut prev_obs = 0;
     for _ in 0..n_trials {
@@ -73,7 +73,7 @@ pub fn run_single_simulation(
     agent: &mut POMDPAgent,
     env: &mut BanditEnvironment,
     n_trials: usize,
-) -> Result<TrialData, OneManyError> {
+) -> Result<TrialData, AifError> {
     let mut data = TrialData::new();
     let mut prev_obs = 0;
     for _ in 0..n_trials {
@@ -102,7 +102,7 @@ pub fn log_likelihood(
     n_bandits: usize,
     observation_probs: &[f64],
     preferences: &[f64],
-) -> Result<f64, OneManyError> {
+) -> Result<f64, AifError> {
     let mut model = POMDPAgent::new(
         n_bandits,
         Some(observation_probs.to_vec()),
@@ -135,11 +135,16 @@ pub fn recover_alpha(
     n_bandits: usize,
     observation_probs: &[f64],
     preferences: &[f64],
-) -> Result<RecoveryResult, OneManyError> {
-    let grid: Vec<f64> = (1..=500).map(|i| i as f64 * 0.01).collect();
+) -> Result<RecoveryResult, AifError> {
+    // Grid starts at 0.0 (paper range [0,1]): α=0 yields uniform action probs,
+    // no division by zero in the likelihood path, so it is a valid candidate.
+    let grid: Vec<f64> = (0..=500).map(|i| i as f64 * 0.01).collect();
     let prior_sd = 4.0;
 
-    let mut best_alpha = 0.01;
+    // Default NaN so a degenerate all-NEG_INFINITY posterior surfaces as NaN
+    // rather than masquerading as a real estimate; the first finite posterior
+    // sets best_alpha via the comparison below, so normal runs are unaffected.
+    let mut best_alpha = f64::NAN;
     let mut best_log_posterior = f64::NEG_INFINITY;
 
     for &alpha in &grid {
@@ -179,7 +184,7 @@ pub fn experiment_identical(
     n_internal: usize,
     alpha: f64,
     n_trials: usize,
-) -> Result<(TrialData, RecoveryResult), OneManyError> {
+) -> Result<(TrialData, RecoveryResult), AifError> {
     let mut group = GroupAgentBuilder::new(3)
         .n_internal(n_internal)
         .observation_probs(BANDIT_PROBS.to_vec())
@@ -199,7 +204,7 @@ pub fn experiment_varying_alpha(
     n_internal: usize,
     mean_alpha: f64,
     n_trials: usize,
-) -> Result<(TrialData, RecoveryResult), OneManyError> {
+) -> Result<(TrialData, RecoveryResult), AifError> {
     let alphas = dirichlet_alphas(n_internal, mean_alpha);
     let mut group = GroupAgentBuilder::new(3)
         .n_internal(n_internal)
@@ -219,7 +224,7 @@ pub fn experiment_deterministic(
     n_internal: usize,
     mean_alpha: f64,
     n_trials: usize,
-) -> Result<(TrialData, RecoveryResult), OneManyError> {
+) -> Result<(TrialData, RecoveryResult), AifError> {
     let alphas = dirichlet_alphas(n_internal, mean_alpha);
     let mut group = GroupAgentBuilder::new(3)
         .n_internal(n_internal)
@@ -240,7 +245,7 @@ pub fn experiment_varying_preferences(
     n_internal: usize,
     alpha: f64,
     n_trials: usize,
-) -> Result<(TrialData, RecoveryResult), OneManyError> {
+) -> Result<(TrialData, RecoveryResult), AifError> {
     let pref_sets = beta_preferences(n_internal);
     let mut group = GroupAgentBuilder::new(3)
         .n_internal(n_internal)
@@ -250,6 +255,10 @@ pub fn experiment_varying_preferences(
 
     let mut env = BanditEnvironment::new(BANDIT_PROBS.to_vec())?;
     let data = run_group_simulation(&mut group, &mut env, n_trials)?;
+    // Intentional mismatch: data is generated from HETEROGENEOUS per-agent
+    // preferences but scored against the CANONICAL `PREFERENCES` constant.
+    // This drives the paper's Figure 5D "crushed group α" result — do not
+    // "correct" it to the per-agent preference sets.
     let result = recover_alpha(&data, 3, &BANDIT_PROBS, &PREFERENCES)?;
     Ok((data, result))
 }
@@ -262,7 +271,7 @@ pub fn experiment_certainty_weighted(
     n_internal: usize,
     mean_alpha: f64,
     n_trials: usize,
-) -> Result<(TrialData, RecoveryResult), OneManyError> {
+) -> Result<(TrialData, RecoveryResult), AifError> {
     let alphas = dirichlet_alphas(n_internal, mean_alpha);
     let mut group = GroupAgentBuilder::new(3)
         .n_internal(n_internal)
@@ -282,7 +291,7 @@ pub fn experiment_certainty_weighted(
 pub fn parameter_recovery_single(
     true_alpha: f64,
     n_trials: usize,
-) -> Result<RecoveryResult, OneManyError> {
+) -> Result<RecoveryResult, AifError> {
     let mut agent = POMDPAgent::new(
         3,
         Some(BANDIT_PROBS.to_vec()),
@@ -333,7 +342,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_run_group_simulation() -> Result<(), OneManyError> {
+    fn test_run_group_simulation() -> Result<(), AifError> {
         let mut group = GroupAgentBuilder::new(3)
             .n_internal(4)
             .observation_probs(vec![0.8, 0.2, 0.2])
@@ -355,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn test_log_likelihood_higher_for_correct_alpha() -> Result<(), OneManyError> {
+    fn test_log_likelihood_higher_for_correct_alpha() -> Result<(), AifError> {
         // Simulate with α=0.5, then check that LL is higher near 0.5 than at 2.0
         let mut agent = POMDPAgent::new(
             3,
@@ -385,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parameter_recovery_single() -> Result<(), OneManyError> {
+    fn test_parameter_recovery_single() -> Result<(), AifError> {
         let result = parameter_recovery_single(0.5, 300)?;
         println!(
             "True α=0.5, recovered α={:.3}",
@@ -401,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn test_experiment_identical_runs() -> Result<(), OneManyError> {
+    fn test_experiment_identical_runs() -> Result<(), AifError> {
         let (data, result) = experiment_identical(4, 0.5, 200)?;
         assert_eq!(data.len(), 200);
         println!(
@@ -412,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn test_experiment_varying_alpha_runs() -> Result<(), OneManyError> {
+    fn test_experiment_varying_alpha_runs() -> Result<(), AifError> {
         let (data, result) = experiment_varying_alpha(8, 0.5, 200)?;
         assert_eq!(data.len(), 200);
         println!(
@@ -423,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn test_experiment_deterministic_runs() -> Result<(), OneManyError> {
+    fn test_experiment_deterministic_runs() -> Result<(), AifError> {
         let (data, result) = experiment_deterministic(8, 0.5, 200)?;
         assert_eq!(data.len(), 200);
         println!(
@@ -434,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn test_experiment_varying_preferences_runs() -> Result<(), OneManyError> {
+    fn test_experiment_varying_preferences_runs() -> Result<(), AifError> {
         let (data, result) = experiment_varying_preferences(8, 0.5, 200)?;
         assert_eq!(data.len(), 200);
         println!(
@@ -445,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn test_experiment_certainty_weighted_runs() -> Result<(), OneManyError> {
+    fn test_experiment_certainty_weighted_runs() -> Result<(), AifError> {
         let (data, result) = experiment_certainty_weighted(8, 0.5, 200)?;
         assert_eq!(data.len(), 200);
         println!(

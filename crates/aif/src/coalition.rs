@@ -17,7 +17,7 @@
 //! dependencies. The domain (e.g. koalisi) plugs in via the [`CapabilityProvider`] trait,
 //! supplying each agent's generative-model inputs as plain `f64` data.
 
-use crate::{OneManyError, POMDPAgent};
+use crate::{AifError, POMDPAgent};
 use std::collections::HashMap;
 
 /// Identifier for an agent within a coalition computation.
@@ -69,7 +69,7 @@ impl<'a, P: CapabilityProvider> CoalitionEvaluator<'a, P> {
 
     /// Construct a POMDP agent for `agent` under the given `members` and return its
     /// expected free energy G.
-    fn efe(&self, agent: AgentId, members: &[AgentId]) -> Result<f64, OneManyError> {
+    fn efe(&self, agent: AgentId, members: &[AgentId]) -> Result<f64, AifError> {
         let n_states = self.provider.n_states();
         let agent = POMDPAgent::new(
             n_states,
@@ -88,9 +88,9 @@ impl<'a, P: CapabilityProvider> CoalitionEvaluator<'a, P> {
     /// LOWER G is better (the engine minimizes G).
     ///
     /// # Errors
-    /// Returns [`OneManyError`] if the provider's data is invalid for
+    /// Returns [`AifError`] if the provider's data is invalid for
     /// [`POMDPAgent::new`] (e.g. wrong-length observation or preference vectors).
-    pub fn individual_efe(&self, agent: AgentId) -> Result<f64, OneManyError> {
+    pub fn individual_efe(&self, agent: AgentId) -> Result<f64, AifError> {
         self.efe(agent, &[])
     }
 
@@ -100,12 +100,12 @@ impl<'a, P: CapabilityProvider> CoalitionEvaluator<'a, P> {
     /// model) lowers G; conflict raises it.
     ///
     /// # Errors
-    /// Returns [`OneManyError`] if the provider's data is invalid for [`POMDPAgent::new`].
+    /// Returns [`AifError`] if the provider's data is invalid for [`POMDPAgent::new`].
     pub fn coalition_efe(
         &self,
         agent: AgentId,
         members: &[AgentId],
-    ) -> Result<f64, OneManyError> {
+    ) -> Result<f64, AifError> {
         self.efe(agent, members)
     }
 
@@ -116,12 +116,12 @@ impl<'a, P: CapabilityProvider> CoalitionEvaluator<'a, P> {
     /// better, a strict decrease means joining is preferred.
     ///
     /// # Errors
-    /// Returns [`OneManyError`] if either EFE evaluation fails (invalid provider data).
+    /// Returns [`AifError`] if either EFE evaluation fails (invalid provider data).
     pub fn decide_join(
         &self,
         agent: AgentId,
         members: &[AgentId],
-    ) -> Result<bool, OneManyError> {
+    ) -> Result<bool, AifError> {
         let coalition = self.coalition_efe(agent, members)?;
         let individual = self.individual_efe(agent)?;
         Ok(coalition < individual)
@@ -187,7 +187,7 @@ impl<'a, P: CapabilityProvider> CoalitionEvaluator<'a, P> {
 /// // High trust + high compatibility aligns preferences with the obs model, so joining
 /// // lowers expected free energy.
 /// assert!(eval.decide_join(0, &[0, 1])?);
-/// # Ok::<(), aif::OneManyError>(())
+/// # Ok::<(), aif::AifError>(())
 /// ```
 #[must_use]
 pub fn belief_weighted_preference(
@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_join_equality_edge_does_not_join() -> Result<(), OneManyError> {
+    fn test_decide_join_equality_edge_does_not_join() -> Result<(), AifError> {
         let provider = NeutralProvider;
         let eval = CoalitionEvaluator::new(&provider);
 
@@ -419,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_join_synergy_vs_conflict() -> Result<(), OneManyError> {
+    fn test_decide_join_synergy_vs_conflict() -> Result<(), AifError> {
         // SYNERGY: coalition lowers G → join.
         let synergy = TestProvider { synergy: true };
         let eval = CoalitionEvaluator::new(&synergy);

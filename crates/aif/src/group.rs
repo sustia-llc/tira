@@ -1,5 +1,5 @@
 use crate::agent::{Agent, CopyAgent, POMDPAgent};
-use crate::OneManyError;
+use crate::AifError;
 use nalgebra::DVector;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -36,6 +36,19 @@ impl VotingAgent {
         }
     }
 
+    /// Construct a [`VotingAgent`] with a deterministically seeded RNG.
+    ///
+    /// Unlike [`VotingAgent::new`], which seeds from entropy, this constructor
+    /// makes the voter's tie-breaking and sampling reproducible across runs.
+    #[must_use]
+    pub fn with_seed(n_actions: usize, mode: VotingMode, seed: u64) -> Self {
+        Self {
+            mode,
+            n_actions,
+            rng: StdRng::seed_from_u64(seed),
+        }
+    }
+
     /// Aggregate discrete votes into a single group action.
     ///
     /// This method accepts ANY [`VotingMode`] when called directly, branching on
@@ -44,11 +57,11 @@ impl VotingAgent {
     /// `CertaintyWeighted` to [`VotingAgent::aggregate_weighted`], so the pipeline
     /// never reaches this method with `CertaintyWeighted`; direct callers may.
     #[allow(clippy::missing_errors_doc)]
-    pub fn aggregate(&mut self, votes: &[usize]) -> Result<usize, OneManyError> {
+    pub fn aggregate(&mut self, votes: &[usize]) -> Result<usize, AifError> {
         let mut counts = vec![0usize; self.n_actions];
         for &v in votes {
             if v >= self.n_actions {
-                return Err(OneManyError::InvalidAction(v));
+                return Err(AifError::InvalidAction(v));
             }
             counts[v] += 1;
         }
@@ -100,15 +113,15 @@ impl VotingAgent {
     /// `Deterministic`; direct callers may.
     ///
     /// Every distribution must have length equal to `n_actions`; otherwise an
-    /// [`OneManyError::InvalidAction`] carrying the offending length is returned.
+    /// [`AifError::InvalidAction`] carrying the offending length is returned.
     #[allow(clippy::missing_errors_doc)]
     pub fn aggregate_weighted(
         &mut self,
         distributions: &[DVector<f64>],
-    ) -> Result<usize, OneManyError> {
+    ) -> Result<usize, AifError> {
         for dist in distributions {
             if dist.len() != self.n_actions {
-                return Err(OneManyError::InvalidAction(dist.len()));
+                return Err(AifError::InvalidAction(dist.len()));
             }
         }
 
@@ -183,6 +196,7 @@ pub struct GroupAgent {
     internal: Vec<POMDPAgent>,
     active: VotingAgent,
     n_actions: usize,
+    rng: StdRng,
 }
 
 impl GroupAgent {
@@ -193,6 +207,29 @@ impl GroupAgent {
             internal: internal_agents,
             active: VotingAgent::new(n_actions, mode),
             n_actions,
+            rng: StdRng::from_rng(&mut rand::rng()),
+        }
+    }
+
+    /// Construct a [`GroupAgent`] with deterministically seeded RNGs.
+    ///
+    /// Both the active [`VotingAgent`] and the group-level RNG (used in the
+    /// `CertaintyWeighted` branch of [`GroupAgent::act`]) are seeded so the whole
+    /// group path is reproducible. The two RNGs use distinct seeds — the group RNG
+    /// is offset by a fixed constant — so their streams do not correlate.
+    #[must_use]
+    pub fn new_with_seed(
+        internal_agents: Vec<POMDPAgent>,
+        n_actions: usize,
+        mode: VotingMode,
+        seed: u64,
+    ) -> Self {
+        Self {
+            sensory: CopyAgent,
+            internal: internal_agents,
+            active: VotingAgent::with_seed(n_actions, mode, seed),
+            n_actions,
+            rng: StdRng::seed_from_u64(seed.wrapping_add(0x9E37_79B9)),
         }
     }
 
@@ -218,7 +255,7 @@ impl GroupAgent {
 }
 
 impl Agent for GroupAgent {
-    fn act(&mut self, observation: usize) -> Result<usize, OneManyError> {
+    fn act(&mut self, observation: usize) -> Result<usize, AifError> {
         let sensory_output = self.sensory.act(observation)?;
 
         if self.active.mode == VotingMode::CertaintyWeighted {
@@ -226,9 +263,11 @@ impl Agent for GroupAgent {
             let mut distributions = Vec::with_capacity(self.internal.len());
             for agent in &mut self.internal {
                 let probs = agent.action_probabilities(sensory_output);
-                // Still need to record an action for the agent's internal state
+                // Still need to record an action for the agent's internal state.
+                // The sampled action only advances this agent's `last_action`; it
+                // does NOT feed the group vote (that comes from `aggregate_weighted`).
                 let dist = WeightedIndex::new(probs.as_slice())?;
-                let action = dist.sample(&mut rand::rng());
+                let action = dist.sample(&mut self.rng);
                 agent.record_action(action);
                 distributions.push(probs);
             }
@@ -254,6 +293,7 @@ pub struct GroupAgentBuilder {
     alpha: f64,
     voting_mode: VotingMode,
     learn_a: bool,
+    seed: Option<u64>,
 }
 
 impl GroupAgentBuilder {
@@ -267,6 +307,7 @@ impl GroupAgentBuilder {
             alpha: 1.0,
             voting_mode: VotingMode::Probabilistic,
             learn_a: false,
+            seed: None,
         }
     }
 
@@ -324,8 +365,28 @@ impl GroupAgentBuilder {
         self
     }
 
+    /// Seed the group's RNGs for reproducible runs.
+    ///
+    /// When set, every `build_*` method constructs the [`GroupAgent`] via
+    /// [`GroupAgent::new_with_seed`], making the group path (including the
+    /// `CertaintyWeighted` branch) deterministic. When unset (the default), RNGs
+    /// are seeded from entropy.
+    #[must_use]
+    pub fn seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
+    /// Build the final [`GroupAgent`], honoring the optional seed.
+    fn finish(&self, internal: Vec<POMDPAgent>, mode: VotingMode) -> GroupAgent {
+        match self.seed {
+            Some(s) => GroupAgent::new_with_seed(internal, self.n_bandits, mode, s),
+            None => GroupAgent::new(internal, self.n_bandits, mode),
+        }
+    }
+
     #[allow(clippy::missing_errors_doc)]
-    pub fn build_identical(self) -> Result<GroupAgent, OneManyError> {
+    pub fn build_identical(self) -> Result<GroupAgent, AifError> {
         let agents: Vec<POMDPAgent> = (0..self.n_internal)
             .map(|_| {
                 POMDPAgent::new(
@@ -340,13 +401,13 @@ impl GroupAgentBuilder {
             })
             .collect::<Result<_, _>>()?;
 
-        Ok(GroupAgent::new(agents, self.n_bandits, self.voting_mode))
+        Ok(self.finish(agents, self.voting_mode))
     }
 
     #[allow(clippy::missing_errors_doc)]
-    pub fn build_varying_alpha(self, alphas: &[f64]) -> Result<GroupAgent, OneManyError> {
+    pub fn build_varying_alpha(self, alphas: &[f64]) -> Result<GroupAgent, AifError> {
         if alphas.len() != self.n_internal {
-            return Err(OneManyError::InvalidAction(alphas.len()));
+            return Err(AifError::InvalidAction(alphas.len()));
         }
         let agents: Vec<POMDPAgent> = alphas
             .iter()
@@ -363,16 +424,16 @@ impl GroupAgentBuilder {
             })
             .collect::<Result<_, _>>()?;
 
-        Ok(GroupAgent::new(agents, self.n_bandits, self.voting_mode))
+        Ok(self.finish(agents, self.voting_mode))
     }
 
     #[allow(clippy::missing_errors_doc)]
     pub fn build_varying_preferences(
         self,
         preference_sets: &[Vec<f64>],
-    ) -> Result<GroupAgent, OneManyError> {
+    ) -> Result<GroupAgent, AifError> {
         if preference_sets.len() != self.n_internal {
-            return Err(OneManyError::InvalidAction(preference_sets.len()));
+            return Err(AifError::InvalidAction(preference_sets.len()));
         }
         let agents: Vec<POMDPAgent> = preference_sets
             .iter()
@@ -389,7 +450,7 @@ impl GroupAgentBuilder {
             })
             .collect::<Result<_, _>>()?;
 
-        Ok(GroupAgent::new(agents, self.n_bandits, self.voting_mode))
+        Ok(self.finish(agents, self.voting_mode))
     }
 }
 
@@ -398,7 +459,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_voting_agent_probabilistic() -> Result<(), OneManyError> {
+    fn test_voting_agent_probabilistic() -> Result<(), AifError> {
         let mut voter = VotingAgent::new(3, VotingMode::Probabilistic);
         let votes = vec![0, 0, 0, 1, 2];
         let mut counts = vec![0usize; 3];
@@ -414,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn test_voting_agent_deterministic() -> Result<(), OneManyError> {
+    fn test_voting_agent_deterministic() -> Result<(), AifError> {
         let mut voter = VotingAgent::new(3, VotingMode::Deterministic);
         let votes = vec![0, 0, 0, 1, 2];
         for _ in 0..100 {
@@ -425,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn test_voting_agent_deterministic_tie() -> Result<(), OneManyError> {
+    fn test_voting_agent_deterministic_tie() -> Result<(), AifError> {
         let mut voter = VotingAgent::new(3, VotingMode::Deterministic);
         let votes = vec![0, 1, 0, 1];
         for _ in 0..100 {
@@ -436,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn test_certainty_weighted_prefers_confident_agent() -> Result<(), OneManyError> {
+    fn test_certainty_weighted_prefers_confident_agent() -> Result<(), AifError> {
         let mut voter = VotingAgent::new(3, VotingMode::CertaintyWeighted);
 
         // Agent A: very confident about action 0 (low entropy)
@@ -463,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn test_certainty_weighted_equal_confidence_averages() -> Result<(), OneManyError> {
+    fn test_certainty_weighted_equal_confidence_averages() -> Result<(), AifError> {
         let mut voter = VotingAgent::new(2, VotingMode::CertaintyWeighted);
 
         // Two agents with equal entropy but opposite preferences
@@ -488,14 +549,14 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate_weighted_rejects_wrong_length() -> Result<(), OneManyError> {
+    fn test_aggregate_weighted_rejects_wrong_length() -> Result<(), AifError> {
         let mut voter = VotingAgent::new(3, VotingMode::CertaintyWeighted);
 
         // Distribution length (2) does not match n_actions (3) → must error.
         let wrong = vec![DVector::from_vec(vec![0.5, 0.5])];
         let err = voter.aggregate_weighted(&wrong);
         assert!(
-            matches!(err, Err(OneManyError::InvalidAction(2))),
+            matches!(err, Err(AifError::InvalidAction(2))),
             "Wrong-length distribution should be rejected: {err:?}"
         );
 
@@ -507,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate_weighted_deterministic_direct_call() -> Result<(), OneManyError> {
+    fn test_aggregate_weighted_deterministic_direct_call() -> Result<(), AifError> {
         // Direct callers may use Deterministic with aggregate_weighted even though
         // the GroupAgent pipeline never routes Deterministic here.
         let mut voter = VotingAgent::new(3, VotingMode::Deterministic);
@@ -525,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn test_group_agent_identical() -> Result<(), OneManyError> {
+    fn test_group_agent_identical() -> Result<(), AifError> {
         let group = GroupAgentBuilder::new(3)
             .n_internal(4)
             .observation_probs(vec![0.8, 0.2, 0.2])
@@ -542,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn test_group_agent_varying_alpha() -> Result<(), OneManyError> {
+    fn test_group_agent_varying_alpha() -> Result<(), AifError> {
         let alphas = vec![0.2, 0.4, 0.6, 0.8];
         let group = GroupAgentBuilder::new(3)
             .n_internal(4)
@@ -560,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn test_group_agent_varying_preferences() -> Result<(), OneManyError> {
+    fn test_group_agent_varying_preferences() -> Result<(), AifError> {
         let pref_sets = vec![
             vec![0.9, 0.1],
             vec![0.1, 0.9],
@@ -574,6 +635,56 @@ mod tests {
             .build_varying_preferences(&pref_sets)?;
 
         assert_eq!(group.n_internal(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn test_cw_group_is_reproducible_with_seed() -> Result<(), AifError> {
+        let build = || {
+            GroupAgentBuilder::new(3)
+                .n_internal(4)
+                .observation_probs(vec![0.8, 0.2, 0.2])
+                .preferences(vec![0.7, 0.3])
+                .alpha(0.5)
+                .certainty_weighted(true)
+                .seed(42)
+                .build_identical()
+        };
+
+        let mut group_a = build()?;
+        let mut group_b = build()?;
+
+        let mut seq_a = Vec::with_capacity(30);
+        let mut seq_b = Vec::with_capacity(30);
+        for t in 0..30 {
+            let obs = t % 2;
+            seq_a.push(group_a.act(obs)?);
+            seq_b.push(group_b.act(obs)?);
+        }
+
+        assert_eq!(
+            seq_a, seq_b,
+            "Identical-seed CW groups must produce identical action sequences"
+        );
+
+        // A different seed should (with overwhelming probability) diverge.
+        let mut group_c = GroupAgentBuilder::new(3)
+            .n_internal(4)
+            .observation_probs(vec![0.8, 0.2, 0.2])
+            .preferences(vec![0.7, 0.3])
+            .alpha(0.5)
+            .certainty_weighted(true)
+            .seed(43)
+            .build_identical()?;
+        let mut seq_c = Vec::with_capacity(30);
+        for t in 0..30 {
+            seq_c.push(group_c.act(t % 2)?);
+        }
+        assert_ne!(
+            seq_a, seq_c,
+            "Different-seed CW groups should produce a different sequence"
+        );
+
         Ok(())
     }
 }

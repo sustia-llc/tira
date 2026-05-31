@@ -1,7 +1,7 @@
-use reproduce::{Agent, BanditEnvironment, Environment, OneManyError, POMDPAgent};
+use reproduce::{Agent, BanditEnvironment, Environment, AifError, POMDPAgent};
 
 #[test]
-fn test_complete_pomdp_cycle() -> Result<(), OneManyError> {
+fn test_complete_pomdp_cycle() -> Result<(), AifError> {
     // Paper setup: agents have accurate beliefs about outcome probabilities.
     // Bandit 0: 80% reward, Bandit 1: 20%, Bandit 2: 20%
     let mut env = BanditEnvironment::new(vec![0.8, 0.2, 0.2])?;
@@ -41,7 +41,7 @@ fn test_complete_pomdp_cycle() -> Result<(), OneManyError> {
 }
 
 #[test]
-fn test_pomdp_belief_adaptation() -> Result<(), OneManyError> {
+fn test_pomdp_belief_adaptation() -> Result<(), AifError> {
     // Bandit 2 gives best rewards
     let mut env = BanditEnvironment::new(vec![0.3, 0.4, 0.9])?;
 
@@ -79,7 +79,7 @@ fn test_pomdp_belief_adaptation() -> Result<(), OneManyError> {
 }
 
 #[test]
-fn test_pomdp_sequential_decisions() -> Result<(), OneManyError> {
+fn test_pomdp_sequential_decisions() -> Result<(), AifError> {
     let mut env1 = BanditEnvironment::new(vec![0.8, 0.2, 0.5])?;
     let mut env2 = BanditEnvironment::new(vec![0.2, 0.9, 0.4])?;
 
@@ -132,7 +132,7 @@ fn test_pomdp_sequential_decisions() -> Result<(), OneManyError> {
 }
 
 #[test]
-fn test_env_observation_matches_agent_preferred_index() -> Result<(), OneManyError> {
+fn test_env_observation_matches_agent_preferred_index() -> Result<(), AifError> {
     // Cross-module round-trip: the environment's observation encoding must match the
     // agent's generative-model convention, where observation index 0 = the preferred
     // (high-probability / reward) outcome.

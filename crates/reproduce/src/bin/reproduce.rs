@@ -1,7 +1,7 @@
 use reproduce::{
     experiment_certainty_weighted, experiment_deterministic, experiment_identical,
     experiment_varying_alpha, experiment_varying_preferences, parameter_recovery_single,
-    OneManyError, RecoveryResult, TrialData,
+    AifError, RecoveryResult, TrialData,
 };
 use rayon::prelude::*;
 use std::time::Instant;
@@ -92,7 +92,7 @@ fn run_experiment<F>(
     experiment_fn: F,
 ) -> Vec<(f64, f64, usize)>
 where
-    F: Fn(usize, f64, usize) -> Result<(TrialData, RecoveryResult), OneManyError>
+    F: Fn(usize, f64, usize) -> Result<(TrialData, RecoveryResult), AifError>
         + Sync
         + Send,
 {

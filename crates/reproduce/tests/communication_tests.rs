@@ -1,6 +1,6 @@
 use reproduce::{
     CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel, Message, MessageContent,
-    MultiAgentEnvironment, OneManyError, POMDPAgent, SharedBanditEnvironment,
+    MultiAgentEnvironment, AifError, POMDPAgent, SharedBanditEnvironment,
 };
 
 struct TestEnvironment {
@@ -36,7 +36,7 @@ impl TestEnvironment {
 }
 
 #[test]
-fn test_communicating_agents() -> Result<(), OneManyError> {
+fn test_communicating_agents() -> Result<(), AifError> {
     let n_agents = 2;
     let n_bandits = 3;
     let mut test_env = TestEnvironment::new(n_agents);
@@ -105,7 +105,7 @@ fn test_communicating_agents() -> Result<(), OneManyError> {
                 prev_obs2 = reward2;
                 test_env.record_action(1, action2, reward2);
             }
-            Err(OneManyError::ResourceConflict(_)) => {
+            Err(AifError::ResourceConflict(_)) => {
                 let mut found = false;
                 for alt in (0..n_bandits).filter(|&a| a != action2) {
                     match <SharedBanditEnvironment as MultiAgentEnvironment>::step(
@@ -119,7 +119,7 @@ fn test_communicating_agents() -> Result<(), OneManyError> {
                             found = true;
                             break;
                         }
-                        Err(OneManyError::ResourceConflict(_)) => continue,
+                        Err(AifError::ResourceConflict(_)) => continue,
                         Err(e) => return Err(e),
                     }
                 }
@@ -168,7 +168,7 @@ fn test_communicating_agents() -> Result<(), OneManyError> {
 }
 
 #[test]
-fn test_cooperative_communication() -> Result<(), OneManyError> {
+fn test_cooperative_communication() -> Result<(), AifError> {
     let n_agents = 2;
     let n_bandits = 3;
     let mut test_env = TestEnvironment::new(n_agents);

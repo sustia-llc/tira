@@ -1,10 +1,10 @@
 use reproduce::{
-    Agent, BanditEnvironment, Environment, GroupAgentBuilder, OneManyError,
+    Agent, BanditEnvironment, Environment, GroupAgentBuilder, AifError,
 };
 
 /// Experiment 1 setup: identical agents, verify group behaves coherently.
 #[test]
-fn test_experiment1_identical_agents() -> Result<(), OneManyError> {
+fn test_experiment1_identical_agents() -> Result<(), AifError> {
     let mut env = BanditEnvironment::new(vec![0.8, 0.2, 0.2])?;
 
     for &n_internal in &[4, 8, 16] {
@@ -40,7 +40,7 @@ fn test_experiment1_identical_agents() -> Result<(), OneManyError> {
 
 /// Experiment 3 setup: deterministic voting should produce more decisive behavior.
 #[test]
-fn test_experiment3_deterministic_vs_probabilistic() -> Result<(), OneManyError> {
+fn test_experiment3_deterministic_vs_probabilistic() -> Result<(), AifError> {
     let mut env = BanditEnvironment::new(vec![0.8, 0.2, 0.2])?;
     let n_trials = 200;
 
@@ -95,7 +95,7 @@ fn test_experiment3_deterministic_vs_probabilistic() -> Result<(), OneManyError>
 
 /// Experiment 4 setup: conflicting preferences should produce noisy group behavior.
 #[test]
-fn test_experiment4_conflicting_preferences() -> Result<(), OneManyError> {
+fn test_experiment4_conflicting_preferences() -> Result<(), AifError> {
     let mut env = BanditEnvironment::new(vec![0.8, 0.2, 0.2])?;
 
     // Create agents where half prefer obs 1 and half prefer obs 2
@@ -137,7 +137,7 @@ fn test_experiment4_conflicting_preferences() -> Result<(), OneManyError> {
 
 /// Group agent should work with varying alpha values (Experiment 2).
 #[test]
-fn test_experiment2_varying_alpha() -> Result<(), OneManyError> {
+fn test_experiment2_varying_alpha() -> Result<(), AifError> {
     let mut env = BanditEnvironment::new(vec![0.8, 0.2, 0.2])?;
 
     let alphas = vec![0.1, 0.3, 0.5, 0.7, 0.9, 0.2, 0.4, 0.6];

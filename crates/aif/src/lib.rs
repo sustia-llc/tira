@@ -19,7 +19,7 @@ pub use communication::{
 pub use group::{GroupAgent, GroupAgentBuilder, VotingAgent, VotingMode};
 
 #[derive(Error, Debug)]
-pub enum OneManyError {
+pub enum AifError {
     #[error("Invalid probability value: {0}")]
     InvalidProbability(f64),
     #[error("Invalid distribution: {0}")]
@@ -32,7 +32,7 @@ pub enum OneManyError {
     Weight(#[from] WeightError),
     #[error("Invalid agent ID: {0}")]
     InvalidAgentId(usize),
-    #[error("Resource conflict: Bandit {0} already selected")]
+    #[error("Resource conflict: option {0} already claimed")]
     ResourceConflict(usize),
     #[error("Communication error: {0}")]
     Communication(String),
