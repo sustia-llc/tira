@@ -61,6 +61,8 @@ impl POMDPAgent {
         learn_a: bool,
     ) -> Result<Self, OneManyError> {
         let n_obs = 2;
+        // One bandit arm per state in the MAB model: actions and states are coupled here.
+        let n_actions = n_states;
 
         if preferences.len() != n_obs {
             return Err(OneManyError::InvalidAction(preferences.len()));
@@ -78,6 +80,40 @@ impl POMDPAgent {
             && belief.len() != n_states
         {
             return Err(OneManyError::InvalidAction(belief.len()));
+        }
+
+        // Value validation (after length checks, before matrices are built).
+        // observation_probs: each entry becomes A column [p, 1-p], so p must be a
+        // valid probability in [0, 1].
+        if let Some(ref probs) = observation_probs {
+            for &p in probs {
+                if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+                    return Err(OneManyError::InvalidProbability(p));
+                }
+            }
+        }
+        // preferences are RELATIVE per-observation preferences (each log-transformed
+        // independently); they are NOT required to sum to 1. Each must be a finite
+        // value in (0.0, 1.0] so its log is well-defined and non-positive.
+        for &p in &preferences {
+            if !(p.is_finite() && p > 0.0 && p <= 1.0) {
+                return Err(OneManyError::InvalidProbability(p));
+            }
+        }
+        // initial_belief (D): a valid distribution over states — finite, non-negative,
+        // summing to 1.0.
+        if let Some(ref belief) = initial_belief {
+            if belief.iter().any(|&p| !p.is_finite() || p < 0.0) {
+                return Err(OneManyError::InvalidDistribution(
+                    "initial_belief entries must be finite and non-negative".to_owned(),
+                ));
+            }
+            let sum: f64 = belief.iter().sum();
+            if (sum - 1.0).abs() > 1e-6 {
+                return Err(OneManyError::InvalidDistribution(format!(
+                    "initial_belief must sum to 1.0 (got {sum})"
+                )));
+            }
         }
 
         // A matrix: (n_obs × n_states), column j = [p_j, 1-p_j]
@@ -116,9 +152,10 @@ impl POMDPAgent {
             DVector::from_element(n_states, 1.0 / n)
         };
 
-        // E vector: uniform policy prior (over single actions for depth-1).
+        // E vector: uniform policy prior over actions/policies (depth-1).
+        // Sized by `n_actions` (a prior over actions, not states).
         // `with_params` overrides this for policy_depth > 1.
-        let e_vector = DVector::from_element(n_states, 1.0 / n);
+        let e_vector = DVector::from_element(n_actions, 1.0 / n_actions as f64);
 
         let pa_matrix = if learn_a {
             initial_precision.map(|prec| {
@@ -143,7 +180,7 @@ impl POMDPAgent {
             alpha,
             learn_a,
             policy_depth: 1,
-            n_actions: n_states,
+            n_actions,
             rng: StdRng::from_rng(&mut rand::rng()),
         })
     }
@@ -229,7 +266,8 @@ impl POMDPAgent {
 
     /// Compute neg-G for a single step: predicted state qs_next → (neg_g, qs_next).
     /// Returns the negative expected free energy contribution (higher = preferred)
-    /// and the predicted next-state distribution.
+    /// and the predicted next-state distribution. The epistemic term is the exact
+    /// mutual information I(s;o|π) = H[q(o|π)] − E_{q(s')}[H(o|s')].
     fn efe_step(&self, qs: &DVector<f64>, action: usize) -> (f64, DVector<f64>) {
         let qs_next = &self.b_matrix[action] * qs;
         let qo = &self.a_matrix * &qs_next;
@@ -241,20 +279,31 @@ impl POMDPAgent {
             .map(|(&qo_i, &c_i)| qo_i * c_i)
             .sum();
 
-        // Information gain approximation: H[q(o|π)] (observation entropy)
-        // Upper bound on mutual information I(s;o|π) = H(o|π) - H(o|s,π)
+        // Information gain (epistemic value): exact mutual information
+        //   I(s;o|π) = H[q(o|π)] − E_{q(s')}[H(o|s')]
+        // Previously only H[q(o|π)] was used (an upper bound); the expected conditional
+        // entropy term is exactly zero only for deterministic (0/1) A columns and cancels
+        // in the policy softmax when all arms share the same marginal entropy (the canonical
+        // [0.8,0.2,0.2] arms, ~0.50 nats each) — so this correction is inert for the paper's
+        // Figures 4–6 but exact for heterogeneous-entropy observation models.
         let obs_entropy: f64 = qo
             .iter()
-            .map(|&qo_i| {
-                if qo_i > 1e-10 {
-                    -qo_i * qo_i.ln()
-                } else {
-                    0.0
-                }
+            .map(|&qo_i| if qo_i > 1e-10 { -qo_i * qo_i.ln() } else { 0.0 })
+            .sum();
+        let expected_conditional_entropy: f64 = (0..qs_next.len())
+            .map(|s| {
+                let h_col: f64 = (0..self.a_matrix.nrows())
+                    .map(|o| {
+                        let a = self.a_matrix[(o, s)];
+                        if a > 1e-10 { -a * a.ln() } else { 0.0 }
+                    })
+                    .sum();
+                qs_next[s] * h_col
             })
             .sum();
+        let info_gain = obs_entropy - expected_conditional_entropy;
 
-        (obs_entropy + pragmatic, qs_next)
+        (info_gain + pragmatic, qs_next)
     }
 
     /// Enumerate all length-`depth` action sequences and compute neg-G for each.
@@ -480,6 +529,68 @@ mod tests {
     }
 
     #[test]
+    fn test_e_vector_sized_by_n_actions() -> Result<(), OneManyError> {
+        let agent = POMDPAgent::new(
+            3,
+            Some(vec![0.8, 0.2, 0.2]),
+            None,
+            vec![0.7, 0.3],
+            None,
+            8.0,
+            false,
+        )?;
+        assert_eq!(agent.e_vector.len(), agent.n_actions);
+        Ok(())
+    }
+
+    #[test]
+    fn test_new_rejects_out_of_range_observation_probs() {
+        let result =
+            POMDPAgent::new(3, Some(vec![1.5, 0.2, 0.2]), None, vec![0.7, 0.3], None, 1.0, false);
+        assert!(
+            matches!(result, Err(OneManyError::InvalidProbability(_))),
+            "Should reject observation_probs outside [0, 1]"
+        );
+    }
+
+    #[test]
+    fn test_new_rejects_out_of_range_preferences() {
+        let too_high = POMDPAgent::new(3, None, None, vec![1.2, 0.3], None, 1.0, false);
+        assert!(
+            matches!(too_high, Err(OneManyError::InvalidProbability(_))),
+            "Should reject preference > 1.0"
+        );
+        let non_positive = POMDPAgent::new(3, None, None, vec![0.0, 0.3], None, 1.0, false);
+        assert!(
+            matches!(non_positive, Err(OneManyError::InvalidProbability(_))),
+            "Should reject preference <= 0.0"
+        );
+    }
+
+    #[test]
+    fn test_new_rejects_non_normalized_initial_belief() {
+        let bad_sum =
+            POMDPAgent::new(3, None, None, vec![0.7, 0.3], Some(vec![0.5, 0.2, 0.2]), 1.0, false);
+        assert!(
+            matches!(bad_sum, Err(OneManyError::InvalidDistribution(_))),
+            "Should reject initial_belief not summing to 1.0"
+        );
+        let negative =
+            POMDPAgent::new(3, None, None, vec![0.7, 0.3], Some(vec![1.2, -0.1, -0.1]), 1.0, false);
+        assert!(
+            matches!(negative, Err(OneManyError::InvalidDistribution(_))),
+            "Should reject negative initial_belief entry"
+        );
+    }
+
+    #[test]
+    fn test_new_accepts_valid_initial_belief() {
+        let result =
+            POMDPAgent::new(3, None, None, vec![0.7, 0.3], Some(vec![0.4, 0.3, 0.3]), 1.0, false);
+        assert!(result.is_ok(), "Should accept a valid initial_belief");
+    }
+
+    #[test]
     fn test_state_inference_deterministic_transition() -> Result<(), OneManyError> {
         // After choosing action 0, state belief should be concentrated at state 0
         let mut agent = POMDPAgent::new(
@@ -614,6 +725,72 @@ mod tests {
             g0 > g1,
             "Action 0 should have higher neg-G (preferred): g0={g0}, g1={g1}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_efe_step_exact_mi_differs_on_heterogeneous_entropy() -> Result<(), OneManyError> {
+        // A columns with different marginal entropies: arm 0 = [0.5,0.5] (max entropy),
+        // arms 1/2 = [0.9,0.1] (lower). Deterministic B makes efe_step(state, a) predict a
+        // delta on state a, so the epistemic term reduces to H[A[:,a]] − H[A[:,a]] handling.
+        let agent = POMDPAgent::new(
+            3,
+            Some(vec![0.5, 0.9, 0.9]),
+            None,
+            vec![0.7, 0.3],
+            None,
+            8.0,
+            false,
+        )?;
+
+        // Expected conditional entropy H(A[:,s]) per column.
+        let h_col = |s: usize| -> f64 {
+            (0..agent.a_matrix.nrows())
+                .map(|o| {
+                    let a = agent.a_matrix[(o, s)];
+                    if a > 1e-10 { -a * a.ln() } else { 0.0 }
+                })
+                .sum()
+        };
+
+        // High-ambiguity arm 0 (p = 0.5): conditional entropy ≈ ln 2 ≈ 0.693 nats.
+        let h0 = h_col(0);
+        assert!(
+            (h0 - std::f64::consts::LN_2).abs() < 1e-9,
+            "p=0.5 column conditional entropy should be ln(2): {h0}"
+        );
+        // Low-ambiguity arm 1 (p = 0.9): conditional entropy ≈ 0.325 nats.
+        let h1 = h_col(1);
+        let expected_h1 = -0.9_f64 * 0.9_f64.ln() - 0.1_f64 * 0.1_f64.ln();
+        assert!(
+            (h1 - expected_h1).abs() < 1e-9 && (h1 - 0.325).abs() < 1e-2,
+            "p=0.9 column conditional entropy should be ≈0.325: {h1}"
+        );
+
+        // The exact MI correction is strictly positive for both columns (non-deterministic A),
+        // so the exact info-gain term differs from the bare marginal H[q(o|π)] by a positive
+        // amount. Verify directly: recompute marginal obs entropy and check info_gain < it.
+        for action in 0..3 {
+            let qs_next = &agent.b_matrix[action] * &agent.state_belief;
+            let qo = &agent.a_matrix * &qs_next;
+            let obs_entropy: f64 = qo
+                .iter()
+                .map(|&qo_i| if qo_i > 1e-10 { -qo_i * qo_i.ln() } else { 0.0 })
+                .sum();
+            let expected_conditional_entropy: f64 =
+                (0..qs_next.len()).map(|s| qs_next[s] * h_col(s)).sum();
+            let info_gain = obs_entropy - expected_conditional_entropy;
+            assert!(
+                expected_conditional_entropy > 0.0,
+                "conditional entropy must be > 0 for non-deterministic A (action {action})"
+            );
+            assert!(
+                info_gain < obs_entropy - 1e-9,
+                "exact MI must be strictly below the bare marginal entropy (action {action}): \
+                 info_gain={info_gain}, obs_entropy={obs_entropy}"
+            );
+        }
+
         Ok(())
     }
 

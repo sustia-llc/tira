@@ -10,7 +10,7 @@ mod group;
 pub use agent::{Agent, CopyAgent, POMDPAgent};
 pub use coalition::{
     AgentId, CapabilityProvider, CoalitionEvaluator, CoalitionHistory, CompatibilityBeliefs,
-    TrustBeliefs,
+    TrustBeliefs, belief_weighted_preference,
 };
 pub use communication::{
     AgentMessage, CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel, Message,
@@ -22,6 +22,8 @@ pub use group::{GroupAgent, GroupAgentBuilder, VotingAgent, VotingMode};
 pub enum OneManyError {
     #[error("Invalid probability value: {0}")]
     InvalidProbability(f64),
+    #[error("Invalid distribution: {0}")]
+    InvalidDistribution(String),
     #[error("Invalid action: {0}")]
     InvalidAction(usize),
     #[error("Distribution error: {0}")]

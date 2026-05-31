@@ -128,6 +128,95 @@ impl<'a, P: CapabilityProvider> CoalitionEvaluator<'a, P> {
     }
 }
 
+/// Derive a coalition preference vector `[p(obs1), p(obs2)]` from the supporting belief
+/// structures, for a domain to return from [`CapabilityProvider::preferences`] when `agent`
+/// is in `members`. Observation index 0 is the preferred (reward) outcome, so a HIGHER
+/// aggregate trust / compatibility / past-performance pulls preference toward it (lower G
+/// in synergy). This is the concrete realization of the module's "supporting data" role;
+/// domains may use it or compute their own preference shift.
+///
+/// # Composition
+/// Let `partners` be the members other than `agent`. If `partners` is empty (acting alone
+/// or a singleton self-coalition) the result is the neutral `[0.5, 0.5]`. Otherwise the
+/// aggregate is `base = 0.5·(mean trust over partners + mean compatibility with partners)`,
+/// optionally blended `0.5·base + 0.5·h` with any recorded history `h` for `members`, then
+/// clamped to `[0.05, 0.95]` to avoid degenerate log-preferences downstream.
+///
+/// # Examples
+/// ```rust
+/// use aif::{
+///     belief_weighted_preference, AgentId, CapabilityProvider, CoalitionEvaluator,
+///     CompatibilityBeliefs, CoalitionHistory, TrustBeliefs,
+/// };
+///
+/// /// A provider that derives coalition preferences from its belief structures.
+/// struct BeliefProvider {
+///     trust: TrustBeliefs,
+///     compat: CompatibilityBeliefs,
+///     history: CoalitionHistory,
+/// }
+///
+/// impl CapabilityProvider for BeliefProvider {
+///     fn n_states(&self) -> usize {
+///         2
+///     }
+///     fn observation_probs(&self, _agent: AgentId) -> Vec<f64> {
+///         vec![0.9, 0.9]
+///     }
+///     fn preferences(&self, agent: AgentId, members: &[AgentId]) -> Vec<f64> {
+///         if members.is_empty() {
+///             vec![0.5, 0.5]
+///         } else {
+///             belief_weighted_preference(agent, members, &self.trust, &self.compat, &self.history)
+///         }
+///     }
+///     fn alpha(&self, _agent: AgentId) -> f64 {
+///         8.0
+///     }
+/// }
+///
+/// let mut trust = TrustBeliefs::new();
+/// let mut compat = CompatibilityBeliefs::new();
+/// for _ in 0..200 {
+///     trust.update(1, 1.0);
+/// }
+/// compat.set(0, 1, 1.0);
+/// let provider = BeliefProvider { trust, compat, history: CoalitionHistory::new() };
+///
+/// let eval = CoalitionEvaluator::new(&provider);
+/// // High trust + high compatibility aligns preferences with the obs model, so joining
+/// // lowers expected free energy.
+/// assert!(eval.decide_join(0, &[0, 1])?);
+/// # Ok::<(), aif::OneManyError>(())
+/// ```
+#[must_use]
+pub fn belief_weighted_preference(
+    agent: AgentId,
+    members: &[AgentId],
+    trust: &TrustBeliefs,
+    compat: &CompatibilityBeliefs,
+    history: &CoalitionHistory,
+) -> Vec<f64> {
+    let partners: Vec<AgentId> = members.iter().copied().filter(|&m| m != agent).collect();
+    if partners.is_empty() {
+        // Acting alone (or a singleton self-coalition): neutral preference.
+        return vec![0.5, 0.5];
+    }
+
+    let n = partners.len() as f64;
+    let trust_score = partners.iter().map(|&p| trust.get(p)).sum::<f64>() / n;
+    let compat_score = partners.iter().map(|&p| compat.get(agent, p)).sum::<f64>() / n;
+    let base = 0.5 * (trust_score + compat_score);
+
+    let alignment = match history.get(members) {
+        Some(h) => 0.5 * base + 0.5 * h.clamp(0.0, 1.0),
+        None => base,
+    };
+    let alignment = alignment.clamp(0.05, 0.95);
+
+    vec![alignment, 1.0 - alignment]
+}
+
 /// Per-agent trust beliefs in `[0, 1]`, updated by exponential moving average.
 ///
 /// Re-expresses `coalition_aif`'s trust intent, but normalized and deterministic.
@@ -263,7 +352,9 @@ mod tests {
         }
 
         fn preferences(&self, _agent: AgentId, members: &[AgentId]) -> Vec<f64> {
-            let in_coalition = members.len() > 1;
+            // Honor the trait contract: `members` is empty iff acting alone, so any
+            // non-empty slice (including a 1-element one) means "in a coalition".
+            let in_coalition = !members.is_empty();
             if !in_coalition {
                 // Acting alone: neutral preference.
                 vec![0.5, 0.5]
@@ -279,6 +370,52 @@ mod tests {
         fn alpha(&self, _agent: AgentId) -> f64 {
             8.0
         }
+    }
+
+    /// Provider whose preferences IGNORE `members`, so coalition EFE exactly equals
+    /// individual EFE. Combined with a uniform observation model this makes
+    /// `coalition_efe == individual_efe`, exercising the strict-`<` boundary of
+    /// [`CoalitionEvaluator::decide_join`].
+    struct NeutralProvider;
+
+    impl CapabilityProvider for NeutralProvider {
+        fn n_states(&self) -> usize {
+            3
+        }
+
+        fn observation_probs(&self, _agent: AgentId) -> Vec<f64> {
+            vec![0.9, 0.9, 0.9]
+        }
+
+        fn preferences(&self, _agent: AgentId, _members: &[AgentId]) -> Vec<f64> {
+            // Identical alone vs in-coalition → coalition G == individual G.
+            vec![0.5, 0.5]
+        }
+
+        fn alpha(&self, _agent: AgentId) -> f64 {
+            8.0
+        }
+    }
+
+    #[test]
+    fn test_decide_join_equality_edge_does_not_join() -> Result<(), OneManyError> {
+        let provider = NeutralProvider;
+        let eval = CoalitionEvaluator::new(&provider);
+
+        // Document the equality the boundary depends on: with membership-independent
+        // preferences, coalition and individual G are identical.
+        assert!(
+            (eval.coalition_efe(0, &[0, 1])? - eval.individual_efe(0)?).abs() < 1e-12,
+            "neutral provider: coalition G must equal individual G"
+        );
+
+        // Strict `<` means equality does NOT join. A regression to `<=` fails here.
+        assert!(
+            !eval.decide_join(0, &[0, 1])?,
+            "equal G must not join (strict < boundary)"
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -362,5 +499,85 @@ mod tests {
         // Overwrite.
         h.record(&[0, 1, 2], 0.9);
         assert_eq!(h.get(&[0, 1, 2]), Some(0.9));
+    }
+
+    #[test]
+    fn test_belief_weighted_preference_alone_is_neutral() {
+        let trust = TrustBeliefs::new();
+        let compat = CompatibilityBeliefs::new();
+        let history = CoalitionHistory::new();
+
+        // Empty members → no partners → neutral.
+        let p_empty = belief_weighted_preference(0, &[], &trust, &compat, &history);
+        assert_eq!(p_empty, vec![0.5, 0.5]);
+
+        // Singleton self-coalition (only `agent`) → no partners → neutral.
+        let p_self = belief_weighted_preference(0, &[0], &trust, &compat, &history);
+        assert_eq!(p_self, vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn test_belief_weighted_preference_high_trust_compat_favors_obs1() {
+        let mut trust = TrustBeliefs::new();
+        let mut compat = CompatibilityBeliefs::new();
+        let history = CoalitionHistory::new();
+
+        // Drive partner 1's trust toward ~0.9 and compatibility to high.
+        for _ in 0..200 {
+            trust.update(1, 0.9);
+        }
+        compat.set(0, 1, 0.9);
+
+        let p = belief_weighted_preference(0, &[0, 1], &trust, &compat, &history);
+        assert!(p[0] > 0.5, "high trust+compat should favor obs1: {p:?}");
+        assert!(
+            (p[0] + p[1] - 1.0).abs() < 1e-12,
+            "preference must sum to 1"
+        );
+    }
+
+    #[test]
+    fn test_belief_weighted_preference_low_trust_compat_disfavors_obs1() {
+        let mut trust = TrustBeliefs::new();
+        let mut compat = CompatibilityBeliefs::new();
+        let history = CoalitionHistory::new();
+
+        // Drive partner 1's trust toward ~0.1 and compatibility to low.
+        for _ in 0..200 {
+            trust.update(1, 0.1);
+        }
+        compat.set(0, 1, 0.1);
+
+        let p = belief_weighted_preference(0, &[0, 1], &trust, &compat, &history);
+        assert!(p[0] < 0.5, "low trust+compat should disfavor obs1: {p:?}");
+    }
+
+    #[test]
+    fn test_belief_weighted_preference_history_override() {
+        let trust = TrustBeliefs::new();
+        let compat = CompatibilityBeliefs::new();
+
+        // With default beliefs base == 0.5 (alignment 0.5 absent history).
+        let no_history = CoalitionHistory::new();
+        let p_base = belief_weighted_preference(0, &[0, 1], &trust, &compat, &no_history);
+        assert!((p_base[0] - 0.5).abs() < 1e-12, "base alignment is 0.5");
+
+        // Recording high past performance blends alignment upward toward it.
+        let mut hi = CoalitionHistory::new();
+        hi.record(&[0, 1], 0.95);
+        let p_hi = belief_weighted_preference(0, &[0, 1], &trust, &compat, &hi);
+        assert!(
+            p_hi[0] > p_base[0],
+            "high history moves alignment up: {p_hi:?} vs {p_base:?}"
+        );
+
+        // Recording low past performance blends alignment downward.
+        let mut lo = CoalitionHistory::new();
+        lo.record(&[0, 1], 0.05);
+        let p_lo = belief_weighted_preference(0, &[0, 1], &trust, &compat, &lo);
+        assert!(
+            p_lo[0] < p_base[0],
+            "low history moves alignment down: {p_lo:?} vs {p_base:?}"
+        );
     }
 }

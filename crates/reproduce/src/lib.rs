@@ -71,7 +71,10 @@ impl Environment for BanditEnvironment {
         }
         let prob = self.probabilities[action];
         let dist = Bernoulli::new(prob).map_err(OneManyError::Distribution)?;
-        Ok(usize::from(dist.sample(&mut self.rng)))
+        let won = dist.sample(&mut self.rng);
+        // Observation index follows the agent's generative model: index 0 = preferred
+        // (high-probability) outcome. Bernoulli(prob) is true iff that outcome occurred.
+        Ok(usize::from(!won))
     }
 }
 
@@ -156,11 +159,14 @@ impl MultiAgentEnvironment for SharedBanditEnvironment {
 
         let prob = self.current_probabilities[action];
         let dist = Bernoulli::new(prob).map_err(OneManyError::Distribution)?;
-        let reward = usize::from(dist.sample(&mut self.rng));
+        let won = dist.sample(&mut self.rng);
+        // Observation index 0 = preferred outcome (agent's generative-model convention);
+        // reward_obtained keeps reward semantics (true == win).
+        let observation = usize::from(!won);
 
         let state_change = StateChange {
             bandit_selected: Some(action),
-            reward_obtained: reward == 1,
+            reward_obtained: won,
             agent_id,
         };
 
@@ -168,7 +174,7 @@ impl MultiAgentEnvironment for SharedBanditEnvironment {
             self.next_round();
         }
 
-        Ok((reward, Some(state_change)))
+        Ok((observation, Some(state_change)))
     }
 
     fn reset(&mut self) {
@@ -189,8 +195,8 @@ impl MultiAgentEnvironment for SharedBanditEnvironment {
 
 impl Environment for SharedBanditEnvironment {
     fn step(&mut self, action: usize) -> Result<usize, OneManyError> {
-        let (reward, _) =
+        let (observation, _) =
             <Self as MultiAgentEnvironment>::step(self, 0, action)?;
-        Ok(reward)
+        Ok(observation)
     }
 }

@@ -173,13 +173,15 @@ fn test_bandit_environment() -> Result<(), OneManyError> {
     use reproduce::Environment;
     let mut env = BanditEnvironment::new(vec![0.8, 0.4, 0.4])?;
     let n_trials = 10000;
-    let mut successes = 0;
+    // Observation index 0 = preferred (high-probability) outcome, per the agent's
+    // generative-model convention; it should occur with probability ~0.8 on arm 0.
+    let mut preferred = 0;
     for _ in 0..n_trials {
-        if env.step(0)? == 1 {
-            successes += 1;
+        if env.step(0)? == 0 {
+            preferred += 1;
         }
     }
-    let observed_prob = successes as f64 / n_trials as f64;
+    let observed_prob = preferred as f64 / n_trials as f64;
     assert_relative_eq!(observed_prob, 0.8, epsilon = 0.05);
     Ok(())
 }

@@ -37,6 +37,12 @@ impl VotingAgent {
     }
 
     /// Aggregate discrete votes into a single group action.
+    ///
+    /// This method accepts ANY [`VotingMode`] when called directly, branching on
+    /// the discrete vote counts. Within the group pipeline, [`GroupAgent::act`]
+    /// routes discrete-vote modes (`Probabilistic`/`Deterministic`) here and
+    /// `CertaintyWeighted` to [`VotingAgent::aggregate_weighted`], so the pipeline
+    /// never reaches this method with `CertaintyWeighted`; direct callers may.
     #[allow(clippy::missing_errors_doc)]
     pub fn aggregate(&mut self, votes: &[usize]) -> Result<usize, OneManyError> {
         let mut counts = vec![0usize; self.n_actions];
@@ -65,6 +71,8 @@ impl VotingAgent {
                     Ok(winners[idx])
                 }
             }
+            // The group pipeline never routes `CertaintyWeighted` here (it goes to
+            // `aggregate_weighted`), but direct callers may pass any mode.
             VotingMode::Probabilistic | VotingMode::CertaintyWeighted => {
                 if counts.iter().all(|&c| c == 0) {
                     let idx = rand_distr::Uniform::new(0, self.n_actions)
@@ -83,11 +91,27 @@ impl VotingAgent {
     /// Each agent contributes its action distribution P_i(a), weighted by
     /// confidence w_i = exp(-H(P_i)) where H is the entropy.
     /// The mixture P_group(a) = Σ w_i P_i(a) / Σ w_i is then sampled.
+    ///
+    /// This method accepts ANY [`VotingMode`] when called directly, applying the
+    /// confidence-weighted mixing and then resolving the final action per mode.
+    /// Within the group pipeline, [`GroupAgent::act`] routes `CertaintyWeighted`
+    /// here and discrete-vote modes (`Probabilistic`/`Deterministic`) to
+    /// [`VotingAgent::aggregate`], so the pipeline never reaches this method with
+    /// `Deterministic`; direct callers may.
+    ///
+    /// Every distribution must have length equal to `n_actions`; otherwise an
+    /// [`OneManyError::InvalidAction`] carrying the offending length is returned.
     #[allow(clippy::missing_errors_doc)]
     pub fn aggregate_weighted(
         &mut self,
         distributions: &[DVector<f64>],
     ) -> Result<usize, OneManyError> {
+        for dist in distributions {
+            if dist.len() != self.n_actions {
+                return Err(OneManyError::InvalidAction(dist.len()));
+            }
+        }
+
         let mut mixture = vec![0.0f64; self.n_actions];
         let mut total_weight = 0.0f64;
 
@@ -100,9 +124,7 @@ impl VotingAgent {
             let weight = (-entropy).exp();
 
             for (a, &p) in dist.iter().enumerate() {
-                if a < self.n_actions {
-                    mixture[a] += weight * p;
-                }
+                mixture[a] += weight * p;
             }
             total_weight += weight;
         }
@@ -139,6 +161,9 @@ impl VotingAgent {
                     Ok(winners[idx])
                 }
             }
+            // Covers `Probabilistic`/`CertaintyWeighted`. The group pipeline only
+            // reaches this method via `CertaintyWeighted`; direct callers may use
+            // any non-`Deterministic` mode.
             _ => {
                 let dist = WeightedIndex::new(&mixture)?;
                 Ok(dist.sample(&mut self.rng))
@@ -459,6 +484,43 @@ mod tests {
             (ratio - 0.5).abs() < 0.1,
             "Equal-confidence agents should produce ~50/50 mix: {counts:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_aggregate_weighted_rejects_wrong_length() -> Result<(), OneManyError> {
+        let mut voter = VotingAgent::new(3, VotingMode::CertaintyWeighted);
+
+        // Distribution length (2) does not match n_actions (3) → must error.
+        let wrong = vec![DVector::from_vec(vec![0.5, 0.5])];
+        let err = voter.aggregate_weighted(&wrong);
+        assert!(
+            matches!(err, Err(OneManyError::InvalidAction(2))),
+            "Wrong-length distribution should be rejected: {err:?}"
+        );
+
+        // A correct-length call still works.
+        let correct = vec![DVector::from_vec(vec![0.6, 0.2, 0.2])];
+        let action = voter.aggregate_weighted(&correct)?;
+        assert!(action < 3, "Action should be a valid index: {action}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_aggregate_weighted_deterministic_direct_call() -> Result<(), OneManyError> {
+        // Direct callers may use Deterministic with aggregate_weighted even though
+        // the GroupAgent pipeline never routes Deterministic here.
+        let mut voter = VotingAgent::new(3, VotingMode::Deterministic);
+
+        // Mixture argmax is clearly action 1 for both agents.
+        let agent_a = DVector::from_vec(vec![0.1, 0.8, 0.1]);
+        let agent_b = DVector::from_vec(vec![0.2, 0.7, 0.1]);
+        let distributions = vec![agent_a, agent_b];
+
+        for _ in 0..100 {
+            let action = voter.aggregate_weighted(&distributions)?;
+            assert_eq!(action, 1, "Deterministic direct call should pick mixture argmax");
+        }
         Ok(())
     }
 
