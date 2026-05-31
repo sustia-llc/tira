@@ -4,15 +4,18 @@ Durable task tracker for tira. Detailed analysis for the review items lives in
 the local (gitignored) `.claude/docs/review-2026-05-31.md` and
 `.claude/plans/review-2026-05-31-remediation.md`.
 
-## Release / cross-project (next up)
+## Shipped 2026-05-31
 
-- [ ] Bump `aif` to **0.5.0** (breaking: `OneManyError` → `AifError`).
-- [ ] Tag `aif-v0.5.0` and push.
-- [ ] Open the coordinated **koalisi migration PR**: rename `OneManyError` →
-      `AifError` at koalisi's call sites, then bump its `aif` git-tag dep to
-      `aif-v0.5.0`. (koalisi v0.6.0 consumes `aif` behind its `decision` feature.)
+- [x] `aif` **0.5.0** released — review remediation (Phases 1–4) + bridge Phase A;
+      breaking `OneManyError` → `AifError`. Tag `aif-v0.5.0` pushed; main synced.
+- [x] **koalisi migrated** to `aif-v0.5.0` (main `2ef9355`): rename migration +
+      `efe_for_coverage` now delegates to `aif::competence_efe`; koalisi clippy cleared
+      to 0 warnings. Full cross-project loop closed.
+- [x] Phase 4 test strengthening complete (A-learning normalization/direction,
+      deterministic tie-break both-winners, `log_likelihood` argmax, `recover_alpha`
+      {0.2,0.5,1.5} + prior shrinkage, Exp1 identity band).
 
-## Deferred from the 2026-05-31 review remediation
+## Open / deferred
 
 - [ ] **Full RNG seed-threading for reproducible figures.** Phase 3 seeded only
       the certainty-weighted group path (`GroupAgentBuilder::seed()`). End-to-end
@@ -26,18 +29,6 @@ the local (gitignored) `.claude/docs/review-2026-05-31.md` and
     voting is a large-n statistical tendency — unseeded it flakes at small n, and a robust
     averaged version is too slow for the default suite. Once factories are seedable, add a
     seeded assertion (`cw_err <= prob_err`). For now it is validated only by Figure 6.
-
-## Phase 4 — test strengthening (test-only; from the review)
-
-- [ ] Experiment runners (`reproduce::simulation`) assert only `data.len()`. Add
-      seeded statistical assertions: recovered α within a band of the true mean
-      for `experiment_identical`; and CW recovery error ≤ probabilistic recovery
-      error (the actual Extension-5 / Fig-6 "more faithful" claim).
-- [ ] `log_likelihood`: seed + assert the grid argmax sits at the likelihood peak.
-- [ ] `recover_alpha`: parameterize over {0.2, 0.5, 1.5} + a prior-shrinkage assertion.
-- [ ] Deterministic tie-break (`group.rs`): assert both tied winners occur, not `action <= 1`.
-- [ ] A-learning (`agent.rs`): assert column-sum ≈ 1 and the correct-row increase
-      after `update_a` (also exercises the Phase-1 obs-encoding fix end-to-end).
 
 ## Minor cleanups (opportunistic)
 
