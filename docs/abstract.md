@@ -48,7 +48,7 @@ cognitive modelling; multi-scale; collective intelligence; emergence
 - POMDP generative model with matrices A-E:
   - **A** (observation model): P(o_t | s_t) — 2×3 matrix, outcome likelihoods per bandit
   - **B** (transition model): P(s_t | s_{t-1}, π) — deterministic action-state mapping
-  - **C** (preference prior): P(o | C) — preference for observation 1 (reward)
+  - **C** (preference prior): P(o | C) — preference for the reward outcome (the paper's "observation 1"; code index 0)
   - **D** (state prior): P(s_1) — uniform over 3 bandits
   - **E** (policy prior): P(π) — uniform over 3 actions
 - Variational free energy F minimized for perception (Eq. 1)

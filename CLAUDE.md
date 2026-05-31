@@ -5,9 +5,9 @@ the Cargo workspace and crate names remain `aif` + `reproduce`.)
 
 Rust implementation of Waade et al., "As One and Many: Relating Individual and Emergent
 Group-Level Generative Models in Active Inference" (*Entropy* 2025, 27, 143).
-DOI: 10.3390/e27020143. Full paper PDF: `entropy-27-00143.pdf`.
+DOI: 10.3390/e27020143. Full paper PDF: `docs/entropy-27-00143.pdf`.
 
-Structured paper breakdown, POMDP specification, and implementation checklist: [abstract.md](abstract.md).
+Structured paper breakdown, POMDP specification, and implementation checklist: [abstract.md](docs/abstract.md).
 Completed plan: [.claude/plans/paper-implementation.md](.claude/plans/paper-implementation.md).
 
 ## Plugin skills
@@ -58,7 +58,7 @@ is the paper-reproduction harness and depends on `aif`.
 - **GroupAgent implements Agent** — the simulation loop doesn't know whether it's talking to a single POMDP or a group. This makes the parameter recovery code work identically for both.
 - **B × state_belief** (not B^T) — deterministic MAB transitions produce delta-function priors. The EFE step function `efe_step()` and `infer_states()` both use the same convention.
 - **A-matrix learning propagates** — `update_a()` accumulates pA counts then writes column-normalized pA back to A, so the observation model actually changes during learning.
-- **EFE sign convention** — `efe_step()` returns *neg-G* (higher = more preferred); the public `expected_free_energy()` returns `G = −E_q(π)[neg_g]` (LOWER = better, standard active inference). `coalition::decide_join` joins iff `coalition_efe < individual_efe`. `expected_free_energy` is policy-posterior weighted, so a coalition only changes G if it alters achievable outcomes (observation model / available options), not merely preferences over a flexible obs model.
+- **EFE sign convention** — `efe_step()` returns *neg-G* (higher = more preferred); the public `expected_free_energy()` returns `G = −E_q(π)[neg_g]` (LOWER = better, standard active inference). `coalition::decide_join` joins iff `coalition_efe < individual_efe`. `expected_free_energy` is policy-posterior weighted, so the effect of a preference shift on G is **conditional on the observation model**: under a *discriminative* obs model an agent can route around a preference conflict by selecting a different arm, so preference shifts alone may not move G (a coalition then changes G only by altering achievable outcomes — observation model / available options); but under a *low-discriminability / uniform* obs model that escape hatch is gone and preference shifts DO move G. See `coalition.rs::test_decide_join_synergy_vs_conflict`, which uses a uniform `[0.9, 0.9, 0.9]` model precisely so a membership-driven preference shift flips the join decision.
 - **`initial_belief` sets the D-vector** (state prior / initial `state_belief`), not E. The E-vector is always the uniform policy prior (overridden only by `with_params` for policy_depth > 1).
 
 ## Running experiments

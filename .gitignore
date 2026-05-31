@@ -1,1 +1,6 @@
 /target
+
+# Internal design artifacts (per CLAUDE.md: kept out of the repo)
+.claude/docs/
+.claude/plans/
+.claude/workflows/

@@ -7,7 +7,7 @@ Rust implementation of **"As One and Many: Relating Individual and Emergent Grou
 
 Paper: https://doi.org/10.3390/e27020143
 
-See [abstract.md](abstract.md) for a structured breakdown of the paper, methodology, and full implementation status.
+See [abstract.md](docs/abstract.md) for a structured breakdown of the paper, methodology, and full implementation status.
 
 ## Workspace layout
 
