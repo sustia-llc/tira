@@ -1,5 +1,63 @@
 # Changelog
 
+## [0.5.0] - 2026-05-31
+
+Remediation of a deep code review (engine correctness, refactor integrity, extension and
+quality hardening) plus a reusable coalition-value primitive for downstream backends.
+
+### ⚠️ Breaking
+- **`OneManyError` renamed to `AifError`** (no back-compat alias). Downstream consumers must
+  rename their references (e.g. `aif::OneManyError` → `aif::AifError`). Variant identifiers are
+  unchanged, so `match` arms still compile after the rename. The MAB-specific `ResourceConflict`
+  message string was generalized.
+- **`POMDPAgent::reset()` removed** — it was dead (no callers); its rustdoc described a
+  parameter-recovery-replay use that never existed.
+
+### Added
+- **`aif::coalition::competence_efe(c, params)` + `ObsPrecisionParams`** — the reusable,
+  domain-agnostic coalition-**value** primitive: maps a scalar competence `c ∈ [0,1]` to
+  expected free energy `G` via the *observation-model precision*, so coalition value is
+  non-degenerate as membership changes. The supported bridge for downstream value calculators
+  (replaces hand-rolling a POMDP per crate).
+- **`aif::coalition::belief_weighted_preference(...)`** — derives a preference vector from
+  `TrustBeliefs`/`CompatibilityBeliefs`/`CoalitionHistory`, connecting the belief structs to the
+  decision surface (with a compiling doctest).
+- **`AifError::InvalidDistribution(String)`** for distribution-validity failures.
+- **`GroupAgentBuilder::seed()` / `GroupAgent::new_with_seed` / `VotingAgent::with_seed`** —
+  reproducible certainty-weighted group path.
+- 70 total tests (was 51); coverage assessment in `docs/aif-coverage.md`.
+
+### Fixed
+- **Observation-encoding inversion** in both environment `step` impls: a win now maps to the
+  agent's preferred observation index (index 0), matching the A-column `[p, 1-p]` / C convention.
+  Was inert under deterministic B but corrupted A-matrix learning.
+- **`efe_step` epistemic term is now exact mutual information** `H[q(o|π)] − E_q(s')[H(o|s')]`
+  (was the marginal-entropy upper bound). Inert for the canonical equal-entropy arms (Figs 4–6
+  unchanged); exact for heterogeneous-entropy observation models.
+- **Input validation** in `POMDPAgent::new`: out-of-range `observation_probs`/`preferences`
+  rejected (`InvalidProbability`), non-distribution `initial_belief` rejected
+  (`InvalidDistribution`).
+- **`VotingAgent::aggregate_weighted`** validates distribution length up front (removes a silent
+  tail-mass-drop path).
+- **Depth-1 E-vector** sized by `n_actions` (decoupled from the `n_actions == n_states`
+  coincidence).
+- **`recover_alpha`** grid now starts at 0.0 (paper range `[0,1]`) with a NaN default so a
+  degenerate posterior surfaces instead of masquerading as the 0.01 floor.
+
+### Changed
+- **`CoalitionEvaluator` repositioned** as the per-agent, preference-based variant; its
+  observation model is membership-blind, so coalition-*value* users should prefer
+  `competence_efe`. Docs (module, type, CLAUDE.md) corrected: a preference shift moves `G` only
+  under a low-discriminability observation model.
+- `communication` module documented as reserved infrastructure for the network-communication
+  extension; redundant clone/match arms cleaned up.
+
+### Migration (downstream, e.g. koalisi)
+- Rename `aif::OneManyError` → `aif::AifError`.
+- Optionally refactor any hand-rolled coverage→`G` POMDP construction to call
+  `aif::competence_efe` (note: absolute `G` values shift vs. 0.4.0 due to the exact-MI epistemic
+  term, but monotonicity in competence and the zero-margin degenerate case are preserved).
+
 ## [0.4.0] - 2026-05-29
 
 Restructure into a Cargo workspace and add a coalition-formation decision layer, in
