@@ -15,7 +15,7 @@ This is a Cargo workspace with two crates:
 
 | Crate | Role |
 |-------|------|
-| [`crates/aif`](crates/aif) | Reusable, domain-agnostic active-inference engine: `POMDPAgent` (A–E matrices, expected free energy, α/γ precision), `GroupAgent` (Markov-blanket nesting), and a `coalition` layer (`CoalitionEvaluator`, trust/compatibility/history beliefs). No plotting or environment coupling — this is the crate downstream projects depend on. |
+| [`crates/aif`](crates/aif) | Reusable, domain-agnostic active-inference engine: `POMDPAgent` (A–E matrices, expected free energy, α/γ precision), `GroupAgent` (Markov-blanket nesting), and a `coalition` layer (the `competence_efe` value primitive + trust/compatibility/history beliefs). No plotting or environment coupling — this is the crate downstream projects depend on. |
 | [`crates/reproduce`](crates/reproduce) | The paper-reproduction harness: bandit environments, simulation/parameter-recovery, plotting, and the `reproduce` binary. Depends on `aif`. |
 
 ## What this does
@@ -136,34 +136,27 @@ println!("Group α = {:.3}", result.estimated_alpha);
 
 ## Coalition layer (`aif::coalition`)
 
-The `aif` crate also exposes a coalition-formation decision primitive built on the same
-engine: an agent should join a coalition iff membership *lowers* its expected free energy.
-A domain implements `CapabilityProvider` to supply each agent's generative-model inputs
-(and to model how coalition membership shifts them); `CoalitionEvaluator` then compares
-`coalition_efe` against `individual_efe`:
+The `aif` crate exposes a domain-agnostic **coalition-value primitive** for downstream
+coalition runtimes: **`competence_efe(c, params)`** maps a scalar competence `c ∈ [0,1]` to
+expected free energy `G` via the observation-model precision, so coalition value stays
+non-degenerate as membership changes. This is the **supported bridge** a downstream
+`ValueCalculator` consumes — koalisi's `EfeValueCalculator` delegates to it:
 
 ```rust
-use aif::{CapabilityProvider, CoalitionEvaluator, AgentId};
+use aif::coalition::{competence_efe, ObsPrecisionParams};
 
-struct MyDomain { /* ... */ }
-impl CapabilityProvider for MyDomain {
-    fn n_states(&self) -> usize { 3 }
-    fn observation_probs(&self, _a: AgentId) -> Vec<f64> { vec![0.9, 0.9, 0.9] }
-    fn preferences(&self, _a: AgentId, members: &[AgentId]) -> Vec<f64> {
-        if members.is_empty() { vec![0.5, 0.5] } else { vec![0.9, 0.1] } // synergy in-coalition
-    }
-    fn alpha(&self, _a: AgentId) -> f64 { 0.5 }
-}
-
-let domain = MyDomain { /* ... */ };
-let eval = CoalitionEvaluator::new(&domain);
-let join = eval.decide_join(0, &[0, 1, 2])?; // true if coalition G < individual G
+let g = competence_efe(0.8, &ObsPrecisionParams::default()); // lower G = higher coalition value
 ```
 
-This is the surface a downstream coalition runtime (e.g. an external swarm) consumes as a
-pluggable active-inference decision strategy. `expected_free_energy()` is policy-posterior
-weighted, so membership must genuinely change the achievable G (alter `observation_probs`
-or constrain options) — not merely shift preferences over a flexible observation model.
+`belief_weighted_preference(...)` derives a preference vector from the normalized
+`TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory` structs, connecting beliefs to
+the decision surface.
+
+> **Deprecated:** the earlier `CoalitionEvaluator` (`decide_join` = join iff coalition `G <`
+> individual `G`) is the per-agent, *preference-based* variant — its observation model is
+> membership-blind, so a preference shift moves `G` only under a low-discriminability model
+> (near-degenerate in practice), and downstream consumers bypass it. Prefer `competence_efe`;
+> removal tracked in [issue #1](https://github.com/sustia-llc/tira/issues/1).
 
 ## Dependencies
 

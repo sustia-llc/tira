@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+- Adopted GitHub issue tracking (aligned with the sibling projects); open work migrated from
+  `TODO.md` to [issues #1–#3](https://github.com/sustia-llc/tira/issues).
+- Planned: deprecate the preference-based `CoalitionEvaluator` in favor of `competence_efe` as
+  the single downstream coalition-value contract
+  ([#1](https://github.com/sustia-llc/tira/issues/1)) — part of the cross-project coalition
+  semantic-layer roadmap (koalisi A/B of the AIF vs categorical-magnitude decision policies).
+
 ## [0.5.0] - 2026-05-31
 
 Remediation of a deep code review (engine correctness, refactor integrity, extension and
