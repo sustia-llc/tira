@@ -7,8 +7,8 @@ Rust implementation of Waade et al., "As One and Many: Relating Individual and E
 Group-Level Generative Models in Active Inference" (*Entropy* 2025, 27, 143).
 DOI: 10.3390/e27020143. Full paper PDF: `docs/entropy-27-00143.pdf`.
 
-Structured paper breakdown, POMDP specification, and implementation checklist: [abstract.md](docs/abstract.md).
-Completed plan: [.claude/plans/paper-implementation.md](.claude/plans/paper-implementation.md).
+Paper summary: [abstract.md](docs/abstract.md). Paper→code coverage and canonical-AIF
+parity: [aif-coverage.md](docs/aif-coverage.md).
 
 ## Plugin skills
 
@@ -25,11 +25,11 @@ Use these when working on matrix-heavy extensions (continuous state-space models
 
 All 5 paper implementation phases complete + Extension 5 (certainty-weighted voting).
 Four paper experiments reproduced (Figures 4-5) plus CW comparison (Figure 6).
-Now a **Cargo workspace** (`crates/aif` engine + `crates/reproduce` harness) being prepared
-as the reference active-inference engine for the koalisi coalition runtime — see
-[.claude/plans/aif-merge-koalisi-integration.md](.claude/plans/aif-merge-koalisi-integration.md).
+Now a **Cargo workspace** (`crates/aif` engine + `crates/reproduce` harness) serving as
+the reference active-inference engine for the koalisi coalition runtime, which consumes
+the coalition-value primitive `competence_efe` (git tag `aif-v0.5.0`).
 
-- **51 tests**, 0 clippy warnings, edition 2024
+- **72 tests** (71 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
 - `cargo run --release -p reproduce --bin reproduce` — full reproduction in ~16s
 
 ## Module map
@@ -41,24 +41,25 @@ is the paper-reproduction harness and depends on `aif`.
 |------|----------|
 | `crates/aif/src/agent.rs` | `Agent` trait, `CopyAgent`, `POMDPAgent` (A-E matrices, `efe_step()` for expected free energy G, `expected_free_energy()` scalar accessor, shared `policy_posterior()` helper, α/γ separation, multi-step policies, A-matrix learning with pA→A propagation, `action_probabilities()` for replay, input validation) |
 | `crates/aif/src/group.rs` | `VotingMode` enum (Probabilistic/Deterministic/CertaintyWeighted), `VotingAgent` (discrete votes + confidence-weighted distribution mixing), `GroupAgent` (Markov blanket: sensory→internal→active), `GroupAgentBuilder` |
-| `crates/aif/src/coalition.rs` | `competence_efe()` + `ObsPrecisionParams` — the reusable coalition-**value** primitive (scalar competence `c∈[0,1]` → observation precision → G; the supported bridge for downstream value calculators). Plus the per-agent preference-based `CoalitionEvaluator` (`individual_efe`/`coalition_efe`/`decide_join` = join iff coalition G < individual G) — note its observation model is membership-blind, so coalition-value users should prefer `competence_efe`. `CapabilityProvider` trait, `TrustBeliefs`/`CompatibilityBeliefs`/`CoalitionHistory` + `belief_weighted_preference()`. Re-expresses the retired `coalition_aif` prototype on the correct engine |
+| `crates/aif/src/coalition.rs` | `competence_efe()` + `ObsPrecisionParams` — the reusable coalition-**value** primitive (scalar competence `c∈[0,1]` → observation precision → G; the supported bridge for downstream value calculators). Plus the **`#[deprecated]`** per-agent preference-based `CoalitionEvaluator` (`individual_efe`/`coalition_efe`/`decide_join` = join iff coalition G < individual G) — membership-blind observation model; removal tracked in issue #1, use `competence_efe`. `CapabilityProvider` trait, `TrustBeliefs`/`CompatibilityBeliefs`/`CoalitionHistory` + `belief_weighted_preference()`. Re-expresses the retired `coalition_aif` prototype on the correct engine |
 | `crates/aif/src/communication.rs` | `CommunicationChannel` (flume), `Message`, `MessageContent`, `CommunicatingPOMDPAgent` — used by multi-agent tests, not by the group-agent pipeline |
-| `crates/aif/src/lib.rs` | `OneManyError`, re-exports of the engine + coalition surface |
+| `crates/aif/src/lib.rs` | `AifError`, re-exports of the engine + coalition surface |
 | `crates/reproduce/src/lib.rs` | `BanditEnvironment`, `SharedBanditEnvironment` (with `agents_acted` tracking), `Environment`/`MultiAgentEnvironment` traits, re-exports from `aif` + simulation |
 | `crates/reproduce/src/simulation.rs` | `run_group_simulation()`, `run_single_simulation()`, `log_likelihood()`, `recover_alpha()` (grid search, half-normal prior), experiment factories for 5 experiments, `dirichlet_alphas()`, `beta_preferences()` |
-| `crates/reproduce/src/plotter.rs` | Reusable `plotters`-based scatter/panel functions |
+| `crates/reproduce/src/plotter.rs` | `plotters`-based scatter/panel helpers — currently unused by the binary (which carries its own copies); consolidation tracked in issues |
 | `crates/reproduce/src/bin/reproduce.rs` | Full reproduction: parameter recovery (Fig 4) + 4 paper experiments (Fig 5) + CW extension (Fig 6), rayon-parallelized, refactored with `run_experiment()` + `plot_panel()` helpers |
 
 ## Key design decisions
 
 - **Preferences are 2-element** `[p(obs1), p(obs2)]` — matches paper's binary observations. Internally log-transformed to `C = [ln p1, ln p2]` for the pragmatic value term.
 - **α vs γ**: `gamma` (default 16.0) is the softmax temperature over expected free energy G → policy posterior. `alpha` is the softmax temperature over marginalized action probabilities. The paper uses both; many active inference implementations conflate them.
-- **Parameter recovery uses grid search** over α ∈ [0.01, 5.00] with step 0.01 and a half-normal(0, 4) prior. MAP point estimate. MCMC was deferred — grid search reproduces the paper's findings.
+- **Parameter recovery uses grid search** over α ∈ [0.00, 5.00] with step 0.01 and a half-normal(0, 4) prior. MAP point estimate. MCMC was deferred — grid search reproduces the paper's findings in the identifiable region (α ≤ 1); a point-MAP won't reproduce the paper's degenerate-region posterior-median clustering near ~4.
 - **VotingMode** governs how the active agent aggregates internal agent outputs. `Probabilistic` and `Deterministic` use discrete votes (original paper). `CertaintyWeighted` uses full action distributions weighted by `exp(-entropy)` — confident agents dominate the mixture.
-- **GroupAgent implements Agent** — the simulation loop doesn't know whether it's talking to a single POMDP or a group. This makes the parameter recovery code work identically for both.
+- **GroupAgent implements Agent** — the same recovery pipeline (record blanket states → `recover_alpha`) applies to single agents and groups. Note: `run_group_simulation`/`run_single_simulation` currently take concrete types, not `impl Agent` — the trait-level polymorphism that extensions 4/8 need is designed but not yet expressed in the runner signatures.
 - **B × state_belief** (not B^T) — deterministic MAB transitions produce delta-function priors. The EFE step function `efe_step()` and `infer_states()` both use the same convention.
 - **A-matrix learning propagates** — `update_a()` accumulates pA counts then writes column-normalized pA back to A, so the observation model actually changes during learning.
-- **EFE sign convention** — `efe_step()` returns *neg-G* (higher = more preferred); the public `expected_free_energy()` returns `G = −E_q(π)[neg_g]` (LOWER = better, standard active inference). `coalition::decide_join` joins iff `coalition_efe < individual_efe`. `expected_free_energy` is policy-posterior weighted, so the effect of a preference shift on G is **conditional on the observation model**: under a *discriminative* obs model an agent can route around a preference conflict by selecting a different arm, so preference shifts alone may not move G (a coalition then changes G only by altering achievable outcomes — observation model / available options); but under a *low-discriminability / uniform* obs model that escape hatch is gone and preference shifts DO move G. See `coalition.rs::test_decide_join_synergy_vs_conflict`, which uses a uniform `[0.9, 0.9, 0.9]` model precisely so a membership-driven preference shift flips the join decision.
+- **EFE sign convention** — `efe_step()` returns *neg-G* (higher = more preferred); the public `expected_free_energy()` returns `G = −E_q(π)[neg_g]` (LOWER = better, standard active inference). `coalition::decide_join` joins iff `coalition_efe < individual_efe`. `expected_free_energy` is policy-posterior weighted, so the effect of a preference shift on G is **conditional on the observation model**: under a *discriminative* obs model an agent can route around a preference conflict by selecting a different arm, so preference shifts alone may not move G (a coalition then changes G only by altering achievable outcomes — observation model / available options); but under a *low-discriminability / uniform* obs model that escape hatch is gone and preference shifts DO move G. See `coalition.rs::test_decide_join_synergy_vs_conflict`, which uses a uniform `[0.9, 0.9, 0.9]` model precisely so a membership-driven preference shift flips the join decision. **Caveat (audit 2026-07-06)**: this insensitivity holds for preference *direction* at constant sharpness — preference **sharpness** moves G even under a discriminative obs model (a neutral `[0.5, 0.5]` → sharp `[0.9, 0.1]` shift changes G equally for synergy and conflict), so `CoalitionEvaluator` providers that sharpen preferences inside coalitions join conflict coalitions too. One more reason to prefer `competence_efe` (membership varies the observation model instead).
+- **Epistemic term is structurally zero today** — `efe_step()` computes the exact MI `H[q(o|π)] − E_q(s′)[H(o|s′)]`, but `POMDPAgent::new` hardcodes deterministic B, so the predicted state is a delta and the term vanishes for every constructible agent. Paper-faithful (the paper's MAB agents are purely pragmatically driven); becomes live once B is injectable. Consequence: `competence_efe` G is purely pragmatic — no exploration bonus.
 - **`initial_belief` sets the D-vector** (state prior / initial `state_belief`), not E. The E-vector is always the uniform policy prior (overridden only by `with_params` for policy_depth > 1).
 
 ## Running experiments
@@ -102,9 +103,12 @@ Enable `learn_a: true` in group experiments to study how learning dynamics at th
 level affect the group-level generative model over time. The pA concentration parameter
 machinery is already implemented in `POMDPAgent`.
 
-**Where**: `GroupAgentBuilder` — add `.learn_a(true)` (field exists but defaults to false).
-Experiment factories need a `learn_a` parameter. Recovery gets harder: the likelihood function
-must also replay learning.
+**Where**: `GroupAgentBuilder` — the `.learn_a(true)` setter exists but the build paths pass
+`None` initial precision into a constructor that requires it, so a learning group cannot
+currently be built; the CertaintyWeighted pipeline additionally bypasses `update_a` entirely
+(both tracked in issues). Fix the builder plumbing + CW branch, add a `learn_a` parameter to
+the experiment factories. Recovery gets harder: the likelihood function must also replay
+learning.
 
 ### 4. Sensory and active agents as POMDP agents
 The paper uses a CopyAgent (sensory) and VotingAgent (active) as simple rule-based

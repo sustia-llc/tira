@@ -7,7 +7,14 @@ Rust implementation of **"As One and Many: Relating Individual and Emergent Grou
 
 Paper: https://doi.org/10.3390/e27020143
 
-See [abstract.md](docs/abstract.md) for a structured breakdown of the paper, methodology, and full implementation status.
+See [abstract.md](docs/abstract.md) for a summary of the paper, and
+[aif-coverage.md](docs/aif-coverage.md) for the paper→code coverage matrix, the
+canonical-AIF parity scorecard, and documented deviations.
+
+Beyond the reproduction, the `aif` crate packages the engine as an **active-inference
+coalition-formation strategy** — a competence → expected-free-energy value primitive
+([Coalition layer](#coalition-layer-aifcoalition)) consumed by a downstream coalition
+runtime, where it is A/B-evaluated against a categorical (magnitude-based) strategy.
 
 ## Workspace layout
 
@@ -15,7 +22,7 @@ This is a Cargo workspace with two crates:
 
 | Crate | Role |
 |-------|------|
-| [`crates/aif`](crates/aif) | Reusable, domain-agnostic active-inference engine: `POMDPAgent` (A–E matrices, expected free energy, α/γ precision), `GroupAgent` (Markov-blanket nesting), and a `coalition` layer (the `competence_efe` value primitive + trust/compatibility/history beliefs). No plotting or environment coupling — this is the crate downstream projects depend on. |
+| [`crates/aif`](crates/aif) | Reusable active-inference engine: `POMDPAgent` (A–E matrices, expected free energy, α/γ precision), `GroupAgent` (Markov-blanket nesting), and a `coalition` layer (the `competence_efe` value primitive + trust/compatibility/history beliefs). No plotting or environment coupling — this is the crate downstream projects depend on. The generative-model family is currently MAB-shaped (binary observations, deterministic transitions); see [aif-coverage.md](docs/aif-coverage.md) for the parity matrix and roadmap. |
 | [`crates/reproduce`](crates/reproduce) | The paper-reproduction harness: bandit environments, simulation/parameter-recovery, plotting, and the `reproduce` binary. Depends on `aif`. |
 
 ## What this does
@@ -75,10 +82,10 @@ Environment (BanditEnvironment)
 |--------|------|
 | `crates/aif/src/agent.rs` | POMDP active inference agent (A-E matrices, expected free energy G, α/γ precision, `expected_free_energy()`) |
 | `crates/aif/src/group.rs` | VotingMode, GroupAgent, VotingAgent (discrete + certainty-weighted), GroupAgentBuilder |
-| `crates/aif/src/coalition.rs` | `CapabilityProvider`, `CoalitionEvaluator` (join decision via coalition vs individual EFE), `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory` |
+| `crates/aif/src/coalition.rs` | `competence_efe` + `ObsPrecisionParams` (the coalition-value primitive), `CapabilityProvider`, `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory`, deprecated `CoalitionEvaluator` |
 | `crates/aif/src/communication.rs` | Flume-based inter-agent messaging (for extended scenarios) |
 | `crates/reproduce/src/simulation.rs` | Simulation runner, parameter recovery (grid search + half-normal prior), 5 experiment factories |
-| `crates/reproduce/src/plotter.rs` | Plotters-based scatter plot generation |
+| `crates/reproduce/src/plotter.rs` | Plotters-based scatter helpers (pending consolidation with the binary's figure code) |
 | `crates/reproduce/src/bin/reproduce.rs` | Full paper reproduction binary |
 
 ## Usage
@@ -143,9 +150,10 @@ non-degenerate as membership changes. This is the **supported bridge** a downstr
 `ValueCalculator` consumes — koalisi's `EfeValueCalculator` delegates to it:
 
 ```rust
-use aif::coalition::{competence_efe, ObsPrecisionParams};
+use aif::{competence_efe, ObsPrecisionParams};
 
-let g = competence_efe(0.8, &ObsPrecisionParams::default()); // lower G = higher coalition value
+// Returns Result<f64, AifError>; params passed by value (Copy).
+let g = competence_efe(0.8, ObsPrecisionParams::default())?; // lower G = higher coalition value
 ```
 
 `belief_weighted_preference(...)` derives a preference vector from the normalized

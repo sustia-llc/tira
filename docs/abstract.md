@@ -2,11 +2,13 @@
 
 **Waade, P.T.; Olesen, C.L.; Laursen, J.E.; Nehrer, S.W.; Heins, C.; Friston, K.; Mathys, C.**
 
-*Entropy* 2025, 27, 143. https://doi.org/10.3390/e27020143
+*Entropy* 2025, 27, 143. <https://doi.org/10.3390/e27020143>
+Published 1 February 2025. Full PDF: [entropy-27-00143.pdf](entropy-27-00143.pdf).
 
-Published: 1 February 2025 (Received: 21 October 2024; Revised: 15 January 2025; Accepted: 16 January 2025)
+*This is a summary of the paper. For the section-by-section mapping of paper → tira code — and
+for what tira deliberately does differently — see [aif-coverage.md](aif-coverage.md).*
 
-## Abstract
+## Abstract (verbatim)
 
 Active inference under the Free Energy Principle has been proposed as an across-scales compatible
 framework for understanding and modelling behaviour and self-maintenance. Crucially, a collective
@@ -30,151 +32,68 @@ nested active inference agents across scales.
 **Keywords:** active inference; free energy principle; Markov blanket; predictive processing;
 cognitive modelling; multi-scale; collective intelligence; emergence
 
-## Paper Structure
+## What the paper does
 
-### 1. Introduction
-- Active inference under FEP: perception, learning, action as approximate Bayesian inference
-- Markov blankets: sensory states, active states, internal states, external states
-- Nested Markov blanket structures: cells → organs → organisms → collectives
-- Three scales of multi-agent active inference:
-  1. **Within-agent**: generative models for interacting with environments containing other agents
-  2. **Between-agent**: how interactions shape behavioural and belief dynamics over time
-  3. **Group-as-agent**: collective forms emergent Markov blanket, becomes agent in its own right
-- Gap: no prior work reconstructs emergent group-level generative model or compares it to constituent agents
+**§1 Introduction.** Active inference describes systems that maintain a Markov blanket as minimizing
+variational free energy — and blankets nest: collectives of AIF agents can form a group-level blanket
+and thereby a group-level AIF agent. Prior multi-agent work operates at the *within-agent* and
+*between-agent* scales; almost nothing reconstructs the generative model of the emergent
+*group-as-agent* (the exception being spin-glass collectives, in a restricted setting). The obstacle:
+the group's generative model is emergent and a priori unknown, so it must be inferred from behaviour.
 
-### 2. Materials and Methods
+**§2 Methods.** The proposal is cognitive modelling applied one level up: fit a generative model to
+the group's *blanket states* (its observations and actions), exactly as computational psychiatry fits
+models to human behaviour.
 
-#### 2.1 Active Inference and Multi-Armed Bandits
-- POMDP generative model with matrices A-E:
-  - **A** (observation model): P(o_t | s_t) — 2×3 matrix, outcome likelihoods per bandit
-  - **B** (transition model): P(s_t | s_{t-1}, π) — deterministic action-state mapping
-  - **C** (preference prior): P(o | C) — preference for the reward outcome (the paper's "observation 1"; code index 0)
-  - **D** (state prior): P(s_1) — uniform over 3 bandits
-  - **E** (policy prior): P(π) — uniform over 3 actions
-- Variational free energy F minimized for perception (Eq. 1)
-- Expected free energy G minimized for action selection (Eq. 2): information gain + pragmatic value
-- Key parameters: α (action precision), γ (policy posterior precision = 16)
-- 3 bandits, binary outcomes, probabilities [0.8, 0.2, 0.2], policy length = 2
+- **§2.1** — the individual model: a POMDP for a 3-armed Multi-Armed Bandit. Matrices A (observation
+  model; outcome-1 probabilities 0.8/0.2/0.2 across arms), B (deterministic arm-selection
+  transitions), C (preference prior, 0.7/0.3), D and E (uniform priors). Perception minimizes
+  variational free energy F (Eq. 1); action selection minimizes expected free energy G (Eq. 2 —
+  information gain + pragmatic value), with two precisions: γ (policy posterior, fixed at 16) and
+  **α** (action selection — the paper's target parameter). Policy length 2, no parameter learning:
+  agents get accurate beliefs, so behaviour is driven by pragmatic value.
+- **§2.2** — fitting and parameter recovery: simulate behaviour at known α, re-estimate it
+  (half-normal(0, 4) prior, MCMC posterior median via Turing.jl/ActionModels.jl), and check the
+  estimates track the truth.
+- **§2.3** — the group agent: a fixed Markov blanket of *sensory* agents (copy observations in),
+  *internal* agents (POMDP AIF agents), and an *active* agent (probabilistic vote aggregator).
+  Group observations and group actions are the blanket states used for fitting; the same MAB-POMDP
+  serves as the group-level model.
+- **§2.4** — four experiments at group sizes 4/8/16/100, internal α ∈ [0, 1]: (1) identical α;
+  (2) Dirichlet-varying α (sufficient statistic 1.5) with controlled mean; (3) deterministic
+  (majority) voting; (4) Beta(0.8, 0.8)-varying preferences.
 
-#### 2.2 Computational Cognitive Modelling
-- MCMC-based approximate Bayesian inference for parameter estimation
-- Bayesian model comparison for model selection
-- Parameter recovery to validate inference reliability
+**§3 Results.**
 
-#### 2.3 Cognitive Modelling for Collective Agents
-- Group agent Markov blanket structure:
-  - **Sensory agent** (1): copies environment observations → passes to internal agents
-  - **Internal agents** (n): POMDP active inference agents, observe sensory agent, act
-  - **Active agent** (1): aggregates internal agent actions via probabilistic voting
-- Group blanket states = sensory agent observations + active agent actions
-- Same POMDP generative model used at both individual and group levels
+- α recovers well in [0, 1]; above ~1 behaviour saturates (deterministic) and estimates cluster
+  high (~4, set by the prior) regardless of truth — an identifiability ceiling (Fig 4).
+- Experiment 1: identical internal α → group α equals it (identity line, Fig 5A).
+- Experiment 2: varying α → group α tracks the internal **mean sub-linearly**; more agents, less
+  variance (Fig 5B) — an unweighted Bayesian model average.
+- Experiment 3: deterministic voting → **super-linear** group α inflation, steeper with group size
+  (law of large numbers), quickly hitting the identifiability ceiling (Fig 5C).
+- Experiment 4: conflicting preferences → votes cancel, the active agent looks stochastic, and
+  group α is **crushed** toward 0 (Fig 5D).
 
-#### 2.4 Simulation Experiments
-- Focus on action precision α (softmax temperature over action probabilities)
-- Parameter recovery: α recoverable in [0, 1], degenerates above 1
-- Half-normal prior (mean=0, SD=4, truncated non-negative)
-- **Experiment 1**: Identical α across all internal agents → group α = individual α
-- **Experiment 2**: Varying α (Dirichlet-constructed) → group α ≈ sub-linear function of mean
-- **Experiment 3**: Deterministic voting aggregation → super-linear group α scaling
-- **Experiment 4**: Varying preferences (Beta(0.8, 0.8)) → strongly reduced group α
-- Each experiment: 4, 8, 16, 100 internal agents
+The headline: the group-level generative model relates non-trivially to its constituents — group
+parameters are not simply the members' parameters, and non-α properties (voting rule, preference
+heterogeneity) masquerade as group-level α.
 
-### 3. Results
-- α recovery: good in [0, 1], clusters at ~4 for true α > 1
-- Exp 1: group α identical to shared individual α (expected — aggregation preserves)
-- Exp 2: sub-linear scaling, reduced variance with more agents (Bayesian model average)
-- Exp 3: deterministic voting → super-linear, quickly saturates, slope ↑ with n_agents
-- Exp 4: conflicting preferences → low group α (stochastic active agent)
+**§4 Discussion.** Limitations (behaviour must be informative; model space must be specified;
+inference cost) and a rich extension list: parameter learning, inferring other parameters,
+sensory/active agents as proper AIF agents, certainty-weighted vote aggregation, network
+communication topologies, replacing the environment with a competing group (game theory), >2-scale
+nesting, dynamically emerging blankets, evolutionary selection at different scales, free-energy
+extensivity, continuous state-space models, renormalization-group detection of blankets at slower
+timescales, and application to systems with unknown generative models (animals, artificial systems,
+organoids/"dishbrains"). tira's numbered extension tracking (1–12) for this list lives in
+[aif-coverage.md](aif-coverage.md) §4.
 
-### 4. Discussion
-- Method enables relating all three scales simultaneously
-- Limitations: parameter identifiability, model space, MCMC convergence
-- Key extensions proposed:
-  - Parameter learning (temporal dynamics)
-  - Infer other parameters (γ, matrix contents, learning rates)
-  - Sensory/active agents as active inference agents proper
-  - Certainty-weighted actions → certainty-weighted Bayesian model average
-  - Network communication structures (not just simple voting)
-  - Game-theoretic inter-group competitions
-  - Greater-than-two-scale nesting
-  - Dynamically emerging Markov blankets
-  - Evolutionary algorithms at different scales
-  - Free energy extensivity question
-  - Renormalization group for slow-timescale blankets
-  - Application to dishbrains and organoids
+## Key results reproduced by tira
 
-## Implementation Status (tira)
-
-*(Repo renamed `one_many_rs` → `tira` 2026-05-29. Now a Cargo workspace: the engine
-lives in `crates/aif/src/` and the paper-reproduction harness in `crates/reproduce/src/`.
-File paths below are relative to those crate roots.)*
-
-### Core POMDP Agent (crates/aif/src/agent.rs)
-- [x] POMDP agent with A-E matrices following paper specification
-- [x] Expected free energy G (Eq. 2): information gain (observation entropy) + pragmatic value
-- [x] Extracted `efe_step()` helper — single source of truth for per-step G computation
-- [x] C vector as log-preference prior (ln P(o|C))
-- [x] Separate α (action precision) and γ (policy posterior precision, default 16)
-- [x] E vector (policy prior) participates in policy posterior
-- [x] Multi-step policy evaluation (configurable policy_depth)
-- [x] State inference (Bayesian belief updating via B × prior × likelihood)
-- [x] A-matrix learning (pA concentration updates propagated back to A via column normalization)
-- [x] action_probabilities() / record_action() / reset() for parameter recovery replay
-- [x] Input validation: observation_probs.len() and initial_belief.len() must match n_states
-
-### Environments (crates/reproduce/src/lib.rs)
-- [x] BanditEnvironment (single-agent)
-- [x] SharedBanditEnvironment (multi-agent, competitive/non-competitive modes)
-- [x] Non-competitive round tracking via agents_acted vec (not bandit_selection scan)
-
-### Group Agent (crates/aif/src/group.rs)
-- [x] VotingMode enum: Probabilistic, Deterministic, CertaintyWeighted
-- [x] VotingAgent: discrete vote aggregation + confidence-weighted distribution mixing
-- [x] GroupAgent: Markov blanket composition (CopyAgent → Vec<POMDPAgent> → VotingAgent)
-- [x] CertaintyWeighted mode: agents report full action distributions, active agent forms
-      confidence-weighted mixture P_group(a) = Σ w_i P_i(a) / Σ w_i where w_i = exp(-H(P_i))
-- [x] GroupAgentBuilder with factory methods for all experiments + .certainty_weighted(true)
-
-### Simulation & Parameter Recovery (crates/reproduce/src/simulation.rs)
-- [x] run_group_simulation() / run_single_simulation()
-- [x] log_likelihood() — replay-based log-likelihood for candidate α
-- [x] recover_alpha() — grid search with half-normal prior (MAP estimate)
-- [x] Experiment factories: experiment_identical, experiment_varying_alpha,
-      experiment_deterministic, experiment_varying_preferences, experiment_certainty_weighted
-- [x] parameter_recovery_single() for Figure 4 validation
-- [x] Dirichlet-constructed α distributions (with n<2 guard), Beta(0.8, 0.8) preferences
-
-### Paper Reproduction (crates/reproduce/src/bin/reproduce.rs)
-- [x] Full sweep: parameter recovery (Fig 4) + 4 paper experiments (Fig 5) + CW extension (Fig 6)
-- [x] Rayon-parallelized, ~16s in release mode
-- [x] Generates plots/figure4_recovery.png, figure5_experiments.png, figure6_certainty_weighted.png
-- [x] All qualitative findings from paper reproduced:
-  - Exp 1: group α ≈ individual α (identity line)
-  - Exp 2: sub-linear scaling (below identity)
-  - Exp 3: super-linear scaling, slope ↑ with n_agents
-  - Exp 4: group α crushed near 0 (conflicting preferences)
-  - Exp 5 (extension): CW voting tracks closer to identity than simple voting
-
-### Communication Framework (crates/aif/src/communication.rs)
-- [x] Flume-based message channels, CommunicatingPOMDPAgent
-
-### Coalition Layer (crates/aif/src/coalition.rs) — v0.4.0
-- [x] `CapabilityProvider` trait — domain supplies per-agent generative-model inputs
-- [x] `CoalitionEvaluator` — `individual_efe` / `coalition_efe` / `decide_join`
-      (join iff coalition G < individual G), built on `POMDPAgent::expected_free_energy()`
-- [x] `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory` — normalized belief
-      structures re-expressing the retired `coalition_aif` prototype's ideas
-- [x] Consumed downstream by the koalisi coalition runtime as a pluggable, optional AIF
-      decision strategy (koalisi v0.6.0, behind its `decision` feature)
-
-### Tests
-- [x] 51 tests total, all passing, 0 clippy warnings (workspace: `cargo test`)
-
-### Possible Extensions
-- [x] ~~Certainty-weighted voting (agents signal confidence)~~ — implemented as VotingMode::CertaintyWeighted
-- [x] ~~Coalition-formation decision layer~~ — `aif::coalition` (v0.4.0); consumed by koalisi v0.6.0
-- [ ] MCMC parameter estimation (Metropolis-Hastings instead of grid search)
-- [ ] Network communication structures (beyond simple voting)
-- [ ] Greater-than-two-scale nesting (group of groups)
-- [ ] Game-theoretic inter-group competition
-- [ ] Evolutionary selection pressure on individual vs group level
+Figures 4 and 5 (all four experiments) are reproduced in
+`plots/figure4_recovery.png` / `plots/figure5_experiments.png`, and the paper's proposed
+certainty-weighted aggregation (an extension the paper suggests but does not simulate) is
+implemented and evaluated in `plots/figure6_certainty_weighted.png`. Methodological deviations
+(grid-search MAP instead of MCMC; policy depth 1 with a proven-equivalent action marginal) are
+documented in [aif-coverage.md](aif-coverage.md).

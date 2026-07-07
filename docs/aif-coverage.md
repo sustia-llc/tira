@@ -1,88 +1,175 @@
-# `aif` active-inference coverage
+# `aif` coverage: paper reproduction + canonical active inference
 
-*What the `aif` engine implements, scored against the canonical discrete active-inference
-specification. This tracks **standard-AIF feature parity** — a different axis from the paper's
-multi-scale **research extensions** (those live in [abstract.md](abstract.md) §4 and its
-Implementation-Status checklist). Use this doc to answer "is `aif` a full active-inference
-backend?" at a glance.*
+*Two questions, one document. **Axis 1**: how completely does tira implement Waade et al.,
+"As One and Many" (Entropy 2025, 27, 143; DOI [10.3390/e27020143](https://doi.org/10.3390/e27020143))
+— section by section, equation by equation, experiment by experiment? **Axis 2**: how much of the
+canonical discrete active-inference (POMDP) specification does the `aif` engine cover — i.e. "is
+`aif` a full AIF backend?" A paper summary lives in [abstract.md](abstract.md); the full PDF is
+[entropy-27-00143.pdf](entropy-27-00143.pdf).*
 
-## Source of truth
+Legend: ✅ implemented · ⚠️ partial / deviates (documented) · ❌ not implemented · ➕ beyond the source.
 
-Discrete-state (POMDP) active inference has a well-established canonical specification. `aif`
-reimplements the same MAB-POMDP model the source paper uses, so these are the references we score
-against (the first two are cited by the source paper as [1] and [61]):
+---
 
-| Reference | Role |
-|---|---|
-| Smith, Friston & Whyte (2022), *J. Math. Psychol.* 107:102632, [doi:10.1016/j.jmp.2021.102632](https://doi.org/10.1016/j.jmp.2021.102632) | Equation-by-equation spec for discrete POMDP active inference — the de facto checklist |
-| Parr, Pezzulo & Friston (2022), *Active Inference* (MIT Press) | Textbook foundation |
-| `pymdp` — Heins et al. (2022), *JOSS* 7(73):4098, [arXiv:2201.03904](https://arxiv.org/abs/2201.03904) | Reference Python implementation; its `Agent` API is the practical feature matrix |
-| `ActiveInference.jl` — Nehrer et al. (source paper ref [57]) | The Julia library the source paper uses; `aif` mirrors its MAB-POMDP model |
+## Axis 1 — paper → code coverage
 
-## Coverage matrix
+### §2.1 Active inference for Multi-Armed Bandit tasks
 
-Legend: ✅ implemented · ⚠️ partial / special-cased · ❌ not yet · ➕ beyond the reference.
-
-| Capability (per Smith 2022 / pymdp) | Status | Notes (`crates/aif/src/...`) |
+| Paper element | Status | Where (`crates/aif/src/...`) |
 |---|---|---|
-| Generative matrices A, B, C, D, E | ✅ | `agent.rs` `POMDPAgent::new` |
-| Multiple hidden-state **factors** | ❌ | single factor (one state vector) |
-| Multiple observation **modalities** | ❌ | single modality; `n_obs = 2` (binary) hard-coded |
-| State inference (perception) | ⚠️ | one-step Bayesian update `B·prior·likelihood` (`infer_states`); not full fixed-point / marginal-message-passing over trajectories. Exact for deterministic-B; not general |
-| Policy inference: enumerate → γ-softmax posterior → marginalize → α-softmax | ✅ | `enumerate_policies` / `policy_posterior` / `infer_policies`; α vs γ kept separate |
-| EFE term — pragmatic value (utility) | ✅ | `efe_step`, `ln C` |
-| EFE term — state information gain (salience) | ✅ | exact mutual information `H[q(o)] − E_q(s)[H(o|s)]` |
-| EFE term — **novelty / parameter info gain** | ❌ | not computed; only relevant once model learning is active |
-| Action selection | ✅ | `act` samples from α-softmaxed action marginal |
-| **Policy precision (γ/β) dynamics** | ❌ | γ fixed at 16 (no precision update) |
-| Learning A (Dirichlet pA) | ⚠️ | `update_a` (column-normalized pA→A); correct but not wired into the group experiments |
-| Learning **B (pB), D (pD), E (pE)** | ❌ | — |
-| Temporal / policy depth | ✅ | configurable `policy_depth` (not hierarchical/deep-temporal) |
-| Input validation (distributions, probabilities) | ✅ | `AifError::{InvalidProbability, InvalidDistribution}` |
-| Variational free energy F (perception objective, Eq. 1) | ❌ | not surfaced (paper extension 11) |
+| POMDP generative model, matrices A–E (Fig 1) | ✅ | `agent.rs` `POMDPAgent::new` — A: `(2 × n_states)`, columns `[p, 1−p]`; B: one deterministic `(n × n)` per action; C: `ln`-transformed 2-element preference prior; D: state prior (uniform or caller override); E: uniform policy prior |
+| Variational free energy F, Eq. (1) | ⚠️ | Not surfaced as a quantity. Perception is a one-step exact Bayes update (`infer_states`: `B·belief` prior × A-likelihood, normalized) — exact for this model class, so no gradient descent on F is needed; F itself is not computed (see extension 11) |
+| Expected free energy G, Eq. (2) = info gain + pragmatic value | ✅ | `agent.rs::efe_step` — pragmatic value `E_q(o|π)[ln p(o|C)]`; epistemic term as exact mutual information `H[q(o|π)] − E_q(s′)[H(o|s′)]` |
+| Epistemic term reachability | ⚠️ | Computed exactly, but **structurally zero for every constructible agent**: `POMDPAgent::new` hardcodes deterministic B transitions, so the predicted state is always a delta and the MI vanishes. Paper-faithful for the MAB (its agents are also purely pragmatically driven — §2.1 "action selection is driven only by the pragmatic value"); becomes live only once B is injectable |
+| Policy machinery: enumerate → γ-softmax posterior × E → marginalize → α-softmax | ✅ | `enumerate_policies` / `policy_posterior` / `infer_policies`; softmax over neg-G with `γ`, then action-marginal power-softmax with `α` |
+| α vs γ kept separate (γ = 16 default) | ✅ | `gamma` (policy precision, default 16.0) and `alpha` (action precision) are distinct fields applied at distinct stages — many implementations conflate them |
+| Policy length 2 | ⚠️ | Engine supports arbitrary `policy_depth` via `with_params`, but all experiment construction sites use `new()` → **depth 1**. Provably equivalent here: deterministic B makes step-2 value independent of step-1 action, so the action marginal is unchanged. Recovery replays with the same depth-1 model, so generation and inference are consistent. Documented deviation |
+| 3-arm bandit, outcome-1 probs (0.8, 0.2, 0.2); C = (0.7, 0.3); uniform D, E | ✅ | `reproduce::simulation` `BANDIT_PROBS`/`PREFERENCES` constants; builder defaults match |
+| No parameter learning in the baseline (agents get accurate A) | ✅ | `learn_a: false` everywhere in the reproduction; pA machinery exists but is off, matching §2.1 |
 
-### Beyond the reference (`aif`'s value-add — not in pymdp)
+### §2.2 Computational cognitive modelling (fitting)
 
-| Capability | Status | Location |
+| Paper element | Status | Where |
 |---|---|---|
-| Markov-blanket **group composition** (sensory → internal → active) | ➕✅ | `group.rs` `GroupAgent` |
-| **Certainty-weighted** group voting (confidence-weighted Bayesian model average) | ➕✅ | `group.rs` `VotingMode::CertaintyWeighted` |
-| **Coalition** decision layer (EFE-based `decide_join`, trust/compat/history beliefs) | ➕✅ | `coalition.rs` |
-| **Parameter recovery** (grid-search MAP, half-normal prior) | ➕✅ | `reproduce::simulation` |
-| Reproducible CW path (seeded) | ➕✅ | `GroupAgentBuilder::seed` |
+| Fit POMDP model to behaviour (blanket states), estimate α | ✅ | `reproduce::simulation::log_likelihood` — fresh model per candidate α, replays the observation/action sequence, sums `ln P(a_t | o_{1:t}, α)`; replay path is exactly the generation path (`action_probabilities` + `record_action`) |
+| Half-normal(0, SD 4) prior over α | ✅ | `recover_alpha` adds `−α²/(2·4²)` log-prior |
+| Bayesian estimation via MCMC (Turing.jl), posterior **median** | ⚠️ | tira uses **grid search MAP** over α ∈ [0.00, 5.00], step 0.01. Reproduces the paper's findings in the identifiable region (α ≤ 1). Known consequence: in the degenerate region (α > 1) a point-MAP will not reproduce the paper's posterior-median clustering near ~4 (Fig 4's high-α band); MCMC is extension 1 |
+| Parameter recovery check (Fig 4) | ✅ | `parameter_recovery_single`, true α ∈ 0.05–2.00 → `plots/figure4_recovery.png` |
 
-## Verdict
+### §2.3 Cognitive modelling for collective agents
 
-`aif` is a **correct but minimal discrete-AIF core** — the MAB-POMDP slice the source paper needs —
-**plus** multi-scale / coalition machinery that the reference implementations do not have. It is *not*
-a general-purpose AIF engine: the gap to "full backend" is one coherent axis —
-**factorization (multi-factor states + multi-modality observations) + full learning (B/D, novelty term)
-+ precision dynamics + general message-passing inference.**
+| Paper element | Status | Where |
+|---|---|---|
+| Markov blanket group: sensory → internal → active (Fig 3) | ✅ | `group.rs::GroupAgent` — `CopyAgent` sensory (information transfer), `Vec<POMDPAgent>` internal, `VotingAgent` active |
+| Sensory agent = simple copy; active agent = probabilistic vote aggregator | ✅ | `CopyAgent::act` returns its observation; `VotingAgent::aggregate` samples ∝ vote counts (`VotingMode::Probabilistic`) |
+| Group blanket states = sensory observations + active actions, used for fitting | ✅ | `run_group_simulation` records exactly the group-level (observation, action) pairs; `GroupAgent` implements `Agent`, so recovery code is identical for single agents and groups |
+| Same generative model at both scales | ✅ | recovery scores group data against the same MAB-POMDP (`recover_alpha`) |
 
-**Practical implication.** koalisi (v0.6.0) already ships an AIF-backed `ValueCalculator`
-(`EfeValueCalculator`, value = −G) and a `CoalitionDecisionPolicy` (`AifDecisionPolicy`) — built
-**directly on `aif::POMDPAgent`** via a capability-coverage → observation-precision model. Notably it
-**bypasses `aif::CoalitionEvaluator`**: that type's `observation_probs` cannot vary with coalition
-membership, so membership can only shift *preferences*, which collapses to G ≈ 0 for every coalition (the
-conditional-on-observation-model behaviour documented in CLAUDE.md). So the full-coverage axis is *not*
-needed for the coalition use case today. What is missing **upstream** is a **membership-aware observation
-model** so the reusable coverage→G pattern can live in `aif` instead of being hand-rolled in each downstream
-crate. See the cross-project bridge plan in `.claude/plans/`.
+### §2.4 + §3 Simulation experiments and results
 
-## Roadmap to "full backend" (priority order)
+All experiments: group sizes **4 / 8 / 16 / 100**, internal α ∈ 0.05–1.00 (step 0.05), 300 trials,
+rayon-parallelized in `crates/reproduce/src/bin/reproduce.rs`; ~16 s release build.
 
-These are the **standard-AIF parity** items (distinct from abstract.md's paper research extensions; some
-overlap, e.g. learning):
+Environments live in `crates/reproduce` (not the engine): `BanditEnvironment` ✅ is the paper's
+probabilistic MAB; `SharedBanditEnvironment` ➕ (multi-agent, competitive/non-competitive modes
+with per-round `agents_acted` tracking) and the `Environment`/`MultiAgentEnvironment` traits are
+beyond-paper scaffolding for the multi-agent extensions.
 
-1. **Multi-factor hidden states + multi-modality observations** — the biggest structural gap; unblocks most
-   real domains. Generalize `A`/`B`/`C`/`D` to lists of factors/modalities.
-2. **Full learning**: B (pB), D (pD), E (pE) alongside the existing A learning; wire learning into the
-   experiment/group path. Add the **novelty** EFE term so learning is drive-able.
-3. **Precision dynamics** (γ/β update over policies).
-4. **General state inference** (fixed-point iteration / marginal message passing) replacing the one-step
-   update, for non-deterministic B.
-5. **Variational free energy F** accessor (also paper extension 11 — extensivity check).
+| Experiment (paper) | Status | Where / notes |
+|---|---|---|
+| 1 — identical internal α; group α ≈ identity (Fig 5A) | ✅ | `experiment_identical` |
+| 2 — Dirichlet-varying α (sufficient statistic 1.5, scaled to target mean); sub-linear group α (Fig 5B) | ✅ | `experiment_varying_alpha` + `dirichlet_alphas` |
+| 3 — deterministic voting; super-linear α inflation (Fig 5C) | ✅ | `experiment_deterministic`, `VotingMode::Deterministic` |
+| 4 — Beta(0.8, 0.8)-varying preferences; crushed group α (Fig 5D) | ✅ | `experiment_varying_preferences` + `beta_preferences`; data generated from heterogeneous preferences but scored against the canonical C — the paper's intended method, not a bug |
+| Fig 4 parameter recovery | ✅ | `plots/figure4_recovery.png` |
+| Fig 5 four-panel | ✅ | `plots/figure5_experiments.png` |
+| Appendix Fig A1 (internal-α distributions) | ❌ | not reproduced (diagnostic plot only; the Dirichlet construction it visualizes is implemented and unit-tested) |
+| Fig 5 shape claims regression-tested | ⚠️ | shapes verified by figure inspection; seeded ordering assertions are tracked upstream (needs seedable `BanditEnvironment`, issue #2) |
 
-Tracked operationally in [TODO.md](../TODO.md). The koalisi `ValueCalculator` bridge already exists (in
-koalisi's `src/decision/`); making its core primitive — a membership/competence-aware observation model →
-`G` — a reusable part of `aif` is a separate cross-project plan in `.claude/plans/`.
+### §4 Discussion — extension coverage
+
+Numbering below **defines** the "extension N" scheme used across tira docs (mirrored in
+CLAUDE.md §"Possible extensions"); the paper lists these in prose in §4.
+
+| # | Extension (paper §4 / natural next step) | Status |
+|---|---|---|
+| 1 | MCMC parameter estimation (replace grid MAP; posterior median) | ❌ planned — prior + likelihood ready |
+| 2 | Recover additional parameters (γ, matrix contents, learning rates) | ❌ |
+| 3 | Parameter learning in group experiments (temporal dynamics) | ⚠️ pA→A learning implemented and tested at agent level (`update_a`); group wiring incomplete — `GroupAgentBuilder::learn_a(true)` cannot currently build (missing initial-precision plumbing), and the certainty-weighted path bypasses learning entirely |
+| 4 | Sensory/active agents as proper AIF agents | ❌ |
+| 5 | Certainty-weighted voting (§4: "certainty-weighted Bayesian model average") | ➕✅ implemented **and evaluated** — `VotingMode::CertaintyWeighted`, weights `exp(−H(P_i))`, mixture `Σ w_i P_i / Σ w_i`; Figure 6 (`plots/figure6_certainty_weighted.png`) shows CW tracks the identity line closer than probabilistic voting, confirming the paper's prediction. Beyond-paper: the paper proposes but does not simulate this |
+| 6 | Network communication structures | ⚠️ latent scaffolding only — `communication.rs` (`CommunicationChannel`, `CommunicatingPOMDPAgent`, flume) exists and is exercised by tests, but is not wired into the group pipeline and has known dead surfaces (tracked in issues) |
+| 7 | Game-theoretic inter-group competition | ❌ |
+| 8 | Greater-than-two-scale nesting (groups of groups) | ❌ — `GroupAgent: Agent` makes this structurally plausible, but internal storage is concrete `Vec<POMDPAgent>`, not trait objects |
+| 9 | Dynamically emerging Markov blankets | ❌ |
+| 10 | Evolutionary selection (group vs individual pressure) | ❌ |
+| 11 | Free energy extensivity (sum of individual F vs group F) | ❌ — requires surfacing F (Eq. 1); `expected_free_energy()` surfaces G, not F |
+| 12 | Continuous state-space models | ❌ planned |
+
+The paper's §4 additionally floats renormalization-group detection of Markov blankets at slower
+timescales and application to systems with unknown generative models (animals, artificial systems,
+organoids/"dishbrains"); these are noted for completeness but not tracked as numbered tira
+extensions.
+
+**Beyond the paper (tira additions):** coalition value layer (`coalition.rs`, Axis 2 below),
+certainty-weighted voting evaluation (extension 5), seeded/reproducible CW group path
+(`GroupAgentBuilder::seed`), input validation with typed errors (`AifError`).
+
+---
+
+## Axis 2 — canonical discrete-AIF parity
+
+`aif` reimplements the paper's MAB-POMDP slice. Scored against the canonical spec — Smith,
+Friston & Whyte (2022) *J. Math. Psychol.* [10.1016/j.jmp.2021.102632](https://doi.org/10.1016/j.jmp.2021.102632)
+(the equation-by-equation checklist; paper ref [61]), Parr, Pezzulo & Friston (2022) *Active
+Inference* (MIT Press; ref [1]), `pymdp` (Heins et al. 2022, JOSS), and `ActiveInference.jl`
+(Nehrer et al.; ref [57], the library the paper uses):
+
+| Capability (per Smith 2022 / pymdp) | Status | Notes |
+|---|---|---|
+| Generative matrices A, B, C, D, E | ✅ | `agent.rs::POMDPAgent::new` |
+| Multiple hidden-state **factors** | ❌ | single factor |
+| Multiple observation **modalities** | ❌ | single modality, `n_obs = 2` hard-coded; A columns `[p, 1−p]`; `n_actions = n_states` (MAB coupling); B not injectable. The engine's only expressible POMDP today is the paper's bandit family |
+| State inference (perception) | ⚠️ | one-step exact Bayes (`infer_states`); not fixed-point / marginal message passing over trajectories — exact for deterministic B, not general |
+| Policy inference: γ-softmax posterior → marginalize → α-softmax | ✅ | `policy_posterior` / `infer_policies`, α/γ separate |
+| EFE — pragmatic value | ✅ | `efe_step` |
+| EFE — state info gain (salience) | ⚠️ | exact MI formula implemented; structurally zero under the hardcoded deterministic B (see Axis 1 §2.1) |
+| EFE — novelty / parameter info gain | ❌ | relevant once model learning is active |
+| Action selection | ✅ | `act` samples the α-softmaxed marginal |
+| Policy precision (γ/β) dynamics | ❌ | γ fixed |
+| Learning A (Dirichlet pA, posterior write-back) | ⚠️ | `update_a` correct at agent level; group wiring incomplete (extension 3 row above) |
+| Learning B (pB), D (pD), E (pE) | ❌ | |
+| Temporal / policy depth | ✅ | configurable via `with_params` (experiments run depth 1 — see Axis 1) |
+| Input validation | ✅ | `AifError::{InvalidProbability, InvalidDistribution, InvalidAction}` |
+| Variational free energy F accessor | ❌ | extension 11 |
+
+### Verdict
+
+`aif` is a **correct, minimal, MAB-shaped discrete-AIF core** — the slice the paper needs, verified
+against the paper's own conventions (α/γ separation, B×belief direction, EFE sign chain, replay
+consistency) — **plus** multi-scale group composition and a coalition value layer that the reference
+implementations do not have. It is *not* a general-purpose AIF backend. The gap is one coherent
+axis: **factorization (multi-factor states, multi-modality observations, injectable B) + full
+learning (B/D/E, novelty term) + precision dynamics + general message-passing inference.**
+
+### Roadmap to "full backend" (priority order)
+
+1. **Generalize the generative model** — injectable B, multi-factor states, multi-modality
+   observations, decouple `n_actions` from `n_states`. Unblocks most real domains and makes the
+   epistemic term live.
+2. **Full learning** — pB/pD/pE alongside pA; wire learning into the group path; add the novelty
+   EFE term so learning is drivable.
+3. **Precision dynamics** (γ/β updates).
+4. **General state inference** (fixed-point / marginal message passing) for non-deterministic B.
+5. **Surface F** (Eq. 1 accessor) — also unlocks the extension-11 extensivity study.
+
+Work is tracked as [GitHub issues](https://github.com/sustia-llc/tira/issues).
+
+---
+
+## Coalition formation (the AIF strategy surface)
+
+`crates/aif/src/coalition.rs` packages the engine as a **coalition-formation value primitive** for
+downstream multi-agent runtimes:
+
+- **`competence_efe(c, params) -> Result<f64, AifError>`** — the supported bridge. Maps a scalar
+  competence/coverage `c ∈ [0, 1]` to an observation precision `p = 0.5 + (max_precision − 0.5)·c`,
+  builds a minimal 2-state/2-observation POMDP, and returns its expected free energy `G`
+  (**lower = better**; wrap `−G` where higher-is-better is expected). `ObsPrecisionParams`
+  configures `max_precision`, `success_preference`, and `alpha`. This is how a downstream coalition
+  runtime scores "how good would this coalition be at the task?" as an active-inference quantity —
+  the AIF arm in its A/B evaluation against a categorical (magnitude-based) strategy.
+- **Belief structures** — `TrustBeliefs` (EMA-updated per-agent trust), `CompatibilityBeliefs`
+  (symmetric pairwise), `CoalitionHistory` (membership-keyed performance), combined by
+  `belief_weighted_preference()` into the 2-element preference prior.
+- **`CoalitionEvaluator`** (deprecated → issue #1) — the earlier per-agent join/leave primitive
+  (`decide_join`: join iff coalition G < individual G). Its observation model is membership-blind:
+  membership can only shift *preferences*, and under a discriminative observation model an agent
+  routes around preference conflicts by choosing a different arm. Additionally, preference
+  **sharpness** (not direction) does move G, so providers that sharpen preferences inside
+  coalitions inflate join decisions. `competence_efe` avoids both problems by making membership
+  vary the observation model. Prefer it.
+
+Note for consumers: with the current deterministic-B engine, `G` from `competence_efe` is purely
+pragmatic (the epistemic term is structurally zero) — an exploration bonus is **not** part of the
+score today (see Axis 2 roadmap item 1).

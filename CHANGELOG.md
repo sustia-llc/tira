@@ -2,12 +2,38 @@
 
 ## [Unreleased]
 
+### Changed
+- **Docs redesign for publication (2026-07-06).** `docs/aif-coverage.md` recreated from the
+  source paper: paper→code coverage matrix (§2.1–§4, all figures), the numbered extension
+  table (1–12, defining the "extension N" scheme), documented deviations (grid-search MAP vs
+  MCMC median; policy depth 1 with equivalent action marginals; structurally-zero epistemic
+  term under hardcoded deterministic B), a refreshed canonical-AIF parity scorecard, and the
+  coalition-strategy section (`competence_efe` as the AIF arm consumed downstream).
+  `docs/abstract.md` replaced by a paper summary (implementation status now lives solely in
+  the coverage doc). README `competence_efe` example fixed (by-value params, `Result`
+  handled); README/CLAUDE.md drift corrected (`AifError` rename, 72 tests, grid α ∈
+  [0.00, 5.00], plotter status, polymorphism claim).
+- **`competence_efe` input contract tightened**: `ObsPrecisionParams` is now validated
+  (`max_precision`/`success_preference` must lie in the open interval (0.5, 1.0), `alpha`
+  finite and > 0) via `ObsPrecisionParams::validate()`. Previously-accepted degenerate values
+  (e.g. `max_precision = 1.0`, or ≤ 0.5 which flattens/inverts the competence→precision
+  mapping) now return `Err` — matching the ranges the struct has always documented.
+- Internal design artifacts (`.claude/{docs,plans,workflows}`) moved out of the repo into
+  private tracking; `.gitignore` now excludes `/.claude/` and `/CLAUDE.local.md` wholesale.
+
+### Deprecated
+- **`CoalitionEvaluator`** (+ `#[deprecated]` attribute): membership-blind observation model —
+  membership only shifts preferences, which is direction-insensitive under discriminative
+  observation models yet sharpness-sensitive (so sharpening providers over-join). Use
+  `competence_efe` ([#1](https://github.com/sustia-llc/tira/issues/1)); removal in a future
+  release — part of the cross-project coalition semantic-layer roadmap (koalisi A/B of the
+  AIF vs categorical-magnitude decision policies).
+
+### Meta
 - Adopted GitHub issue tracking (aligned with the sibling projects); open work migrated from
   `TODO.md` to [issues #1–#3](https://github.com/sustia-llc/tira/issues).
-- Planned: deprecate the preference-based `CoalitionEvaluator` in favor of `competence_efe` as
-  the single downstream coalition-value contract
-  ([#1](https://github.com/sustia-llc/tira/issues/1)) — part of the cross-project coalition
-  semantic-layer roadmap (koalisi A/B of the AIF vs categorical-magnitude decision policies).
+- Deep multi-agent audit (2026-07-06): 57 findings, 45 confirmed, 0 blocking; doc drift fixed
+  in this entry, behavioral/test-debt findings filed as issues.
 
 ## [0.5.0] - 2026-05-31
 
