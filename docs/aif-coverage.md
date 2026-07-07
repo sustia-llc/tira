@@ -136,14 +136,19 @@ learning (B/D/E, novelty term) + precision dynamics + general message-passing in
 
 1. **Generalize the generative model** — injectable B, multi-factor states, multi-modality
    observations, decouple `n_actions` from `n_states`. Unblocks most real domains and makes the
-   epistemic term live.
+   epistemic term live. ([#12](https://github.com/sustia-llc/tira/issues/12))
 2. **Full learning** — pB/pD/pE alongside pA; wire learning into the group path; add the novelty
-   EFE term so learning is drivable.
-3. **Precision dynamics** (γ/β updates).
+   EFE term so learning is drivable. ([#13](https://github.com/sustia-llc/tira/issues/13),
+   group wiring in [#4](https://github.com/sustia-llc/tira/issues/4))
+3. **Precision dynamics** (γ/β updates). ([#14](https://github.com/sustia-llc/tira/issues/14))
 4. **General state inference** (fixed-point / marginal message passing) for non-deterministic B.
+   ([#15](https://github.com/sustia-llc/tira/issues/15))
 5. **Surface F** (Eq. 1 accessor) — also unlocks the extension-11 extensivity study.
+   ([#16](https://github.com/sustia-llc/tira/issues/16))
 
-Work is tracked as [GitHub issues](https://github.com/sustia-llc/tira/issues).
+Both this parity roadmap (#12–#16) and engineering debt are tracked as
+[GitHub issues](https://github.com/sustia-llc/tira/issues); the numbered research extensions
+above are doc-tracked until picked up.
 
 ---
 
