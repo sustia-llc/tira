@@ -1,9 +1,8 @@
 //! Coalition-formation application layer built on the correct POMDP engine.
 //!
 //! This module re-expresses the *ideas* of the retired `coalition_aif` project on
-//! `aif`'s code-reviewed active-inference engine (see the project plan,
-//! `.claude/plans/aif-merge-koalisi-integration.md`, "Why not port `coalition_aif`").
-//! The two salvaged ideas are:
+//! `aif`'s code-reviewed active-inference engine (see the project changelog for the
+//! retirement rationale). The two salvaged ideas are:
 //!
 //! 1. **Decision primitive:** an agent should join a coalition iff being in it *lowers*
 //!    its expected free energy G versus acting alone (`coalition_efe < individual_efe`).
@@ -68,18 +67,33 @@ pub trait CapabilityProvider {
 /// # Scope / limitation
 /// Coalition membership reaches the model **only through [`CapabilityProvider::preferences`]**
 /// — [`CapabilityProvider::observation_probs`] does not take `members`, so the *observation
-/// model* is fixed across coalitions. Because `expected_free_energy` is policy-posterior
-/// weighted, a preference shift moves `G` only under a low-discriminability observation model;
-/// under a discriminative one the agent routes around preference conflict and `G` barely
-/// changes (it can collapse to `G ≈ 0` for every coalition). **For coalition-*value* use
-/// cases where membership should change *achievable outcomes* (capability/competence
-/// coverage), prefer the [`competence_efe`] primitive**, which makes the observation model
-/// depend on a scalar competence. This type is best suited to genuinely preference-driven,
-/// per-agent comparisons.
+/// model* is fixed across coalitions. This makes `G`'s response to a membership-driven
+/// preference change subtle, and the two halves must be stated separately:
+///
+/// - **Preference *direction* at constant sharpness does not move `G`** under a discriminative
+///   observation model. `expected_free_energy` is policy-posterior weighted, so if membership
+///   merely rotates the preference toward a *different* arm without sharpening it, the agent
+///   re-routes to that arm and `G` barely changes (it can collapse to `G ≈ 0` for every
+///   coalition regardless of which outcome is "preferred").
+/// - **Preference *sharpness* does move `G`.** A neutral `[0.5, 0.5]` → sharp `[0.9, 0.1]`
+///   shift lowers `G` by concentrating preference mass, and it lowers `G` **by the same
+///   amount for a synergy coalition and a conflict coalition** — the direction of the sharp
+///   preference is irrelevant once the agent can re-route. So a provider that *sharpens*
+///   preferences inside coalitions will make [`Self::decide_join`] return `true` even for a
+///   conflict coalition, because sharpening alone lowers `G` below the neutral-alone baseline.
+///
+/// **For coalition-*value* use cases where membership should change *achievable outcomes*
+/// (capability/competence coverage), prefer the [`competence_efe`] primitive**, which makes
+/// the *observation model* vary with a scalar competence instead of leaning on preference
+/// shifts. This type is best suited to genuinely preference-driven, per-agent comparisons.
+#[deprecated(
+    note = "membership-blind observation model; use competence_efe (see https://github.com/sustia-llc/tira/issues/1)"
+)]
 pub struct CoalitionEvaluator<'a, P: CapabilityProvider> {
     provider: &'a P,
 }
 
+#[allow(deprecated)]
 impl<'a, P: CapabilityProvider> CoalitionEvaluator<'a, P> {
     /// Create an evaluator borrowing `provider` for the duration of its queries.
     #[must_use]
@@ -153,6 +167,10 @@ impl<'a, P: CapabilityProvider> CoalitionEvaluator<'a, P> {
 /// `max_precision` is the observation-model precision at full competence (`1.0`), in
 /// `(0.5, 1.0)`; `success_preference` is the preference mass on the "success" observation,
 /// in `(0.5, 1.0)`; `alpha` is the action precision passed to the POMDP agent.
+///
+/// The fields are **public**, so a struct literal (or `..Default::default()`) can hold
+/// out-of-range values. [`ObsPrecisionParams::validate`] — called by [`competence_efe`] —
+/// is the enforcement point; construction alone does not check the domain rules.
 #[derive(Debug, Clone, Copy)]
 pub struct ObsPrecisionParams {
     /// Observation-model precision at full competence. In `(0.5, 1.0)`.
@@ -170,6 +188,40 @@ impl Default for ObsPrecisionParams {
             success_preference: 0.9,
             alpha: 8.0,
         }
+    }
+}
+
+impl ObsPrecisionParams {
+    /// Validate the parameter domain: `max_precision` and `success_preference` must each be
+    /// finite and in the OPEN interval `(0.5, 1.0)`, and `alpha` must be finite and strictly
+    /// positive.
+    ///
+    /// # Errors
+    /// Returns [`AifError::InvalidDistribution`] naming the offending field if any rule is
+    /// violated: `max_precision` outside `(0.5, 1.0)` (at `0.5` the competence→precision
+    /// mapping is constant / uninformative, below `0.5` it inverts), `success_preference`
+    /// outside `(0.5, 1.0)` (degenerate at the boundaries), or `alpha` non-finite / `<= 0.0`.
+    pub fn validate(&self) -> Result<(), AifError> {
+        let in_open_half_unit = |x: f64| x.is_finite() && x > 0.5 && x < 1.0;
+        if !in_open_half_unit(self.max_precision) {
+            return Err(AifError::InvalidDistribution(format!(
+                "ObsPrecisionParams.max_precision must be finite and in (0.5, 1.0), got {}",
+                self.max_precision
+            )));
+        }
+        if !in_open_half_unit(self.success_preference) {
+            return Err(AifError::InvalidDistribution(format!(
+                "ObsPrecisionParams.success_preference must be finite and in (0.5, 1.0), got {}",
+                self.success_preference
+            )));
+        }
+        if !self.alpha.is_finite() || self.alpha <= 0.0 {
+            return Err(AifError::InvalidDistribution(format!(
+                "ObsPrecisionParams.alpha must be finite and > 0.0, got {}",
+                self.alpha
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -191,13 +243,21 @@ impl Default for ObsPrecisionParams {
 /// non-degenerate as membership changes (see the module docs).
 ///
 /// # Errors
-/// Returns [`AifError::InvalidProbability`] if `competence` is not a finite value in `[0, 1]`,
-/// or [`AifError`] if the resulting POMDP parameters are otherwise rejected by the engine
-/// (e.g. degenerate `params`).
+/// Returns [`AifError::InvalidProbability`] if `competence` is not a finite value in `[0, 1]`.
+/// Returns [`AifError::InvalidDistribution`] (via [`ObsPrecisionParams::validate`]) if
+/// `params.max_precision` / `params.success_preference` is not a finite value in the open interval
+/// `(0.5, 1.0)`, or if `params.alpha` is not a finite, strictly positive value. For
+/// `max_precision`: at exactly `0.5` the mapping `p = 0.5 + (max_precision − 0.5)·c` is CONSTANT
+/// (competence-independent, uninformative) and only a value `< 0.5` inverts the competence→precision
+/// monotonicity; a `success_preference` outside `(0.5, 1.0)` is degenerate. May also return other
+/// [`AifError`] variants if the resulting POMDP parameters are rejected by the engine.
 pub fn competence_efe(competence: f64, params: ObsPrecisionParams) -> Result<f64, AifError> {
     if !competence.is_finite() || !(0.0..=1.0).contains(&competence) {
         return Err(AifError::InvalidProbability(competence));
     }
+    // Validate params before use: a non-finite / out-of-range precision or preference would
+    // silently produce a degenerate or monotonicity-inverted observation model.
+    params.validate()?;
     let p = 0.5 + (params.max_precision - 0.5) * competence;
     let obs = vec![p, 1.0 - p];
     let prefs = vec![params.success_preference, 1.0 - params.success_preference];
@@ -221,6 +281,7 @@ pub fn competence_efe(competence: f64, params: ObsPrecisionParams) -> Result<f64
 ///
 /// # Examples
 /// ```rust
+/// #![allow(deprecated)] // CoalitionEvaluator is deprecated; still exercised here.
 /// use aif::{
 ///     belief_weighted_preference, AgentId, CapabilityProvider, CoalitionEvaluator,
 ///     CompatibilityBeliefs, CoalitionHistory, TrustBeliefs,
@@ -398,6 +459,7 @@ impl CoalitionHistory {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // exercises the deprecated CoalitionEvaluator intentionally.
 mod tests {
     use super::*;
 
@@ -694,5 +756,59 @@ mod tests {
         assert!(competence_efe(f64::NAN, params).is_err(), "NaN competence must be rejected");
         // The valid boundary values are accepted.
         assert!(competence_efe(0.0, params).is_ok() && competence_efe(1.0, params).is_ok());
+    }
+
+    #[test]
+    fn test_competence_efe_rejects_degenerate_params() {
+        // `params` is validated before use so a caller cannot silently obtain a degenerate or
+        // monotonicity-inverted observation model. Each field is checked independently.
+
+        // max_precision must lie in the OPEN interval (0.5, 1.0). At 0.4 the mapping
+        // p = 0.5 + (max_precision - 0.5)·c would DECREASE with competence, inverting the
+        // "more competence ⇒ more informative" monotonicity the primitive guarantees.
+        let bad_prec = ObsPrecisionParams { max_precision: 0.4, ..Default::default() };
+        assert!(
+            matches!(competence_efe(0.5, bad_prec), Err(AifError::InvalidDistribution(_))),
+            "max_precision = 0.4 must be rejected (would invert monotonicity)"
+        );
+
+        // The flat boundary case: at exactly 0.5 the mapping is competence-independent
+        // (uninformative), so validate() rejects it directly too.
+        assert!(
+            matches!(
+                ObsPrecisionParams { max_precision: 0.5, ..Default::default() }.validate(),
+                Err(AifError::InvalidDistribution(_))
+            ),
+            "max_precision = 0.5 must be rejected (constant / uninformative boundary)"
+        );
+
+        // success_preference must be in the OPEN interval (0.5, 1.0); the boundary 1.0 is
+        // degenerate (zero mass on the other outcome → -inf log-preference downstream).
+        let bad_pref = ObsPrecisionParams { success_preference: 1.0, ..Default::default() };
+        assert!(
+            matches!(competence_efe(0.5, bad_pref), Err(AifError::InvalidDistribution(_))),
+            "success_preference = 1.0 must be rejected (degenerate boundary)"
+        );
+
+        // alpha must be finite and strictly positive; 0.0 is rejected via InvalidDistribution.
+        let bad_alpha = ObsPrecisionParams { alpha: 0.0, ..Default::default() };
+        assert!(
+            matches!(competence_efe(0.5, bad_alpha), Err(AifError::InvalidDistribution(_))),
+            "alpha = 0.0 must be rejected"
+        );
+
+        // NaN in any field is rejected.
+        let nan_prec = ObsPrecisionParams { max_precision: f64::NAN, ..Default::default() };
+        let nan_pref = ObsPrecisionParams { success_preference: f64::NAN, ..Default::default() };
+        let nan_alpha = ObsPrecisionParams { alpha: f64::NAN, ..Default::default() };
+        assert!(competence_efe(0.5, nan_prec).is_err(), "NaN max_precision must be rejected");
+        assert!(competence_efe(0.5, nan_pref).is_err(), "NaN success_preference must be rejected");
+        assert!(competence_efe(0.5, nan_alpha).is_err(), "NaN alpha must be rejected");
+
+        // The defaults remain valid.
+        assert!(
+            competence_efe(0.5, ObsPrecisionParams::default()).is_ok(),
+            "default params must still be accepted"
+        );
     }
 }

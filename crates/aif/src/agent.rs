@@ -268,6 +268,9 @@ impl POMDPAgent {
     /// Returns the negative expected free energy contribution (higher = preferred)
     /// and the predicted next-state distribution. The epistemic term is the exact
     /// mutual information I(s;o|π) = H[q(o|π)] − E_{q(s')}[H(o|s')].
+    /// Note: with the deterministic B matrices `POMDPAgent::new` constructs, the predicted
+    /// next state is a delta distribution and this term is exactly zero for every
+    /// constructible agent — the exact-MI form becomes live only once B is injectable.
     fn efe_step(&self, qs: &DVector<f64>, action: usize) -> (f64, DVector<f64>) {
         let qs_next = &self.b_matrix[action] * qs;
         let qo = &self.a_matrix * &qs_next;
@@ -391,9 +394,9 @@ impl POMDPAgent {
     /// average over enumerated policies.
     ///
     /// LOWER is better (agents minimize G — standard active inference). It is computed as
-    /// `G = −E_{q(π)}[neg_g]`, where `neg_g` is the value [`Self::efe_step`] already
+    /// `G = −E_{q(π)}[neg_g]`, where `neg_g` is the value the internal `efe_step` already
     /// produces (higher `neg_g` = more preferred) and `q(π)` is the same γ-softmax policy
-    /// posterior that [`Self::infer_policies`] forms. This surfaces the engine's existing
+    /// posterior that the internal `infer_policies` forms. This surfaces the engine's existing
     /// EFE math as a single scalar; it introduces no new free-energy computation.
     #[must_use]
     pub fn expected_free_energy(&self) -> f64 {
@@ -726,7 +729,13 @@ mod tests {
     }
 
     #[test]
-    fn test_expected_free_energy_prefers_informative_actions() -> Result<(), AifError> {
+    fn test_efe_step_prefers_preference_aligned_arm() -> Result<(), AifError> {
+        // With the deterministic B matrices `POMDPAgent::new` constructs, each arm predicts a
+        // delta next-state, so the epistemic (information-gain) term is structurally zero and
+        // cannot break the tie. The ordering is therefore driven purely by pragmatic value:
+        // arm 0 aligns the [0.9, 0.1] observation model with the [0.9, 0.1] preference, so it
+        // has the higher neg-G. (The old name implied a live information-gain effect that this
+        // deterministic-B agent cannot exhibit.)
         let agent = POMDPAgent::new(
             2,
             Some(vec![0.9, 0.1]),

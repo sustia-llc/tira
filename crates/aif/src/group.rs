@@ -6,6 +6,14 @@ use rand::SeedableRng;
 use rand_distr::weighted::WeightedIndex;
 use rand_distr::Distribution;
 
+/// Sample a uniform index in `0..n`. `n` must be > 0 — guaranteed by the
+/// `VotingAgent` constructor assert (n_actions > 0) and by non-empty winner sets.
+fn uniform_index(rng: &mut StdRng, n: usize) -> usize {
+    rand_distr::Uniform::new(0, n)
+        .expect("invariant: n > 0 (constructor-asserted n_actions / non-empty winners)")
+        .sample(rng)
+}
+
 /// How the active agent aggregates internal agent outputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VotingMode {
@@ -27,8 +35,11 @@ pub struct VotingAgent {
 }
 
 impl VotingAgent {
+    /// # Panics
+    /// Panics if `n_actions` is zero.
     #[must_use]
     pub fn new(n_actions: usize, mode: VotingMode) -> Self {
+        assert!(n_actions > 0, "VotingAgent requires n_actions > 0");
         Self {
             mode,
             n_actions,
@@ -40,8 +51,12 @@ impl VotingAgent {
     ///
     /// Unlike [`VotingAgent::new`], which seeds from entropy, this constructor
     /// makes the voter's tie-breaking and sampling reproducible across runs.
+    ///
+    /// # Panics
+    /// Panics if `n_actions` is zero.
     #[must_use]
     pub fn with_seed(n_actions: usize, mode: VotingMode, seed: u64) -> Self {
+        assert!(n_actions > 0, "VotingAgent requires n_actions > 0");
         Self {
             mode,
             n_actions,
@@ -78,9 +93,7 @@ impl VotingAgent {
                 if winners.len() == 1 {
                     Ok(winners[0])
                 } else {
-                    let idx = rand_distr::Uniform::new(0, winners.len())
-                        .unwrap()
-                        .sample(&mut self.rng);
+                    let idx = uniform_index(&mut self.rng, winners.len());
                     Ok(winners[idx])
                 }
             }
@@ -88,10 +101,7 @@ impl VotingAgent {
             // `aggregate_weighted`), but direct callers may pass any mode.
             VotingMode::Probabilistic | VotingMode::CertaintyWeighted => {
                 if counts.iter().all(|&c| c == 0) {
-                    let idx = rand_distr::Uniform::new(0, self.n_actions)
-                        .unwrap()
-                        .sample(&mut self.rng);
-                    return Ok(idx);
+                    return Ok(uniform_index(&mut self.rng, self.n_actions));
                 }
                 let dist = WeightedIndex::new(&counts)?;
                 Ok(dist.sample(&mut self.rng))
@@ -147,7 +157,11 @@ impl VotingAgent {
                 *p /= total_weight;
             }
         } else {
-            // All agents maximally uncertain — fall back to uniform
+            // Reachable for empty `distributions` OR when any distribution contains NaN.
+            // For non-empty FINITE input each weight w_i = exp(-H(P_i)) >= exp(-ln n) = 1/n > 0,
+            // so total_weight >= 1/n > 0. Empty input leaves total_weight == 0; and a NaN entry
+            // poisons its entropy (NaN weight → NaN total_weight, and `NaN > 1e-15` is false).
+            // Either way, fall back to a uniform action distribution.
             for p in &mut mixture {
                 *p = 1.0 / self.n_actions as f64;
             }
@@ -168,9 +182,7 @@ impl VotingAgent {
                 if winners.len() == 1 {
                     Ok(winners[0])
                 } else {
-                    let idx = rand_distr::Uniform::new(0, winners.len())
-                        .unwrap()
-                        .sample(&mut self.rng);
+                    let idx = uniform_index(&mut self.rng, winners.len());
                     Ok(winners[idx])
                 }
             }
@@ -200,6 +212,8 @@ pub struct GroupAgent {
 }
 
 impl GroupAgent {
+    /// # Panics
+    /// Panics if `n_actions` is zero (delegated to the internal [`VotingAgent`]).
     #[must_use]
     pub fn new(internal_agents: Vec<POMDPAgent>, n_actions: usize, mode: VotingMode) -> Self {
         Self {
@@ -213,10 +227,21 @@ impl GroupAgent {
 
     /// Construct a [`GroupAgent`] with deterministically seeded RNGs.
     ///
-    /// Both the active [`VotingAgent`] and the group-level RNG (used in the
-    /// `CertaintyWeighted` branch of [`GroupAgent::act`]) are seeded so the whole
-    /// group path is reproducible. The two RNGs use distinct seeds — the group RNG
-    /// is offset by a fixed constant — so their streams do not correlate.
+    /// This seeds the active [`VotingAgent`] and the group-level RNG (used in the
+    /// `CertaintyWeighted` branch of [`GroupAgent::act`]). The two RNGs use distinct
+    /// seeds — the group RNG is offset by a fixed constant — so their streams do not
+    /// correlate.
+    ///
+    /// Reproducibility of the *whole* pipeline holds only in `CertaintyWeighted` mode,
+    /// where the internal agents contribute deterministic
+    /// [`POMDPAgent::action_probabilities`] (no sampling) and every stochastic draw is
+    /// made by the two RNGs seeded here. In `Probabilistic` / `Deterministic` modes each
+    /// internal [`POMDPAgent`] samples its own action with an entropy-seeded RNG that
+    /// these constructors do **not** seed, so those modes remain stochastic through the
+    /// internal agents even with a fixed `seed`.
+    ///
+    /// # Panics
+    /// Panics if `n_actions` is zero (delegated to the internal [`VotingAgent`]).
     #[must_use]
     pub fn new_with_seed(
         internal_agents: Vec<POMDPAgent>,
@@ -368,9 +393,11 @@ impl GroupAgentBuilder {
     /// Seed the group's RNGs for reproducible runs.
     ///
     /// When set, every `build_*` method constructs the [`GroupAgent`] via
-    /// [`GroupAgent::new_with_seed`], making the group path (including the
-    /// `CertaintyWeighted` branch) deterministic. When unset (the default), RNGs
-    /// are seeded from entropy.
+    /// [`GroupAgent::new_with_seed`], seeding the active [`VotingAgent`] and the
+    /// group-level RNG. When unset (the default), those RNGs are seeded from entropy.
+    ///
+    /// See [`GroupAgent::new_with_seed`] for the per-mode determinism contract
+    /// (full-pipeline determinism holds only in `CertaintyWeighted` mode).
     #[must_use]
     pub fn seed(mut self, seed: u64) -> Self {
         self.seed = Some(seed);
@@ -457,6 +484,12 @@ impl GroupAgentBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "n_actions > 0")]
+    fn test_voting_agent_zero_actions_panics() {
+        let _ = VotingAgent::new(0, VotingMode::Probabilistic);
+    }
 
     #[test]
     fn test_voting_agent_probabilistic() -> Result<(), AifError> {

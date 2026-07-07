@@ -9,9 +9,11 @@ mod group;
 
 pub use agent::{Agent, CopyAgent, POMDPAgent};
 pub use coalition::{
-    AgentId, CapabilityProvider, CoalitionEvaluator, CoalitionHistory, CompatibilityBeliefs,
-    ObsPrecisionParams, TrustBeliefs, belief_weighted_preference, competence_efe,
+    AgentId, CapabilityProvider, CoalitionHistory, CompatibilityBeliefs, ObsPrecisionParams,
+    TrustBeliefs, belief_weighted_preference, competence_efe,
 };
+#[allow(deprecated)] // CoalitionEvaluator is deprecated but still re-exported for callers.
+pub use coalition::CoalitionEvaluator;
 pub use communication::{
     AgentMessage, CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel, Message,
     MessageContent,
