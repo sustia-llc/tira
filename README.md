@@ -82,7 +82,7 @@ Environment (BanditEnvironment)
 |--------|------|
 | `crates/aif/src/agent.rs` | POMDP active inference agent (A-E matrices, expected free energy G, α/γ precision, `expected_free_energy()`) |
 | `crates/aif/src/group.rs` | VotingMode, GroupAgent, VotingAgent (discrete + certainty-weighted), GroupAgentBuilder |
-| `crates/aif/src/coalition.rs` | `competence_efe` + `ObsPrecisionParams` (the coalition-value primitive), `CapabilityProvider`, `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory`, deprecated `CoalitionEvaluator` |
+| `crates/aif/src/coalition.rs` | `competence_efe` + `ObsPrecisionParams` (the coalition-value primitive, opt-in `transition_noise` since 0.6.0), `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory`, `belief_weighted_preference` |
 | `crates/aif/src/communication.rs` | Flume-based inter-agent messaging (for extended scenarios) |
 | `crates/reproduce/src/simulation.rs` | Simulation runner, parameter recovery (grid search + half-normal prior), 5 experiment factories |
 | `crates/reproduce/src/plotter.rs` | Plotters-based scatter helpers (pending consolidation with the binary's figure code) |
@@ -160,11 +160,11 @@ let g = competence_efe(0.8, ObsPrecisionParams::default())?; // lower G = higher
 `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory` structs, connecting beliefs to
 the decision surface.
 
-> **Deprecated:** the earlier `CoalitionEvaluator` (`decide_join` = join iff coalition `G <`
-> individual `G`) is the per-agent, *preference-based* variant — its observation model is
-> membership-blind, so a preference shift moves `G` only under a low-discriminability model
-> (near-degenerate in practice), and downstream consumers bypass it. Prefer `competence_efe`;
-> removal tracked in [issue #1](https://github.com/sustia-llc/tira/issues/1).
+> **Removed in 0.6.0:** the earlier `CoalitionEvaluator` (`decide_join` = join iff coalition
+> `G <` individual `G`) was the per-agent, *preference-based* variant — its observation model
+> was membership-blind, so a preference shift moved `G` only under a low-discriminability
+> model (near-degenerate in practice), and downstream consumers bypassed it. Use
+> `competence_efe` ([issue #1](https://github.com/sustia-llc/tira/issues/1)).
 
 ## Dependencies
 

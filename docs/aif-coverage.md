@@ -21,7 +21,7 @@ Legend: ✅ implemented · ⚠️ partial / deviates (documented) · ❌ not imp
 | POMDP generative model, matrices A–E (Fig 1) | ✅ | `agent.rs` `POMDPAgent::new` — A: `(2 × n_states)`, columns `[p, 1−p]`; B: one deterministic `(n × n)` per action; C: `ln`-transformed 2-element preference prior; D: state prior (uniform or caller override); E: uniform policy prior |
 | Variational free energy F, Eq. (1) | ⚠️ | Not surfaced as a quantity. Perception is a one-step exact Bayes update (`infer_states`: `B·belief` prior × A-likelihood, normalized) — exact for this model class, so no gradient descent on F is needed; F itself is not computed (see extension 11) |
 | Expected free energy G, Eq. (2) = info gain + pragmatic value | ✅ | `agent.rs::efe_step` — pragmatic value `E_q(o|π)[ln p(o|C)]`; epistemic term as exact mutual information `H[q(o|π)] − E_q(s′)[H(o|s′)]` |
-| Epistemic term reachability | ⚠️ | Computed exactly, but **structurally zero for every constructible agent**: `POMDPAgent::new` hardcodes deterministic B transitions, so the predicted state is always a delta and the MI vanishes. Paper-faithful for the MAB (its agents are also purely pragmatically driven — §2.1 "action selection is driven only by the pragmatic value"); becomes live only once B is injectable |
+| Epistemic term reachability | ✅ | Computed exactly; **live since 0.6.0** for any stochastic B supplied via `GenerativeModel`/`from_model`. Remains zero for `new()`/`with_params()` MAB constructions (deterministic B) — paper-faithful (§2.1 "action selection is driven only by the pragmatic value") |
 | Policy machinery: enumerate → γ-softmax posterior × E → marginalize → α-softmax | ✅ | `enumerate_policies` / `policy_posterior` / `infer_policies`; softmax over neg-G with `γ`, then action-marginal power-softmax with `α` |
 | α vs γ kept separate (γ = 16 default) | ✅ | `gamma` (policy precision, default 16.0) and `alpha` (action precision) are distinct fields applied at distinct stages — many implementations conflate them |
 | Policy length 2 | ⚠️ | Engine supports arbitrary `policy_depth` via `with_params`, but all experiment construction sites use `new()` → **depth 1**. Provably equivalent here: deterministic B makes step-2 value independent of step-1 action, so the action marginal is unchanged. Recovery replays with the same depth-1 model, so generation and inference are consistent. Documented deviation |
@@ -111,16 +111,16 @@ Inference* (MIT Press; ref [1]), `pymdp` (Heins et al. 2022, JOSS), and `ActiveI
 
 | Capability (per Smith 2022 / pymdp) | Status | Notes |
 |---|---|---|
-| Generative matrices A, B, C, D, E | ✅ | `agent.rs::POMDPAgent::new` |
-| Multiple hidden-state **factors** | ❌ | single factor |
-| Multiple observation **modalities** | ❌ | single modality, `n_obs = 2` hard-coded; A columns `[p, 1−p]`; `n_actions = n_states` (MAB coupling); B not injectable. The engine's only expressible POMDP today is the paper's bandit family |
-| State inference (perception) | ⚠️ | one-step exact Bayes (`infer_states`); not fixed-point / marginal message passing over trajectories (Smith Eq. 16, 23–26) — exact for deterministic B, not general |
+| Generative matrices A, B, C, D, E | ✅ | `agent.rs::POMDPAgent::from_model` (general) / `new` (MAB convenience) |
+| Multiple hidden-state **factors** | ✅ | 0.6.0 (#12): `GenerativeModel` per-factor B/D, mean-field inference across factors, little-endian joint flattening (factor 0 fastest) |
+| Multiple observation **modalities** | ✅ | 0.6.0 (#12): per-modality A/C, `act_multi`/`action_probabilities_multi`; `n_actions` decoupled from `n_states` (= Π per-factor control counts); B injectable (validated column-stochastic). `new()`/`with_params()` remain the paper's 1-factor/1-modality bandit family, numerics bit-identical |
+| State inference (perception) | ⚠️ | within-timestep exact Bayes (single factor) / mean-field fixed-point across factors (`inference_iters` sweeps); not marginal message passing over **trajectories** (Smith Eq. 16, 23–26) — no retrospective revision, see #15 |
 | Retrospective inference (smoothing) | ❌ | filtering only — later observations never revise earlier-τ beliefs; requires trajectory-wide message passing (part of #15) |
 | Policy inference: γ-softmax posterior → marginalize → α-softmax | ✅ | `policy_posterior` / `infer_policies`, α/γ separate (Smith Eq. 22, 28) |
 | Bayesian model average over policies (X = Σ_π π·q(s\|π)) | ❌ | no policy-averaged state posterior surfaced (Smith MDP.X); per-policy beliefs are internal to `efe_step` |
 | Occam-window policy pruning | ❌ | all enumerated policies scored every step (Smith `mdp.zeta`); irrelevant at MAB scale, needed for deep-policy spaces |
 | EFE — pragmatic value | ✅ | `efe_step` |
-| EFE — state info gain (salience) | ⚠️ | exact MI formula implemented; structurally zero under the hardcoded deterministic B (see Axis 1 §2.1) |
+| EFE — state info gain (salience) | ✅ | exact MI, summed per modality; live for stochastic injectable B since 0.6.0 (zero for deterministic-B constructions — see Axis 1 §2.1) |
 | EFE — novelty / parameter info gain | ❌ | relevant once model learning is active (Smith Eq. 38–40 — the W matrix is built from Dirichlet concentrations, so novelty presupposes pA/pB) |
 | Action selection | ✅ | `act` samples the α-softmaxed marginal |
 | Policy precision (γ/β) dynamics | ❌ | γ fixed; the Smith Table 2 loop `π ← σ(ln E − F − γG)`, `β ← β − (β − β₀ + G_error)/ψ` consumes per-policy **F** — blocked on the F accessor |
@@ -134,18 +134,20 @@ Inference* (MIT Press; ref [1]), `pymdp` (Heins et al. 2022, JOSS), and `ActiveI
 
 ### Verdict
 
-`aif` is a **correct, minimal, MAB-shaped discrete-AIF core** — the slice the paper needs, verified
-against the paper's own conventions (α/γ separation, B×belief direction, EFE sign chain, replay
-consistency) — **plus** multi-scale group composition and a coalition value layer that the reference
-implementations do not have. It is *not* a general-purpose AIF backend. The gap is one coherent
-axis: **factorization (multi-factor states, multi-modality observations, injectable B) + full
-learning (B/D/E, novelty term) + precision dynamics + general message-passing inference.**
+`aif` is a **correct discrete-AIF core with a general generative model** (since 0.6.0: multi-factor
+states, multi-modality observations, injectable B, decoupled actions) — verified against the paper's
+own conventions (α/γ separation, B×belief direction, EFE sign chain, replay consistency, MAB
+numerics bit-identical through the generalization) — **plus** multi-scale group composition and a
+coalition value layer that the reference implementations do not have. The remaining gap to "full
+backend": **full learning (B/D/E, novelty term) + precision dynamics + trajectory message-passing
+inference + surfaced F** (#13–#16).
 
 ### Roadmap to "full backend" (priority order)
 
-1. **Generalize the generative model** — injectable B, multi-factor states, multi-modality
-   observations, decouple `n_actions` from `n_states`. Unblocks most real domains and makes the
-   epistemic term live. ([#12](https://github.com/sustia-llc/tira/issues/12))
+1. ~~**Generalize the generative model** — injectable B, multi-factor states, multi-modality
+   observations, decouple `n_actions` from `n_states`.~~ ✅ **Shipped in 0.6.0**
+   (`GenerativeModel`/`from_model`; epistemic term live for stochastic B).
+   ([#12](https://github.com/sustia-llc/tira/issues/12))
 2. **Full learning** — pB/pD/pE alongside pA (Smith Eq. 32–36, with η/ω); wire learning into the
    group path; add the novelty EFE term (Smith Eq. 38–40) so learning is drivable.
    ([#13](https://github.com/sustia-llc/tira/issues/13),
@@ -186,14 +188,16 @@ downstream multi-agent runtimes:
 - **Belief structures** — `TrustBeliefs` (EMA-updated per-agent trust), `CompatibilityBeliefs`
   (symmetric pairwise), `CoalitionHistory` (membership-keyed performance), combined by
   `belief_weighted_preference()` into the 2-element preference prior.
-- **`CoalitionEvaluator`** (deprecated → issue #1) — the earlier per-agent join/leave primitive
-  (`decide_join`: join iff coalition G < individual G). Its observation model is membership-blind:
-  membership can only shift *preferences*, and under a discriminative observation model an agent
-  routes around preference conflicts by choosing a different arm. Additionally, preference
-  **sharpness** (not direction) does move G, so providers that sharpen preferences inside
-  coalitions inflate join decisions. `competence_efe` avoids both problems by making membership
-  vary the observation model. Prefer it.
+- **`CoalitionEvaluator`** — **removed in 0.6.0** (issue #1). The earlier per-agent join/leave
+  primitive's observation model was membership-blind: membership could only shift *preferences*,
+  which a discriminative observation model routes around, while preference **sharpness** inflated
+  join decisions. `competence_efe` avoids both problems by making membership vary the observation
+  model. Prefer it.
 
-Note for consumers: with the current deterministic-B engine, `G` from `competence_efe` is purely
-pragmatic (the epistemic term is structurally zero) — an exploration bonus is **not** part of the
-score today (see Axis 2 roadmap item 1).
+Note for consumers: at the default `transition_noise = 0.0`, `G` from `competence_efe` is purely
+pragmatic (deterministic B ⇒ zero info gain) and byte-identical to pre-0.6.0. Setting
+`transition_noise ∈ (0, 0.5)` makes the info-gain term live, but net `G` **rises** with noise over
+most of the competence range (the pragmatic term blurs faster than info gain credits) — competence
+monotonicity is preserved, so within-arm *ranking* is stable. Default anchors:
+`G(0) = 1.204, G(0.5) = 0.710, G(1) = 0.215` (the `0.511/0.121/0.017` figures in older koalisi
+notes are stale v0.4.0-era measurements).
