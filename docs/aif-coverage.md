@@ -84,7 +84,7 @@ CLAUDE.md §"Possible extensions"); the paper lists these in prose in §4.
 | 8 | Greater-than-two-scale nesting (groups of groups) | ❌ — `GroupAgent: Agent` makes this structurally plausible, but internal storage is concrete `Vec<POMDPAgent>`, not trait objects |
 | 9 | Dynamically emerging Markov blankets | ❌ |
 | 10 | Evolutionary selection (group vs individual pressure) | ❌ |
-| 11 | Free energy extensivity (sum of individual F vs group F) | ❌ — requires surfacing F (Eq. 1); `expected_free_energy()` surfaces G, not F |
+| 11 | Free energy extensivity (sum of individual F vs group F) | ❌ study not run — but **unblocked since 0.7.0**: `variational_free_energy()` surfaces F (#16); remaining work is the reproduce-side comparison (Σ individual F vs group-agent F) |
 | 12 | Continuous state-space models | ❌ planned |
 
 The paper's §4 additionally floats renormalization-group detection of Markov blankets at slower

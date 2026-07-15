@@ -185,9 +185,11 @@ The paper notes that variational free energy is extensive (group FE = sum of ind
 and asks whether this holds under a group-level generative model. Numerically testable:
 compute FE for each internal agent and for the group agent, compare sum vs group.
 
-**Where**: Add `POMDPAgent::variational_free_energy()` that returns F given current beliefs.
-Sum across internal agents in `GroupAgent`, compare with the group-level agent's F under
-the recovered generative model.
+**Where**: `POMDPAgent::variational_free_energy()` exists since 0.7.0 (#16) — the
+engine-side prerequisite is done. Remaining work is the study itself: sum F across
+internal agents in `GroupAgent`, compare with the group-level agent's F under the
+recovered generative model (reproduce-side experiment; the group path runs MeanField,
+where F is the exact one-step negative log evidence).
 
 ### 12. Continuous state-space models
 Move beyond discrete POMDP to continuous generalized coordinates. Would enable modeling
