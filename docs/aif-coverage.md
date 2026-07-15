@@ -4,7 +4,8 @@
 "As One and Many" (Entropy 2025, 27, 143; DOI [10.3390/e27020143](https://doi.org/10.3390/e27020143))
 — section by section, equation by equation, experiment by experiment? **Axis 2**: how much of the
 canonical discrete active-inference (POMDP) specification does the `aif` engine cover — i.e. "is
-`aif` a full AIF backend?" A paper summary lives in [abstract.md](abstract.md); the full PDF is
+`aif` a full AIF backend?" A paper summary lives in [abstract.md](abstract.md); the full text is
+[entropy-27-00143.md](entropy-27-00143.md) (markdown, for equation-level anchoring) /
 [entropy-27-00143.pdf](entropy-27-00143.pdf).*
 
 Legend: ✅ implemented · ⚠️ partial / deviates (documented) · ❌ not implemented · ➕ beyond the source.
@@ -101,7 +102,9 @@ certainty-weighted voting evaluation (extension 5), seeded/reproducible CW group
 
 `aif` reimplements the paper's MAB-POMDP slice. Scored against the canonical spec — Smith,
 Friston & Whyte (2022) *J. Math. Psychol.* [10.1016/j.jmp.2021.102632](https://doi.org/10.1016/j.jmp.2021.102632)
-(the equation-by-equation checklist; paper ref [61]), Parr, Pezzulo & Friston (2022) *Active
+(the equation-by-equation checklist; paper ref [61]; full text:
+[1-s2.0-S0022249621000973-main.md](1-s2.0-S0022249621000973-main.md) — "Smith Eq. N" below
+refers to its equation numbering), Parr, Pezzulo & Friston (2022) *Active
 Inference* (MIT Press; ref [1]), `pymdp` (Heins et al. 2022, JOSS), and `ActiveInference.jl`
 (Nehrer et al.; ref [57], the library the paper uses):
 
@@ -110,18 +113,23 @@ Inference* (MIT Press; ref [1]), `pymdp` (Heins et al. 2022, JOSS), and `ActiveI
 | Generative matrices A, B, C, D, E | ✅ | `agent.rs::POMDPAgent::new` |
 | Multiple hidden-state **factors** | ❌ | single factor |
 | Multiple observation **modalities** | ❌ | single modality, `n_obs = 2` hard-coded; A columns `[p, 1−p]`; `n_actions = n_states` (MAB coupling); B not injectable. The engine's only expressible POMDP today is the paper's bandit family |
-| State inference (perception) | ⚠️ | one-step exact Bayes (`infer_states`); not fixed-point / marginal message passing over trajectories — exact for deterministic B, not general |
-| Policy inference: γ-softmax posterior → marginalize → α-softmax | ✅ | `policy_posterior` / `infer_policies`, α/γ separate |
+| State inference (perception) | ⚠️ | one-step exact Bayes (`infer_states`); not fixed-point / marginal message passing over trajectories (Smith Eq. 16, 23–26) — exact for deterministic B, not general |
+| Retrospective inference (smoothing) | ❌ | filtering only — later observations never revise earlier-τ beliefs; requires trajectory-wide message passing (part of #15) |
+| Policy inference: γ-softmax posterior → marginalize → α-softmax | ✅ | `policy_posterior` / `infer_policies`, α/γ separate (Smith Eq. 22, 28) |
+| Bayesian model average over policies (X = Σ_π π·q(s\|π)) | ❌ | no policy-averaged state posterior surfaced (Smith MDP.X); per-policy beliefs are internal to `efe_step` |
+| Occam-window policy pruning | ❌ | all enumerated policies scored every step (Smith `mdp.zeta`); irrelevant at MAB scale, needed for deep-policy spaces |
 | EFE — pragmatic value | ✅ | `efe_step` |
 | EFE — state info gain (salience) | ⚠️ | exact MI formula implemented; structurally zero under the hardcoded deterministic B (see Axis 1 §2.1) |
-| EFE — novelty / parameter info gain | ❌ | relevant once model learning is active |
+| EFE — novelty / parameter info gain | ❌ | relevant once model learning is active (Smith Eq. 38–40 — the W matrix is built from Dirichlet concentrations, so novelty presupposes pA/pB) |
 | Action selection | ✅ | `act` samples the α-softmaxed marginal |
-| Policy precision (γ/β) dynamics | ❌ | γ fixed |
+| Policy precision (γ/β) dynamics | ❌ | γ fixed; the Smith Table 2 loop `π ← σ(ln E − F − γG)`, `β ← β − (β − β₀ + G_error)/ψ` consumes per-policy **F** — blocked on the F accessor |
 | Learning A (Dirichlet pA, posterior write-back) | ⚠️ | `update_a` correct at agent level; group wiring incomplete (extension 3 row above) |
-| Learning B (pB), D (pD), E (pE) | ❌ | |
-| Temporal / policy depth | ✅ | configurable via `with_params` (experiments run depth 1 — see Axis 1) |
+| Learning rate η / forgetting ω | ❌ | `update_a` is Smith Eq. 36 with fixed η = 1, ω = 1 (`pa[o,s] += belief`, no decay, no rate) — not parameterized |
+| Learning B (pB), D (pD), E (pE) | ❌ | Smith Eq. 32–36 family (same ω/η rule per matrix) |
+| Temporal / policy depth | ✅ | configurable via `with_params` — full multi-step policy enumeration (Smith's deep-V planning), not single-step U (experiments run depth 1 — see Axis 1) |
 | Input validation | ✅ | `AifError::{InvalidProbability, InvalidDistribution, InvalidAction}` |
-| Variational free energy F accessor | ❌ | extension 11 |
+| Variational free energy F accessor | ❌ | extension 11; Smith Eq. 1/11 — per-policy F falls out of the message-passing fixed point (Eq. 19), plus total H across policies |
+| Free energy of parameters (Fa/Fb/Fd) | ❌ | per-trial KL of Dirichlet params, start vs end of trial (Smith MDP.Fa etc.) — distinct from the F-of-policies accessor |
 
 ### Verdict
 
@@ -137,14 +145,24 @@ learning (B/D/E, novelty term) + precision dynamics + general message-passing in
 1. **Generalize the generative model** — injectable B, multi-factor states, multi-modality
    observations, decouple `n_actions` from `n_states`. Unblocks most real domains and makes the
    epistemic term live. ([#12](https://github.com/sustia-llc/tira/issues/12))
-2. **Full learning** — pB/pD/pE alongside pA; wire learning into the group path; add the novelty
-   EFE term so learning is drivable. ([#13](https://github.com/sustia-llc/tira/issues/13),
+2. **Full learning** — pB/pD/pE alongside pA (Smith Eq. 32–36, with η/ω); wire learning into the
+   group path; add the novelty EFE term (Smith Eq. 38–40) so learning is drivable.
+   ([#13](https://github.com/sustia-llc/tira/issues/13),
    group wiring in [#4](https://github.com/sustia-llc/tira/issues/4))
-3. **Precision dynamics** (γ/β updates). ([#14](https://github.com/sustia-llc/tira/issues/14))
-4. **General state inference** (fixed-point / marginal message passing) for non-deterministic B.
-   ([#15](https://github.com/sustia-llc/tira/issues/15))
-5. **Surface F** (Eq. 1 accessor) — also unlocks the extension-11 extensivity study.
-   ([#16](https://github.com/sustia-llc/tira/issues/16))
+3. **Precision dynamics** (γ/β updates; Smith Table 2 loop).
+   ([#14](https://github.com/sustia-llc/tira/issues/14))
+4. **General state inference** (fixed-point / marginal message passing, Smith Eq. 23–26) for
+   non-deterministic B. ([#15](https://github.com/sustia-llc/tira/issues/15))
+5. **Surface F** (Eq. 1 accessor; Smith Eq. 1/11/19) — also unlocks the extension-11 extensivity
+   study. ([#16](https://github.com/sustia-llc/tira/issues/16))
+
+**Dependency order** (the list above is priority order; the Smith math implies this build order):
+**#12 → (#15 + #16 together) → #13 → #14.** Per-policy F is a *byproduct* of the
+message-passing fixed point (Smith Eq. 19), so #15 and #16 pair naturally; the γ/β loop (#14)
+consumes F (`π ← σ(ln E − F − γG)`), so it comes last and only matters with deep policies; the
+novelty term (#13) is built from Dirichlet concentrations and pB presupposes injectable B, so
+learning follows #12. #12 is foundational — it is what makes the ambiguity, salience, and
+novelty terms non-trivial at all.
 
 Both this parity roadmap (#12–#16) and engineering debt are tracked as
 [GitHub issues](https://github.com/sustia-llc/tira/issues); the numbered research extensions
