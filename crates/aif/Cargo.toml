@@ -1,6 +1,6 @@
 [package]
 name = "aif"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 description = "Active-inference engine: POMDP agents, Markov-blanket group composition, and coalition-value primitives (Waade et al., Entropy 2025)"
 license = "MIT OR Apache-2.0"

@@ -2,6 +2,48 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-15
+
+Generalized generative model (parity roadmap item 1, [#12](https://github.com/sustia-llc/tira/issues/12))
+plus coalition-surface cleanup ([#1](https://github.com/sustia-llc/tira/issues/1)).
+
+### ⚠️ Breaking
+- **`CoalitionEvaluator` and `CapabilityProvider` removed** (deprecated below, never
+  released un-deprecated). Coalition-value consumers use `competence_efe`; the belief
+  structures (`TrustBeliefs`/`CompatibilityBeliefs`/`CoalitionHistory`) and
+  `belief_weighted_preference` are unchanged.
+- **`ObsPrecisionParams` gains a `transition_noise` field** (default `0.0`). Struct-literal
+  constructions must add the field or use `..Default::default()`; with the default the
+  `competence_efe` output is unchanged.
+- `POMDPAgent` private field layout is fully factorized (per-factor/per-modality); code
+  poking private fields breaks. The public constructor surface (`new`, `with_params`) and
+  all public methods are source-compatible and numerically identical.
+
+### Added
+- **`GenerativeModel` + `AgentParams` + `POMDPAgent::from_model`** — multi-factor hidden
+  states, multi-modality observations, injectable per-factor-per-control B (validated
+  column-stochastic), `n_actions` decoupled from `n_states` (= Π per-factor control counts).
+  Joint-state/joint-control flattening is little-endian (factor 0 fastest) and documented.
+- **Mean-field state inference across factors** (expectation of log-likelihood, up to
+  `AgentParams::inference_iters` sweeps, 1e-8 early exit). The single-factor case
+  short-circuits to the exact one-pass closed form, keeping `new()`/`with_params()` MAB
+  numerics bit-identical (all 43 pre-0.6.0 aif unit tests pass with assertions unchanged).
+- **The exact-MI epistemic term is now reachable**: nonzero for any injectable stochastic
+  B (previously structurally zero for every constructible agent).
+- `act_multi` / `action_probabilities_multi` (per-modality observations) and accessors
+  `state_beliefs` / `n_actions` / `n_modalities` / `n_factors`.
+- **`ObsPrecisionParams::transition_noise`** — opt-in stochastic-B bridge POMDP in
+  `competence_efe` (mass `1−ε` to the selected state), making the info-gain term live in
+  the coalition value. Honest sign note: G **rises** with noise across most of the
+  competence range (pragmatic blurring dominates the info-gain credit) and competence
+  monotonicity is preserved (tested at ε = 0.1); treat it as a modeling choice, not a
+  score bonus.
+- `competence_efe` default-parameter regression anchors pinned in tests:
+  `G(0) = 1.204`, `G(0.5) = 0.710`, `G(1) = 0.215`. **Migration note for downstream docs:**
+  the `0.511 / 0.121 / 0.017` figures recorded in koalisi's Phase-6 notes are stale
+  v0.4.0-era measurements of its pre-bridge `efe_for_coverage`; the engine values above
+  are the current contract.
+
 ### Changed
 - **Docs redesign for publication (2026-07-06).** `docs/aif-coverage.md` recreated from the
   source paper: paper→code coverage matrix (§2.1–§4, all figures), the numbered extension
@@ -25,9 +67,9 @@
 - **`CoalitionEvaluator`** (+ `#[deprecated]` attribute): membership-blind observation model —
   membership only shifts preferences, which is direction-insensitive under discriminative
   observation models yet sharpness-sensitive (so sharpening providers over-join). Use
-  `competence_efe` ([#1](https://github.com/sustia-llc/tira/issues/1)); removal in a future
-  release — part of the cross-project coalition semantic-layer roadmap (koalisi A/B of the
-  AIF vs categorical-magnitude decision policies).
+  `competence_efe` ([#1](https://github.com/sustia-llc/tira/issues/1)). Removed in this
+  same release (see Breaking above) — part of the cross-project coalition semantic-layer
+  roadmap (koalisi A/B of the AIF vs categorical-magnitude decision policies).
 
 ### Meta
 - Adopted GitHub issue tracking (aligned with the sibling projects); open work migrated from
