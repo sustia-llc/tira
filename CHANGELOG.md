@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-15
+
+Trajectory state inference + surfaced variational free energy (parity roadmap items 4–5,
+[#15](https://github.com/sustia-llc/tira/issues/15) /
+[#16](https://github.com/sustia-llc/tira/issues/16)).
+
+### Added
+- **`StateInference` enum on `AgentParams`** — `MeanField` (default; the existing
+  within-timestep path, numerics bit-identical) or
+  `MarginalMessagePassing { horizon, iters }` (opt-in): per-policy trajectory beliefs
+  over an observation window, Smith Eq. 23 fixed point (½-weighted forward/backward
+  messages, `B†` column-normalized transpose, D at τ = 1), with retrospective revision
+  of past beliefs. `MMP + learn_a` is rejected at construction (learning under MMP is
+  #13 scope).
+- **Variational free energy surfaced**: `variational_free_energy()` (MeanField: exact
+  one-step `−ln p(o_t)` under the pre-update predictive prior; MMP: policy-weighted
+  window F), `policy_free_energies()`, `bma_state_belief()` (Smith MDP.X),
+  `reset_window()`. Unlocks the extension-11 extensivity study.
+- `AgentParams`, `GenerativeModel`, `StateInference` re-exported from the crate root
+  (previously unreachable outside the crate).
+
+### Honest math note (enforced by test)
+The Eq. 23 fixed point is **not** the exact forward–backward smoother — the exact
+posterior is not a fixed point of the update (marginal message passing is a variational
+gradient scheme; the paper's own §Eq. 419–420 framing agrees). Tests pin the exact
+reference (brute-force enumeration), the MMP regression value, the deviation itself, and
+the true smoothing property (the window revises filtered beliefs strictly toward the
+exact posterior).
+
+### Migration (downstream)
+- `AgentParams` gained `state_inference` — struct literals need the field or
+  `..Default::default()` (the default preserves existing behavior exactly).
+
 ## [0.6.0] - 2026-07-15
 
 Generalized generative model (parity roadmap item 1, [#12](https://github.com/sustia-llc/tira/issues/12))
