@@ -1,172 +1,39 @@
-//! Coalition-formation application layer built on the correct POMDP engine.
+//! Coalition-value application layer built on the correct POMDP engine.
 //!
 //! This module re-expresses the *ideas* of the retired `coalition_aif` project on
 //! `aif`'s code-reviewed active-inference engine (see the project changelog for the
 //! retirement rationale). The two salvaged ideas are:
 //!
-//! 1. **Decision primitive:** an agent should join a coalition iff being in it *lowers*
-//!    its expected free energy G versus acting alone (`coalition_efe < individual_efe`).
+//! 1. **Coalition-value primitive:** score a whole coalition by a scalar **competence**
+//!    `c ∈ [0, 1]` (capability coverage, trust aggregate, …) mapped to expected free
+//!    energy `G` through the *observation model* — see [`competence_efe`]. Because the
+//!    observation model (not just preferences) depends on `c`, the value is non-degenerate
+//!    as membership changes. This is the reusable bridge for downstream value calculators
+//!    (koalisi and others), replacing the need to hand-roll a POMDP per crate.
 //! 2. **Belief structures:** agents hold beliefs about trust, pairwise compatibility,
 //!    and past coalition performance. These are re-expressed here *normalized* and
-//!    deterministic, and are SUPPORTING data — a domain may consult them when computing
-//!    an agent's [`CapabilityProvider::preferences`]. The core primitive is the EFE
-//!    comparison, not the beliefs.
-//!
-//! For **coalition-value** use cases (scoring a whole coalition by a scalar competence /
-//! capability coverage, rather than per-agent preference comparisons), use the
-//! [`competence_efe`] primitive: it maps a competence `c ∈ [0, 1]` to `G` via the
-//! *observation model*, so the value is non-degenerate as membership changes. This is the
-//! reusable bridge for downstream value calculators (koalisi and others), replacing the
-//! need to hand-roll a POMDP per crate.
+//!    deterministic, and are SUPPORTING data — a domain may consult them (via
+//!    [`belief_weighted_preference`]) when reducing its world to the scalar competence
+//!    that [`competence_efe`] consumes.
 //!
 //! The module is topology-agnostic: it knows nothing about hypergraphs and adds no new
-//! dependencies. The domain (e.g. koalisi) plugs in via the [`CapabilityProvider`] trait,
-//! supplying each agent's generative-model inputs as plain `f64` data.
+//! dependencies. The domain (e.g. koalisi) bridges its world into the `f64` competence
+//! scalar and the plain-`f64` belief structures below.
 
+use crate::agent::{AgentParams, GenerativeModel};
 use crate::{AifError, POMDPAgent};
+use nalgebra::DMatrix;
 use std::collections::HashMap;
 
 /// Identifier for an agent within a coalition computation.
 pub type AgentId = usize;
 
-/// Domain-supplied source of each agent's generative-model inputs.
-///
-/// This is the plug-in boundary: a domain implements it to project its own world
-/// (capabilities, trust, topology) into the `f64` probability data the AIF engine
-/// consumes. Keeping it minimal and `f64`-based lets downstream crates (koalisi) bridge
-/// their representations without coupling `aif` to any particular domain model.
-pub trait CapabilityProvider {
-    /// Number of bandit arms / options available (the POMDP state dimension).
-    fn n_states(&self) -> usize;
-
-    /// Observation probabilities for `agent`; length must equal [`Self::n_states`].
-    ///
-    /// Each entry `p_j` becomes column `j` of the observation model `A` as `[p_j, 1-p_j]`.
-    fn observation_probs(&self, agent: AgentId) -> Vec<f64>;
-
-    /// Preferences `[p(obs1), p(obs2)]` for `agent`, possibly modulated by coalition
-    /// membership.
-    ///
-    /// `members` is **empty** when the agent acts alone; otherwise it lists the coalition's
-    /// members. A domain models synergy or conflict by shifting these preferences based on
-    /// `members`. Length must be 2 (binary outcomes), matching the paper's model.
-    fn preferences(&self, agent: AgentId, members: &[AgentId]) -> Vec<f64>;
-
-    /// Action-precision parameter α for `agent`'s POMDP agent.
-    fn alpha(&self, agent: AgentId) -> f64;
-}
-
-/// Per-agent, **preference-based** coalition evaluator: builds one [`POMDPAgent`] per agent
-/// from a [`CapabilityProvider`] and compares its expected free energy `G` alone vs. in a
-/// coalition.
-///
-/// All EFE computation is delegated to the engine ([`POMDPAgent::expected_free_energy`]);
-/// this type only constructs agents from provider data and compares the resulting G values.
-/// It holds a borrow of the provider and is cheap to create per query.
-///
-/// # Scope / limitation
-/// Coalition membership reaches the model **only through [`CapabilityProvider::preferences`]**
-/// — [`CapabilityProvider::observation_probs`] does not take `members`, so the *observation
-/// model* is fixed across coalitions. This makes `G`'s response to a membership-driven
-/// preference change subtle, and the two halves must be stated separately:
-///
-/// - **Preference *direction* at constant sharpness does not move `G`** under a discriminative
-///   observation model. `expected_free_energy` is policy-posterior weighted, so if membership
-///   merely rotates the preference toward a *different* arm without sharpening it, the agent
-///   re-routes to that arm and `G` barely changes (it can collapse to `G ≈ 0` for every
-///   coalition regardless of which outcome is "preferred").
-/// - **Preference *sharpness* does move `G`.** A neutral `[0.5, 0.5]` → sharp `[0.9, 0.1]`
-///   shift lowers `G` by concentrating preference mass, and it lowers `G` **by the same
-///   amount for a synergy coalition and a conflict coalition** — the direction of the sharp
-///   preference is irrelevant once the agent can re-route. So a provider that *sharpens*
-///   preferences inside coalitions will make [`Self::decide_join`] return `true` even for a
-///   conflict coalition, because sharpening alone lowers `G` below the neutral-alone baseline.
-///
-/// **For coalition-*value* use cases where membership should change *achievable outcomes*
-/// (capability/competence coverage), prefer the [`competence_efe`] primitive**, which makes
-/// the *observation model* vary with a scalar competence instead of leaning on preference
-/// shifts. This type is best suited to genuinely preference-driven, per-agent comparisons.
-#[deprecated(
-    note = "membership-blind observation model; use competence_efe (see https://github.com/sustia-llc/tira/issues/1)"
-)]
-pub struct CoalitionEvaluator<'a, P: CapabilityProvider> {
-    provider: &'a P,
-}
-
-#[allow(deprecated)]
-impl<'a, P: CapabilityProvider> CoalitionEvaluator<'a, P> {
-    /// Create an evaluator borrowing `provider` for the duration of its queries.
-    #[must_use]
-    pub fn new(provider: &'a P) -> Self {
-        Self { provider }
-    }
-
-    /// Construct a POMDP agent for `agent` under the given `members` and return its
-    /// expected free energy G.
-    fn efe(&self, agent: AgentId, members: &[AgentId]) -> Result<f64, AifError> {
-        let n_states = self.provider.n_states();
-        let agent = POMDPAgent::new(
-            n_states,
-            Some(self.provider.observation_probs(agent)),
-            None,
-            self.provider.preferences(agent, members),
-            None,
-            self.provider.alpha(agent),
-            false,
-        )?;
-        Ok(agent.expected_free_energy())
-    }
-
-    /// Expected free energy G of `agent` acting alone (`members = &[]`).
-    ///
-    /// LOWER G is better (the engine minimizes G).
-    ///
-    /// # Errors
-    /// Returns [`AifError`] if the provider's data is invalid for
-    /// [`POMDPAgent::new`] (e.g. wrong-length observation or preference vectors).
-    pub fn individual_efe(&self, agent: AgentId) -> Result<f64, AifError> {
-        self.efe(agent, &[])
-    }
-
-    /// Expected free energy G of `agent` as a member of the coalition `members`.
-    ///
-    /// LOWER G is better. Synergy (membership aligning preferences with the observation
-    /// model) lowers G; conflict raises it.
-    ///
-    /// # Errors
-    /// Returns [`AifError`] if the provider's data is invalid for [`POMDPAgent::new`].
-    pub fn coalition_efe(
-        &self,
-        agent: AgentId,
-        members: &[AgentId],
-    ) -> Result<f64, AifError> {
-        self.efe(agent, members)
-    }
-
-    /// Decide whether `agent` should join the coalition `members`.
-    ///
-    /// Returns `true` iff being in the coalition *lowers* expected free energy, i.e.
-    /// `coalition_efe(agent, members) < individual_efe(agent)`. Because LOWER G is
-    /// better, a strict decrease means joining is preferred.
-    ///
-    /// # Errors
-    /// Returns [`AifError`] if either EFE evaluation fails (invalid provider data).
-    pub fn decide_join(
-        &self,
-        agent: AgentId,
-        members: &[AgentId],
-    ) -> Result<bool, AifError> {
-        let coalition = self.coalition_efe(agent, members)?;
-        let individual = self.individual_efe(agent)?;
-        Ok(coalition < individual)
-    }
-}
-
 /// Tunables for the [`competence_efe`] coalition-value primitive.
 ///
 /// `max_precision` is the observation-model precision at full competence (`1.0`), in
 /// `(0.5, 1.0)`; `success_preference` is the preference mass on the "success" observation,
-/// in `(0.5, 1.0)`; `alpha` is the action precision passed to the POMDP agent.
+/// in `(0.5, 1.0)`; `alpha` is the action precision passed to the POMDP agent;
+/// `transition_noise` is the (opt-in) transition-noise ε that makes the epistemic term live.
 ///
 /// The fields are **public**, so a struct literal (or `..Default::default()`) can hold
 /// out-of-range values. [`ObsPrecisionParams::validate`] — called by [`competence_efe`] —
@@ -179,6 +46,15 @@ pub struct ObsPrecisionParams {
     pub success_preference: f64,
     /// Action precision for the POMDP agent.
     pub alpha: f64,
+    /// Transition-noise ε for the two-state POMDP's transition model `B`. In `[0.0, 0.5)`.
+    ///
+    /// Default `0.0` = deterministic transitions (each action pins its target state), which
+    /// preserves the pre-0.6.0 [`competence_efe`] values exactly. When `ε > 0` the model's
+    /// `B[u]` sends mass `1 − ε` to state `u` and `ε` to the other state, so the predicted
+    /// state is no longer a delta and the exact mutual-information (information-gain) term in
+    /// `G` becomes nonzero — an *exploration* component. `ε ≥ 0.5` would invert or destroy the
+    /// action→state coupling and is rejected by [`ObsPrecisionParams::validate`].
+    pub transition_noise: f64,
 }
 
 impl Default for ObsPrecisionParams {
@@ -187,20 +63,24 @@ impl Default for ObsPrecisionParams {
             max_precision: 0.95,
             success_preference: 0.9,
             alpha: 8.0,
+            transition_noise: 0.0,
         }
     }
 }
 
 impl ObsPrecisionParams {
     /// Validate the parameter domain: `max_precision` and `success_preference` must each be
-    /// finite and in the OPEN interval `(0.5, 1.0)`, and `alpha` must be finite and strictly
-    /// positive.
+    /// finite and in the OPEN interval `(0.5, 1.0)`, `alpha` must be finite and strictly
+    /// positive, and `transition_noise` must be finite and in the HALF-OPEN interval
+    /// `[0.0, 0.5)`.
     ///
     /// # Errors
     /// Returns [`AifError::InvalidDistribution`] naming the offending field if any rule is
     /// violated: `max_precision` outside `(0.5, 1.0)` (at `0.5` the competence→precision
     /// mapping is constant / uninformative, below `0.5` it inverts), `success_preference`
-    /// outside `(0.5, 1.0)` (degenerate at the boundaries), or `alpha` non-finite / `<= 0.0`.
+    /// outside `(0.5, 1.0)` (degenerate at the boundaries), `alpha` non-finite / `<= 0.0`, or
+    /// `transition_noise` outside `[0.0, 0.5)` (at `≥ 0.5` the transition noise inverts or
+    /// destroys the action→state coupling).
     pub fn validate(&self) -> Result<(), AifError> {
         let in_open_half_unit = |x: f64| x.is_finite() && x > 0.5 && x < 1.0;
         if !in_open_half_unit(self.max_precision) {
@@ -221,6 +101,15 @@ impl ObsPrecisionParams {
                 self.alpha
             )));
         }
+        if !self.transition_noise.is_finite()
+            || self.transition_noise < 0.0
+            || self.transition_noise >= 0.5
+        {
+            return Err(AifError::InvalidDistribution(format!(
+                "ObsPrecisionParams.transition_noise must be finite and in [0.0, 0.5), got {}",
+                self.transition_noise
+            )));
+        }
         Ok(())
     }
 }
@@ -238,39 +127,90 @@ impl ObsPrecisionParams {
 ///
 /// Wrap the negated result (`-G`) to obtain a "higher is better" coalition score.
 ///
-/// Prefer this over [`CoalitionEvaluator`] for coalition-*value* use cases: it makes the
-/// **observation model** (not just preferences) depend on the coalition, so the value is
-/// non-degenerate as membership changes (see the module docs).
+/// It makes the **observation model** (not just preferences) depend on the coalition, so the
+/// value is non-degenerate as membership changes (see the module docs).
+///
+/// # Transition noise (opt-in epistemic term)
+/// With `params.transition_noise == 0.0` (the default) the transition model is deterministic:
+/// the predicted next state is a delta and the mutual-information (information-gain) term of
+/// `G` is structurally zero, so `G` is purely pragmatic. Set `params.transition_noise = ε > 0`
+/// to make `B[u]` stochastic — mass `1 − ε` to state `u`, `ε` to the other state — so the
+/// predicted state spreads and the exact-MI term becomes nonzero: `G` gains a live epistemic
+/// (information-gain) component. The ε = 0 path is preserved byte-for-byte (identical to the
+/// pre-0.6.0 values).
+///
+/// Note that ε changes `G` through **two** coupled channels, not just the epistemic one:
+/// spreading the predicted state also blurs the predicted observation `q(o|π) = A·B·q(s)`,
+/// which moves the *pragmatic* term as well. The net sign is competence-dependent — over most
+/// of the competence range (where `A` is discriminative but not extreme) the pragmatic blurring
+/// outweighs the info-gain bonus and `G` *rises* with ε; at competence 0 (`p = 0.5`, uniform
+/// `A`) ε has no effect at all, because an uninformative observation model admits no information
+/// gain. The primitive's purpose here is to make the epistemic term *live*, not to guarantee a
+/// fixed direction of change.
 ///
 /// # Errors
 /// Returns [`AifError::InvalidProbability`] if `competence` is not a finite value in `[0, 1]`.
 /// Returns [`AifError::InvalidDistribution`] (via [`ObsPrecisionParams::validate`]) if
 /// `params.max_precision` / `params.success_preference` is not a finite value in the open interval
-/// `(0.5, 1.0)`, or if `params.alpha` is not a finite, strictly positive value. For
-/// `max_precision`: at exactly `0.5` the mapping `p = 0.5 + (max_precision − 0.5)·c` is CONSTANT
-/// (competence-independent, uninformative) and only a value `< 0.5` inverts the competence→precision
-/// monotonicity; a `success_preference` outside `(0.5, 1.0)` is degenerate. May also return other
-/// [`AifError`] variants if the resulting POMDP parameters are rejected by the engine.
+/// `(0.5, 1.0)`, if `params.alpha` is not a finite, strictly positive value, or if
+/// `params.transition_noise` is not a finite value in `[0.0, 0.5)`. For `max_precision`: at
+/// exactly `0.5` the mapping `p = 0.5 + (max_precision − 0.5)·c` is CONSTANT (competence-independent,
+/// uninformative) and only a value `< 0.5` inverts the competence→precision monotonicity; a
+/// `success_preference` outside `(0.5, 1.0)` is degenerate. May also return other [`AifError`]
+/// variants if the resulting POMDP parameters are rejected by the engine.
 pub fn competence_efe(competence: f64, params: ObsPrecisionParams) -> Result<f64, AifError> {
     if !competence.is_finite() || !(0.0..=1.0).contains(&competence) {
         return Err(AifError::InvalidProbability(competence));
     }
-    // Validate params before use: a non-finite / out-of-range precision or preference would
-    // silently produce a degenerate or monotonicity-inverted observation model.
+    // Validate params before use: a non-finite / out-of-range precision, preference, or
+    // transition-noise would silently produce a degenerate or monotonicity-inverted model.
     params.validate()?;
     let p = 0.5 + (params.max_precision - 0.5) * competence;
     let obs = vec![p, 1.0 - p];
     let prefs = vec![params.success_preference, 1.0 - params.success_preference];
+
+    if params.transition_noise > 0.0 {
+        // Stochastic-transition path: same 2-state / 2-obs / 2-action model as the
+        // deterministic `new` path, but with B[u] sending mass (1 − ε) to state u and ε to
+        // the other state so the exact-MI epistemic term is live. A/C/D are identical to the
+        // `new` path: A column j = [p_j, 1 − p_j] (state 0 has precision p, state 1 has 1 − p),
+        // C = prefs, D = uniform.
+        let eps = params.transition_noise;
+        let a = DMatrix::from_vec(2, 2, vec![p, 1.0 - p, 1.0 - p, p]);
+        // B[u]: row u = 1 − ε, other row = ε, independent of source column (matches the
+        // deterministic `new` form at ε = 0).
+        let b: Vec<DMatrix<f64>> = (0..2)
+            .map(|u| DMatrix::from_fn(2, 2, |row, _col| if row == u { 1.0 - eps } else { eps }))
+            .collect();
+        let model = GenerativeModel {
+            a: vec![a],
+            b: vec![b],
+            c: vec![prefs],
+            d: vec![vec![0.5, 0.5]],
+        };
+        let params = AgentParams {
+            alpha: params.alpha,
+            gamma: 16.0,
+            policy_depth: 1,
+            learn_a: false,
+            initial_precision: None,
+            inference_iters: 10,
+        };
+        let agent = POMDPAgent::from_model(model, params)?;
+        return Ok(agent.expected_free_energy());
+    }
+
     let agent = POMDPAgent::new(2, Some(obs), None, prefs, None, params.alpha, false)?;
     Ok(agent.expected_free_energy())
 }
 
 /// Derive a coalition preference vector `[p(obs1), p(obs2)]` from the supporting belief
-/// structures, for a domain to return from [`CapabilityProvider::preferences`] when `agent`
-/// is in `members`. Observation index 0 is the preferred (reward) outcome, so a HIGHER
-/// aggregate trust / compatibility / past-performance pulls preference toward it (lower G
-/// in synergy). This is the concrete realization of the module's "supporting data" role;
-/// domains may use it or compute their own preference shift.
+/// structures. Observation index 0 is the preferred (reward) outcome, so a HIGHER aggregate
+/// trust / compatibility / past-performance pulls the aligned mass `p(obs1)` toward it. This
+/// is the concrete realization of the module's "supporting data" role: a domain reduces its
+/// belief structures to a preference, takes the aligned mass `p(obs1) ∈ [0.05, 0.95]` as a
+/// scalar **competence**, and feeds that to [`competence_efe`] to obtain a coalition value.
+/// Domains may use it or compute their own competence.
 ///
 /// # Composition
 /// Let `partners` be the members other than `agent`. If `partners` is empty (acting alone
@@ -281,50 +221,30 @@ pub fn competence_efe(competence: f64, params: ObsPrecisionParams) -> Result<f64
 ///
 /// # Examples
 /// ```rust
-/// #![allow(deprecated)] // CoalitionEvaluator is deprecated; still exercised here.
 /// use aif::{
-///     belief_weighted_preference, AgentId, CapabilityProvider, CoalitionEvaluator,
-///     CompatibilityBeliefs, CoalitionHistory, TrustBeliefs,
+///     belief_weighted_preference, competence_efe, CoalitionHistory, CompatibilityBeliefs,
+///     ObsPrecisionParams, TrustBeliefs,
 /// };
 ///
-/// /// A provider that derives coalition preferences from its belief structures.
-/// struct BeliefProvider {
-///     trust: TrustBeliefs,
-///     compat: CompatibilityBeliefs,
-///     history: CoalitionHistory,
-/// }
-///
-/// impl CapabilityProvider for BeliefProvider {
-///     fn n_states(&self) -> usize {
-///         2
-///     }
-///     fn observation_probs(&self, _agent: AgentId) -> Vec<f64> {
-///         vec![0.9, 0.9]
-///     }
-///     fn preferences(&self, agent: AgentId, members: &[AgentId]) -> Vec<f64> {
-///         if members.is_empty() {
-///             vec![0.5, 0.5]
-///         } else {
-///             belief_weighted_preference(agent, members, &self.trust, &self.compat, &self.history)
-///         }
-///     }
-///     fn alpha(&self, _agent: AgentId) -> f64 {
-///         8.0
-///     }
-/// }
-///
+/// // A domain reduces its belief structures to a coalition preference, then takes the
+/// // aligned mass as a scalar competence that competence_efe maps to expected free energy G.
 /// let mut trust = TrustBeliefs::new();
 /// let mut compat = CompatibilityBeliefs::new();
 /// for _ in 0..200 {
 ///     trust.update(1, 1.0);
 /// }
 /// compat.set(0, 1, 1.0);
-/// let provider = BeliefProvider { trust, compat, history: CoalitionHistory::new() };
+/// let history = CoalitionHistory::new();
 ///
-/// let eval = CoalitionEvaluator::new(&provider);
-/// // High trust + high compatibility aligns preferences with the obs model, so joining
-/// // lowers expected free energy.
-/// assert!(eval.decide_join(0, &[0, 1])?);
+/// // High trust + high compatibility → high aligned mass p(obs1); use it as the competence.
+/// let pref = belief_weighted_preference(0, &[0, 1], &trust, &compat, &history);
+/// let competence = pref[0]; // in [0.05, 0.95]
+///
+/// let params = ObsPrecisionParams::default();
+/// let g_strong = competence_efe(competence, params)?;
+/// // A weak (low-trust) coalition has a lower competence and thus a HIGHER (worse) G.
+/// let g_weak = competence_efe(0.1, params)?;
+/// assert!(g_strong < g_weak);
 /// # Ok::<(), aif::AifError>(())
 /// ```
 #[must_use]
@@ -459,130 +379,8 @@ impl CoalitionHistory {
 }
 
 #[cfg(test)]
-#[allow(deprecated)] // exercises the deprecated CoalitionEvaluator intentionally.
 mod tests {
     use super::*;
-
-    /// Hand-built provider for the decision-primitive tests.
-    ///
-    /// Every agent shares a UNIFORM observation model `[0.9, 0.9, 0.9]` — every arm
-    /// emits obs1 with probability 0.9. Uniformity is deliberate: G is the
-    /// policy-posterior-weighted average, so with a non-uniform obs model an agent could
-    /// route around a preference conflict by picking a different arm, masking the effect.
-    /// A uniform model removes that escape hatch so the membership-driven preference
-    /// shift shows up directly in G.
-    ///
-    /// Preferences depend on whether the agent is in a multi-member coalition: in
-    /// `synergy` mode a coalition shifts preferences TOWARD obs1 (aligning with the obs
-    /// model → lower G); in conflict mode it shifts them AWAY (→ higher G). Acting alone
-    /// uses neutral preferences in both cases, so the only thing that changes between
-    /// individual and coalition EFE is the membership-driven preference shift.
-    struct TestProvider {
-        synergy: bool,
-    }
-
-    impl CapabilityProvider for TestProvider {
-        fn n_states(&self) -> usize {
-            3
-        }
-
-        fn observation_probs(&self, _agent: AgentId) -> Vec<f64> {
-            vec![0.9, 0.9, 0.9]
-        }
-
-        fn preferences(&self, _agent: AgentId, members: &[AgentId]) -> Vec<f64> {
-            // Honor the trait contract: `members` is empty iff acting alone, so any
-            // non-empty slice (including a 1-element one) means "in a coalition".
-            let in_coalition = !members.is_empty();
-            if !in_coalition {
-                // Acting alone: neutral preference.
-                vec![0.5, 0.5]
-            } else if self.synergy {
-                // Coalition aligns preference with the observation model.
-                vec![0.9, 0.1]
-            } else {
-                // Coalition pushes preference against the observation model.
-                vec![0.1, 0.9]
-            }
-        }
-
-        fn alpha(&self, _agent: AgentId) -> f64 {
-            8.0
-        }
-    }
-
-    /// Provider whose preferences IGNORE `members`, so coalition EFE exactly equals
-    /// individual EFE. Combined with a uniform observation model this makes
-    /// `coalition_efe == individual_efe`, exercising the strict-`<` boundary of
-    /// [`CoalitionEvaluator::decide_join`].
-    struct NeutralProvider;
-
-    impl CapabilityProvider for NeutralProvider {
-        fn n_states(&self) -> usize {
-            3
-        }
-
-        fn observation_probs(&self, _agent: AgentId) -> Vec<f64> {
-            vec![0.9, 0.9, 0.9]
-        }
-
-        fn preferences(&self, _agent: AgentId, _members: &[AgentId]) -> Vec<f64> {
-            // Identical alone vs in-coalition → coalition G == individual G.
-            vec![0.5, 0.5]
-        }
-
-        fn alpha(&self, _agent: AgentId) -> f64 {
-            8.0
-        }
-    }
-
-    #[test]
-    fn test_decide_join_equality_edge_does_not_join() -> Result<(), AifError> {
-        let provider = NeutralProvider;
-        let eval = CoalitionEvaluator::new(&provider);
-
-        // Document the equality the boundary depends on: with membership-independent
-        // preferences, coalition and individual G are identical.
-        assert!(
-            (eval.coalition_efe(0, &[0, 1])? - eval.individual_efe(0)?).abs() < 1e-12,
-            "neutral provider: coalition G must equal individual G"
-        );
-
-        // Strict `<` means equality does NOT join. A regression to `<=` fails here.
-        assert!(
-            !eval.decide_join(0, &[0, 1])?,
-            "equal G must not join (strict < boundary)"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_decide_join_synergy_vs_conflict() -> Result<(), AifError> {
-        // SYNERGY: coalition lowers G → join.
-        let synergy = TestProvider { synergy: true };
-        let eval = CoalitionEvaluator::new(&synergy);
-        let individual = eval.individual_efe(0)?;
-        let coalition = eval.coalition_efe(0, &[0, 1])?;
-        assert!(
-            coalition < individual,
-            "synergy: coalition G ({coalition}) must be < individual G ({individual})"
-        );
-        assert!(eval.decide_join(0, &[0, 1])?, "synergy ⇒ join");
-
-        // CONFLICT: coalition raises G → do not join.
-        let conflict = TestProvider { synergy: false };
-        let eval = CoalitionEvaluator::new(&conflict);
-        let individual_c = eval.individual_efe(0)?;
-        let coalition_c = eval.coalition_efe(0, &[0, 1])?;
-        assert!(
-            coalition_c > individual_c,
-            "conflict: coalition G ({coalition_c}) must be > individual G ({individual_c})"
-        );
-        assert!(!eval.decide_join(0, &[0, 1])?, "conflict ⇒ do not join");
-
-        Ok(())
-    }
 
     #[test]
     fn test_trust_beliefs_ema_and_clamp() {
@@ -810,5 +608,119 @@ mod tests {
             competence_efe(0.5, ObsPrecisionParams::default()).is_ok(),
             "default params must still be accepted"
         );
+    }
+
+    #[test]
+    fn test_competence_efe_regression_anchors() -> Result<(), AifError> {
+        // Pinned deterministic (ε = 0) values koalisi depends on. Measured from the current
+        // engine; guards against silent numeric drift in the default coalition-value path.
+        let params = ObsPrecisionParams::default();
+        let g0 = competence_efe(0.0, params)?;
+        let g_half = competence_efe(0.5, params)?;
+        let g1 = competence_efe(1.0, params)?;
+        assert!((g0 - 1.203_973).abs() < 1e-3, "G(0.0) anchor drifted: {g0}");
+        assert!((g_half - 0.709_597).abs() < 1e-3, "G(0.5) anchor drifted: {g_half}");
+        assert!((g1 - 0.215_222).abs() < 1e-3, "G(1.0) anchor drifted: {g1}");
+        // Ordering the anchors encode: more competence ⇒ lower G.
+        assert!(g0 > g_half && g_half > g1, "anchors must stay monotone: {g0} {g_half} {g1}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_competence_efe_monotonic_with_transition_noise() -> Result<(), AifError> {
+        // With ε > 0 the epistemic term is live, but the pragmatic driver still dominates:
+        // more competence ⇒ lower G is preserved.
+        let params = ObsPrecisionParams { transition_noise: 0.1, ..Default::default() };
+        let g0 = competence_efe(0.0, params)?;
+        let g_half = competence_efe(0.5, params)?;
+        let g1 = competence_efe(1.0, params)?;
+        assert!(
+            g1 < g_half && g_half < g0,
+            "ε = 0.1: higher competence ⇒ lower G, got 0.0={g0} 0.5={g_half} 1.0={g1}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_competence_efe_transition_noise_changes_g() -> Result<(), AifError> {
+        // At ε = 0 the transition is deterministic: the predicted state is a delta, the
+        // exact-MI info-gain term is structurally zero, and G is purely pragmatic. Turning on
+        // ε > 0 makes B stochastic, which (1) activates the info-gain term AND (2) blurs the
+        // predicted observation q(o|π) = A·B·q(s), shifting the pragmatic term too. So G moves
+        // for a given competence — the epistemic term is now LIVE.
+        //
+        // Sign: over the discriminative-but-not-extreme range the pragmatic blurring dominates
+        // the info-gain bonus, so G RISES with ε. We pin that direction at competence 0.5,
+        // where the effect is unambiguous.
+        let base = ObsPrecisionParams::default();
+        let noisy = ObsPrecisionParams { transition_noise: 0.1, ..Default::default() };
+        for &c in &[0.5, 1.0] {
+            let g_det = competence_efe(c, base)?;
+            let g_noisy = competence_efe(c, noisy)?;
+            assert!(
+                (g_det - g_noisy).abs() > 1e-6,
+                "ε > 0 must change G at competence {c}: det={g_det} noisy={g_noisy}"
+            );
+        }
+        let g_det_half = competence_efe(0.5, base)?;
+        let g_noisy_half = competence_efe(0.5, noisy)?;
+        assert!(
+            g_noisy_half > g_det_half,
+            "at competence 0.5 pragmatic blurring makes G rise with ε: det={g_det_half} noisy={g_noisy_half}"
+        );
+
+        // Boundary: at competence 0 (p = 0.5) A is uniform and carries no information about the
+        // state, so no transition spreading can create information gain — G is unchanged by ε.
+        let g_det0 = competence_efe(0.0, base)?;
+        let g_noisy0 = competence_efe(0.0, noisy)?;
+        assert!(
+            (g_det0 - g_noisy0).abs() < 1e-12,
+            "at competence 0 (uniform A) ε must not change G: det={g_det0} noisy={g_noisy0}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_competence_efe_transition_noise_zero_matches_new_path() -> Result<(), AifError> {
+        // ε = 0.0 must take the deterministic `new` path and match the anchors byte-for-byte
+        // (the explicit-0.0 struct and the default agree).
+        let explicit = ObsPrecisionParams { transition_noise: 0.0, ..Default::default() };
+        for &c in &[0.0, 0.5, 1.0] {
+            let a = competence_efe(c, explicit)?;
+            let b = competence_efe(c, ObsPrecisionParams::default())?;
+            assert!((a - b).abs() < 1e-12, "ε = 0.0 must equal default at {c}: {a} vs {b}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_competence_efe_rejects_bad_transition_noise() {
+        // transition_noise must be finite and in [0.0, 0.5). ε = 0.5 inverts/destroys the
+        // action→state coupling; negative and non-finite values are nonsensical.
+        let at_half = ObsPrecisionParams { transition_noise: 0.5, ..Default::default() };
+        assert!(
+            matches!(competence_efe(0.5, at_half), Err(AifError::InvalidDistribution(_))),
+            "transition_noise = 0.5 must be rejected (coupling inverts at the boundary)"
+        );
+        assert!(
+            matches!(at_half.validate(), Err(AifError::InvalidDistribution(_))),
+            "validate() must reject transition_noise = 0.5 directly"
+        );
+
+        let negative = ObsPrecisionParams { transition_noise: -0.1, ..Default::default() };
+        assert!(
+            matches!(competence_efe(0.5, negative), Err(AifError::InvalidDistribution(_))),
+            "negative transition_noise must be rejected"
+        );
+
+        let nan = ObsPrecisionParams { transition_noise: f64::NAN, ..Default::default() };
+        assert!(
+            competence_efe(0.5, nan).is_err(),
+            "NaN transition_noise must be rejected"
+        );
+
+        // A valid interior value is accepted.
+        let ok = ObsPrecisionParams { transition_noise: 0.2, ..Default::default() };
+        assert!(competence_efe(0.5, ok).is_ok(), "transition_noise = 0.2 must be accepted");
     }
 }
