@@ -102,9 +102,10 @@ certainty-weighted voting evaluation (extension 5), seeded/reproducible CW group
 
 `aif` reimplements the paper's MAB-POMDP slice. Scored against the canonical spec — Smith,
 Friston & Whyte (2022) *J. Math. Psychol.* [10.1016/j.jmp.2021.102632](https://doi.org/10.1016/j.jmp.2021.102632)
-(the equation-by-equation checklist; paper ref [61]; full text:
-[1-s2.0-S0022249621000973-main.md](1-s2.0-S0022249621000973-main.md) — "Smith Eq. N" below
-refers to its equation numbering), Parr, Pezzulo & Friston (2022) *Active
+(the equation-by-equation checklist; paper ref [61]; "Smith Eq. N" below refers to its
+equation numbering — a local full-text conversion lives at
+`docs/1-s2.0-S0022249621000973-main.md`, untracked because the paper is CC BY-NC-ND),
+Parr, Pezzulo & Friston (2022) *Active
 Inference* (MIT Press; ref [1]), `pymdp` (Heins et al. 2022, JOSS), and `ActiveInference.jl`
 (Nehrer et al.; ref [57], the library the paper uses):
 

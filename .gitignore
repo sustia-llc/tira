@@ -3,3 +3,10 @@
 # Private development artifacts (tracked outside this repository)
 /.claude/
 /CLAUDE.local.md
+
+# Smith, Friston & Whyte (2022) local copies — CC BY-NC-ND forbids derivative
+# redistribution, so the markdown conversion (and the PDF, to stay clearly
+# non-commercial) stay local-only; the public pointer is the DOI.
+/docs/1-s2.0-S0022249621000973-main.md
+/docs/1-s2.0-S0022249621000973-main.pdf
+/docs/1-s2.0-S0022249621000973-main_images/
