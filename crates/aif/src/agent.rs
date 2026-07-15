@@ -62,6 +62,53 @@ pub struct GenerativeModel {
     pub d: Vec<Vec<f64>>,
 }
 
+/// State-inference scheme for a [`POMDPAgent`].
+///
+/// This is an **opt-in** switch. [`MeanField`](StateInference::MeanField) is the
+/// [`Default`] and reproduces the pre-0.7.0 within-timestep filtering path
+/// bit-for-bit; [`POMDPAgent::new`] and [`POMDPAgent::with_params`] always select
+/// it. Marginal message passing is reachable only through
+/// [`POMDPAgent::from_model`]. The two modes mirror pymdp's `VANILLA` vs `MMP`
+/// split.
+///
+/// # Contract
+///
+/// - **`MeanField`** — one-pass exact (single factor) or mean-field (multi-factor)
+///   posterior over the *current* timestep only. No trajectory memory, no
+///   retrospective revision. [`POMDPAgent::variational_free_energy`] returns the
+///   exact one-step negative log evidence `−ln p(o_t)` under the pre-update
+///   predictive prior. [`POMDPAgent::policy_free_energies`] and
+///   [`POMDPAgent::bma_state_belief`] return `None`.
+/// - **`MarginalMessagePassing`** — a single trajectory of beliefs (shared across
+///   policies) over a sliding window of the last `horizon` **observed** timesteps,
+///   iterated to the Eq. 23 (Smith, Friston & Whyte 2022) fixed point with `iters`
+///   Jacobi sweeps. Enables retrospective smoothing, a window variational free
+///   energy, and Bayesian-model-average state marginals. The window holds observed
+///   timesteps only, matching the paper's Eq. 19/20 split (F scores observed τ,
+///   G scores hypothesized future τ) — so `F` is identical across policies today;
+///   per-policy future-τ windows (which would make `F_π` genuinely policy-varying)
+///   arrive with the precision-dynamics work (#14).
+///   Window contract: callers must alternate exactly one
+///   `act`/`action_probabilities*` call with one recorded action per timestep;
+///   "peeking" (repeated inference without `record_action`) desynchronizes the
+///   observation/action histories.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum StateInference {
+    /// Within-timestep filtering (pre-0.7.0 behavior; the default).
+    #[default]
+    MeanField,
+    /// Marginal message passing over a trajectory window (Smith et al. 2022,
+    /// Eq. 23). `horizon` is the window length in timesteps and must be
+    /// `>= policy_depth`; `iters` is the maximum number of Jacobi sweeps per
+    /// update (`>= 1`) with a `1e-8` max-abs-change early exit.
+    MarginalMessagePassing {
+        /// Trajectory window length (observed timesteps retained).
+        horizon: usize,
+        /// Maximum Jacobi sweeps per belief update.
+        iters: usize,
+    },
+}
+
 /// Scalar / behavioral parameters for [`POMDPAgent::from_model`].
 ///
 /// `alpha` has no meaningful default and must be supplied by the caller; the
@@ -83,6 +130,9 @@ pub struct AgentParams {
     pub initial_precision: Option<Vec<f64>>,
     /// Maximum mean-field sweeps for multi-factor state inference.
     pub inference_iters: usize,
+    /// State-inference scheme. Defaults to
+    /// [`StateInference::MeanField`] (pre-0.7.0 behavior).
+    pub state_inference: StateInference,
 }
 
 impl Default for AgentParams {
@@ -94,6 +144,7 @@ impl Default for AgentParams {
             learn_a: false,
             initial_precision: None,
             inference_iters: 10,
+            state_inference: StateInference::MeanField,
         }
     }
 }
@@ -135,6 +186,26 @@ pub struct POMDPAgent {
     n_joint: usize,
     n_actions: usize,
     inference_iters: usize,
+    state_inference: StateInference,
+    // --- Marginal-message-passing trial state (unused under MeanField) ---
+    /// Observation history for the current trajectory window, one entry per
+    /// observed timestep (each is one observation index per modality). Capped at
+    /// `horizon`; the oldest entry is dropped when the window slides.
+    mmp_obs_hist: Vec<Vec<usize>>,
+    /// Flat joint-control taken between consecutive windowed timesteps.
+    /// `mmp_act_hist[k]` is the action driving the transition from window node
+    /// `k` to `k + 1`; length is `mmp_obs_hist.len() - 1` at inference time.
+    mmp_act_hist: Vec<usize>,
+    /// Converged smoothed trajectory beliefs, indexed `[window_node][factor]`.
+    mmp_traj: Vec<Vec<DVector<f64>>>,
+    /// Variational free energy accumulated over the observed window (Eq. 11).
+    mmp_free_energy: f64,
+    // --- MeanField one-step free-energy state ---
+    /// Per-factor predictive prior captured *before* the last belief update, used
+    /// by [`Self::variational_free_energy`] to form `−ln p(o_t)`.
+    last_predictive_prior: Option<Vec<DVector<f64>>>,
+    /// The most recent observation (one index per modality).
+    last_obs: Option<Vec<usize>>,
     rng: StdRng,
 }
 
@@ -248,6 +319,7 @@ impl POMDPAgent {
             learn_a,
             initial_precision: precision,
             inference_iters: 10,
+            state_inference: StateInference::MeanField,
         };
         Self::from_model(model, params)
     }
@@ -283,6 +355,7 @@ impl POMDPAgent {
             learn_a,
             initial_precision: None,
             inference_iters: agent.inference_iters,
+            state_inference: StateInference::MeanField,
         })?;
         agent.gamma = gamma;
         agent.policy_depth = policy_depth;
@@ -381,7 +454,6 @@ impl POMDPAgent {
         {
             return Err(AifError::InvalidAction(prec.len()));
         }
-
         let n_actions: usize = n_controls.iter().product();
         let e_len = if params.policy_depth > 1 {
             n_actions.pow(params.policy_depth as u32)
@@ -431,6 +503,13 @@ impl POMDPAgent {
             n_joint,
             n_actions,
             inference_iters: params.inference_iters,
+            state_inference: params.state_inference,
+            mmp_obs_hist: Vec::new(),
+            mmp_act_hist: Vec::new(),
+            mmp_traj: Vec::new(),
+            mmp_free_energy: 0.0,
+            last_predictive_prior: None,
+            last_obs: None,
             rng: StdRng::from_rng(&mut rand::rng()),
         })
     }
@@ -475,13 +554,50 @@ impl POMDPAgent {
         self.n_states.len()
     }
 
-    /// Update beliefs for one observation step: reset to the D prior on the first
-    /// step, otherwise run state inference. `obs` is one index per modality.
+    /// Update beliefs for one observation step. `obs` is one index per modality.
+    ///
+    /// Under [`StateInference::MeanField`] this resets to the `D` prior on the
+    /// first step (before any action) and otherwise runs within-timestep
+    /// inference — the pre-0.7.0 behavior. Under
+    /// [`StateInference::MarginalMessagePassing`] the observation is appended to
+    /// the trajectory window and the whole window is re-smoothed to the Eq. 23
+    /// fixed point; `self.beliefs` becomes the smoothed belief at the current
+    /// (last) window node.
     fn belief_step(&mut self, obs: &[usize]) {
-        if self.last_action.is_none() {
-            self.beliefs = self.d.clone();
-        } else {
-            self.infer_states(obs);
+        match self.state_inference {
+            StateInference::MeanField => {
+                // Capture the pre-update predictive prior for variational_free_energy:
+                // D on the first step, else B[u]·qs per factor.
+                let priors: Vec<DVector<f64>> = if let Some(action) = self.last_action {
+                    let controls = flat_to_multi(action, &self.n_controls);
+                    (0..self.n_states.len())
+                        .map(|f| &self.b[f][controls[f]] * &self.beliefs[f])
+                        .collect()
+                } else {
+                    self.d.clone()
+                };
+                self.last_predictive_prior = Some(priors);
+                self.last_obs = Some(obs.to_vec());
+
+                if self.last_action.is_none() {
+                    self.beliefs = self.d.clone();
+                } else {
+                    self.infer_states(obs);
+                }
+            }
+            StateInference::MarginalMessagePassing { horizon, iters } => {
+                self.mmp_obs_hist.push(obs.to_vec());
+                // Slide the window: drop the oldest observation (and the transition
+                // leaving it) once the window exceeds `horizon`.
+                while self.mmp_obs_hist.len() > horizon {
+                    self.mmp_obs_hist.remove(0);
+                    if !self.mmp_act_hist.is_empty() {
+                        self.mmp_act_hist.remove(0);
+                    }
+                }
+                self.mmp_infer(iters);
+                self.last_obs = Some(obs.to_vec());
+            }
         }
     }
 
@@ -571,6 +687,216 @@ impl POMDPAgent {
             }
         }
         self.beliefs = q;
+    }
+
+    /// Per-factor expected log-likelihood at window node `tau` under the current
+    /// node beliefs `node` (mean-field over the other factors).
+    ///
+    /// For a single factor this is the exact `ln L_f(s) = Σ_m ln A[m][(o_m, s)]`.
+    /// For multiple factors it is `E_{q(s_{-f})}[ln L(joint)]` with factor `f`
+    /// held at each of its states — the same expectation the mean-field
+    /// [`Self::infer_states`] sweep uses.
+    fn expected_ln_likelihood(&self, tau: usize, node: &[DVector<f64>]) -> Vec<DVector<f64>> {
+        let obs = &self.mmp_obs_hist[tau];
+        let n_factors = self.n_states.len();
+
+        if n_factors == 1 {
+            let mut ln_l = DVector::zeros(self.n_states[0]);
+            for s in 0..self.n_states[0] {
+                let mut acc = 0.0;
+                for (m, &o) in obs.iter().enumerate() {
+                    acc += self.a[m][(o, s)].max(LN_FLOOR).ln();
+                }
+                ln_l[s] = acc;
+            }
+            return vec![ln_l];
+        }
+
+        // Joint log-likelihood over the flattened joint state.
+        let mut ln_joint = vec![0.0f64; self.n_joint];
+        for (m, &o) in obs.iter().enumerate() {
+            let am = &self.a[m];
+            for (j, slot) in ln_joint.iter_mut().enumerate() {
+                *slot += am[(o, j)].max(LN_FLOOR).ln();
+            }
+        }
+        (0..n_factors)
+            .map(|f| {
+                let mut exp_ln = DVector::zeros(self.n_states[f]);
+                for (j, &lnl) in ln_joint.iter().enumerate() {
+                    let multi = flat_to_multi(j, &self.n_states);
+                    let mut w = 1.0;
+                    for (h, qh) in node.iter().enumerate() {
+                        if h != f {
+                            w *= qh[multi[h]];
+                        }
+                    }
+                    exp_ln[multi[f]] += w * lnl;
+                }
+                exp_ln
+            })
+            .collect()
+    }
+
+    /// Forward and backward log-prior messages for window node `tau`, factor `f`,
+    /// under the trajectory `traj`, following Smith et al. (2022) Eq. 23.
+    ///
+    /// Forward: `ln(B_{f}[u_{τ−1}]·s_{τ−1})`, replaced by `ln D_f` at `τ = 1`.
+    /// Backward: `ln(B†_{f}[u_{τ}]·s_{τ+1})` where `B†` is the column-normalized
+    /// transpose of `B`; absent (`None`) at the last window node.
+    fn mmp_messages(
+        &self,
+        tau: usize,
+        f: usize,
+        traj: &[Vec<DVector<f64>>],
+    ) -> (DVector<f64>, Option<DVector<f64>>) {
+        let w = traj.len();
+        let forward = if tau == 0 {
+            self.d[f].clone()
+        } else {
+            let controls = flat_to_multi(self.mmp_act_hist[tau - 1], &self.n_controls);
+            &self.b[f][controls[f]] * &traj[tau - 1][f]
+        };
+        let backward = if tau + 1 >= w {
+            None
+        } else {
+            let controls = flat_to_multi(self.mmp_act_hist[tau], &self.n_controls);
+            let bdag = column_normalized_transpose(&self.b[f][controls[f]]);
+            Some(&bdag * &traj[tau + 1][f])
+        };
+        (forward, backward)
+    }
+
+    /// Marginal message passing (Smith et al. 2022, Eq. 23) over the current
+    /// trajectory window.
+    ///
+    /// Iterates `iters` Jacobi sweeps over window nodes `τ = 1..W` and factors:
+    /// `s_{τ,f} = σ(½(ln fwd_{τ,f} + ln bwd_{τ,f}) + E[ln L_{τ,f}])`, where the
+    /// backward term is omitted at the last node (`½ ln fwd` there), `D_f`
+    /// replaces the forward message at the first node (inside the ½, per the
+    /// paper's Table 2 τ=1 form), and every window node carries an observation
+    /// term (the window holds only observed timesteps). Note: the paper is silent
+    /// on the last-node weighting when no backward message exists; keeping the ½
+    /// on the lone forward term is an interpretive choice (the JAX pymdp
+    /// reimplementation uses full weight there) — a documented design decision,
+    /// not Eq. 23 verbatim.
+    /// Early exit on max-abs-change `< 1e-8`. Sets `self.beliefs` to the smoothed
+    /// belief at the current (last) node and records the window free energy and
+    /// trajectory for the public accessors.
+    ///
+    /// # Contract with exact inference
+    ///
+    /// Eq. 23 is a *variational* (VFE gradient-descent) fixed point, **not** the
+    /// exact forward–backward smoother. The exact smoother is not a fixed point of
+    /// Eq. 23, so the smoothed marginals approximate — but do not equal — the true
+    /// posterior; the approximation performs retrospective revision in the correct
+    /// direction (see the module tests). This matches the paper's own framing of
+    /// marginal message passing as approximate Bayesian inference.
+    fn mmp_infer(&mut self, iters: usize) {
+        let w = self.mmp_obs_hist.len();
+        let n_factors = self.n_states.len();
+        if w == 0 {
+            return;
+        }
+
+        // Initialize each window node/factor to the uniform distribution.
+        let mut traj: Vec<Vec<DVector<f64>>> = (0..w)
+            .map(|_| {
+                (0..n_factors)
+                    .map(|f| DVector::from_element(self.n_states[f], 1.0 / self.n_states[f] as f64))
+                    .collect()
+            })
+            .collect();
+
+        for _ in 0..iters.max(1) {
+            let mut next = traj.clone();
+            let mut max_change = 0.0f64;
+            for tau in 0..w {
+                let ln_l = self.expected_ln_likelihood(tau, &traj[tau]);
+                for f in 0..n_factors {
+                    let (fwd, bwd) = self.mmp_messages(tau, f, &traj);
+                    let n = self.n_states[f];
+                    let mut ln_s = DVector::zeros(n);
+                    for s in 0..n {
+                        let lf = fwd[s].max(LN_FLOOR).ln();
+                        let prior = match &bwd {
+                            Some(b) => 0.5 * (lf + b[s].max(LN_FLOOR).ln()),
+                            None => 0.5 * lf,
+                        };
+                        ln_s[s] = prior + ln_l[f][s];
+                    }
+                    let post = softmax(&ln_s);
+                    for s in 0..n {
+                        max_change = max_change.max((post[s] - traj[tau][f][s]).abs());
+                    }
+                    next[tau][f] = post;
+                }
+            }
+            traj = next;
+            if max_change < 1e-8 {
+                break;
+            }
+        }
+
+        self.mmp_free_energy = self.mmp_window_free_energy(&traj);
+        self.beliefs = traj[w - 1].clone();
+        self.mmp_traj = traj;
+    }
+
+    /// Variational free energy accumulated over the observed window (Smith et al.
+    /// 2022, Eq. 11 complexity − accuracy decomposition):
+    /// `F = Σ_{τ,f} [ KL(q_{τ,f} ‖ prior_{τ,f}) − E_{q}[ln L_{τ,f}] ]`,
+    /// where `prior_{τ,f} = σ(½(ln fwd + ln bwd))` is the geometric-mean prior
+    /// implied by the Eq. 23 message weighting. Every window node is observed, so
+    /// the accuracy term is present at every `τ`. `F` is computed from the shared
+    /// (recorded-action) window, hence identical across policies.
+    fn mmp_window_free_energy(&self, traj: &[Vec<DVector<f64>>]) -> f64 {
+        let w = traj.len();
+        let n_factors = self.n_states.len();
+        let mut f_total = 0.0;
+        for tau in 0..w {
+            let ln_l = self.expected_ln_likelihood(tau, &traj[tau]);
+            for f in 0..n_factors {
+                let (fwd, bwd) = self.mmp_messages(tau, f, traj);
+                let n = self.n_states[f];
+                let mut ln_prior = DVector::zeros(n);
+                for s in 0..n {
+                    let lf = fwd[s].max(LN_FLOOR).ln();
+                    ln_prior[s] = match &bwd {
+                        Some(b) => 0.5 * (lf + b[s].max(LN_FLOOR).ln()),
+                        None => 0.5 * lf,
+                    };
+                }
+                let prior = softmax(&ln_prior);
+                let q = &traj[tau][f];
+                for s in 0..n {
+                    f_total += q[s]
+                        * (q[s].max(LN_FLOOR).ln()
+                            - prior[s].max(LN_FLOOR).ln()
+                            - ln_l[f][s]);
+                }
+            }
+        }
+        f_total
+    }
+
+    /// One-step negative log evidence `−ln p(o_t)` of the last observation under
+    /// the pre-update predictive prior (the [`StateInference::MeanField`] path of
+    /// [`Self::variational_free_energy`]).
+    fn meanfield_neg_log_evidence(&self) -> f64 {
+        let (Some(obs), Some(priors)) = (&self.last_obs, &self.last_predictive_prior) else {
+            return 0.0;
+        };
+        let joint = joint_belief(priors);
+        let mut p_o = 0.0;
+        for (j, &prior_j) in joint.iter().enumerate() {
+            let mut lik = 1.0;
+            for (m, &o) in obs.iter().enumerate() {
+                lik *= self.a[m][(o, j)];
+            }
+            p_o += lik * prior_j;
+        }
+        -p_o.max(LN_FLOOR).ln()
     }
 
     /// Update pA concentration parameters per modality and recompute each A[m]
@@ -699,6 +1025,14 @@ impl POMDPAgent {
     /// shared computation behind both [`Self::infer_policies`] (which marginalizes the
     /// posterior to actions) and [`Self::expected_free_energy`] (which takes the
     /// posterior-weighted average of `G = −neg_g`).
+    ///
+    /// This form also realizes Smith et al. (2022) Eq. 22
+    /// `π = σ(ln E − F_π + γ·neg_g_π)` under
+    /// [`StateInference::MarginalMessagePassing`]: the `−F_π` term is constant
+    /// across policies (F is accumulated over the shared observed window — see
+    /// [`Self::policy_free_energies`]), so it cancels in the softmax and no
+    /// separate MMP posterior is needed. Under [`StateInference::MeanField`] F is
+    /// likewise policy-independent, so `σ(γ·neg_g)×E` is exact.
     fn policy_posterior(&self) -> (Vec<(Vec<usize>, f64)>, Vec<f64>) {
         let policies = self.enumerate_policies();
 
@@ -829,13 +1163,100 @@ impl POMDPAgent {
         let action_probs = self.infer_policies();
         let dist = WeightedIndex::new(action_probs.as_slice())?;
         let action = dist.sample(&mut self.rng);
-        self.last_action = Some(action);
+        self.record_action(action);
         Ok(action)
     }
 
     /// Record that a specific action was taken (for replay without sampling).
+    ///
+    /// Under [`StateInference::MarginalMessagePassing`] this also appends the
+    /// action to the trajectory window's transition history, so the next
+    /// observation is smoothed against the correct recorded dynamics.
     pub fn record_action(&mut self, action: usize) {
         self.last_action = Some(action);
+        if let StateInference::MarginalMessagePassing { .. } = self.state_inference {
+            self.mmp_act_hist.push(action);
+        }
+    }
+
+    /// Variational free energy `F` of the current belief state.
+    ///
+    /// - **[`StateInference::MeanField`]** — the exact one-step negative log
+    ///   evidence `F = −ln p(o_t)` of the most recent observation under the
+    ///   pre-update predictive prior (`D` on the first step, else `B[u]·qs`).
+    ///   Exact because the single-factor posterior is exact; for multiple factors
+    ///   it is the one-step negative log evidence under the mean-field prior.
+    ///   Returns `0.0` before the first observation.
+    /// - **[`StateInference::MarginalMessagePassing`]** — the policy-posterior-
+    ///   weighted window free energy `Σ_π q(π) F_π`. `F_π` is computed over the
+    ///   shared observed window (recorded actions), hence identical across
+    ///   policies, so the weighted sum equals the single window value.
+    ///
+    /// Surfaces Smith et al. (2022) Eq. 11/19. See the paper's free-energy
+    /// extensivity discussion (Waade et al. §4.1, extension 11) for the intended
+    /// group-vs-individual comparison this enables.
+    #[must_use]
+    pub fn variational_free_energy(&self) -> f64 {
+        match self.state_inference {
+            StateInference::MeanField => self.meanfield_neg_log_evidence(),
+            StateInference::MarginalMessagePassing { .. } => self.mmp_free_energy,
+        }
+    }
+
+    /// Per-policy variational free energies `F_π`, or `None` under
+    /// [`StateInference::MeanField`].
+    ///
+    /// Under marginal message passing every entry is identical: `F_π` is
+    /// accumulated over the observed window, whose beliefs depend only on the
+    /// recorded (shared) action history, not on the policy's future actions. The
+    /// returned vector is index-aligned with the enumerated policy space
+    /// (`n_actions^policy_depth` entries).
+    #[must_use]
+    pub fn policy_free_energies(&self) -> Option<Vec<f64>> {
+        match self.state_inference {
+            StateInference::MeanField => None,
+            StateInference::MarginalMessagePassing { .. } => {
+                Some(vec![self.mmp_free_energy; self.e_vector.len()])
+            }
+        }
+    }
+
+    /// Bayesian-model-average state marginals `X_τ = Σ_π q(π)·s_{π,τ}` at
+    /// 1-based window position `tau` (MDP.X), or `None` under
+    /// [`StateInference::MeanField`] or for an out-of-range `tau`.
+    ///
+    /// Because the observed-window trajectory is shared across policies, the BMA
+    /// reduces to the smoothed trajectory belief at `tau`. Returns one
+    /// distribution per hidden-state factor. `tau` runs `1..=W` where `W` is the
+    /// current window length.
+    #[must_use]
+    pub fn bma_state_belief(&self, tau: usize) -> Option<Vec<DVector<f64>>> {
+        match self.state_inference {
+            StateInference::MeanField => None,
+            StateInference::MarginalMessagePassing { .. } => {
+                if tau == 0 || tau > self.mmp_traj.len() {
+                    None
+                } else {
+                    Some(self.mmp_traj[tau - 1].clone())
+                }
+            }
+        }
+    }
+
+    /// Clear the trajectory window and per-trial inference state (trial boundary).
+    ///
+    /// Resets `last_action`, restores beliefs to the `D` prior, and empties the
+    /// marginal-message-passing observation/action history, trajectory, and free
+    /// energy. Safe in either inference mode.
+    pub fn reset_window(&mut self) {
+        self.last_action = None;
+        self.beliefs = self.d.clone();
+        self.mmp_obs_hist.clear();
+        self.mmp_act_hist.clear();
+        self.mmp_traj.clear();
+        self.mmp_free_energy = 0.0;
+        self.last_predictive_prior = None;
+        self.last_obs = None;
     }
 }
 
@@ -890,6 +1311,46 @@ fn joint_belief(factors: &[DVector<f64>]) -> DVector<f64> {
     joint
 }
 
+/// Probability floor applied before every `ln` in the marginal-message-passing
+/// path, so near-degenerate messages produce large-but-finite log values instead
+/// of `-inf`/`NaN`. Matches the defensive `1e-10` floors elsewhere in the engine
+/// but is tighter to minimize distortion of the smoothed marginals.
+const LN_FLOOR: f64 = 1e-16;
+
+/// Numerically stable softmax `σ(v)_i = exp(v_i − max v) / Σ_j exp(v_j − max v)`.
+fn softmax(v: &DVector<f64>) -> DVector<f64> {
+    let max = v.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let mut out = v.map(|x| (x - max).exp());
+    let sum = out.sum().max(LN_FLOOR);
+    out /= sum;
+    out
+}
+
+/// Column-normalized transpose `B†` of a column-stochastic transition matrix `B`
+/// (Smith et al. 2022): `B†[i, j] = B[j, i] / Σ_k B[j, k]`. This is the backward
+/// transition used by the marginal-message-passing backward message. A zero row
+/// sum in `B` — reachable for a valid column-stochastic `B` whenever some target
+/// state is never transitioned into (e.g. an absorbing chain's unreached state) —
+/// yields a uniform column to keep the result a proper distribution.
+fn column_normalized_transpose(b: &DMatrix<f64>) -> DMatrix<f64> {
+    let n = b.nrows();
+    let mut bdag = DMatrix::zeros(n, n);
+    for j in 0..n {
+        // Denominator is the sum of row j of B (= column j of Bᵀ).
+        let row_sum: f64 = (0..n).map(|k| b[(j, k)]).sum();
+        if row_sum > LN_FLOOR {
+            for i in 0..n {
+                bdag[(i, j)] = b[(j, i)] / row_sum;
+            }
+        } else {
+            for i in 0..n {
+                bdag[(i, j)] = 1.0 / n as f64;
+            }
+        }
+    }
+    bdag
+}
+
 /// Validate that every column of `m` sums to 1 (± 1e-6) with entries in `[0, 1]`.
 fn validate_column_stochastic(m: &DMatrix<f64>) -> Result<(), AifError> {
     for col in 0..m.ncols() {
@@ -940,6 +1401,33 @@ fn validate_agent_params(params: &AgentParams) -> Result<(), AifError> {
         return Err(AifError::InvalidDistribution(
             "AgentParams.inference_iters must be >= 1".to_owned(),
         ));
+    }
+    // Marginal message passing needs a window at least as long as the policy
+    // horizon and at least one Jacobi sweep.
+    if let StateInference::MarginalMessagePassing { horizon, iters } = params.state_inference {
+        if iters == 0 {
+            return Err(AifError::InvalidDistribution(
+                "StateInference::MarginalMessagePassing.iters must be >= 1".to_owned(),
+            ));
+        }
+        if horizon < params.policy_depth {
+            return Err(AifError::InvalidDistribution(format!(
+                "StateInference::MarginalMessagePassing.horizon ({horizon}) must be \
+                 >= policy_depth ({})",
+                params.policy_depth
+            )));
+        }
+        // A-matrix learning under marginal message passing is out of scope for
+        // 0.7.0 (paper Eq. 34/36 wire learning into trajectory posteriors; tracked
+        // in issue #13). Rejected here — the single re-checkable gate all
+        // constructor paths route through — rather than silently learning from the
+        // smoothed last-node belief.
+        if params.learn_a {
+            return Err(AifError::InvalidDistribution(
+                "A-matrix learning is not supported under MarginalMessagePassing (issue #13)"
+                    .to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -1781,5 +2269,429 @@ mod tests {
             d: vec![vec![0.5, 0.5]],
         };
         assert!(POMDPAgent::from_model(empty_b, params()).is_err());
+    }
+
+    // ----- Stage A (tira #15 + #16): marginal message passing + F accessor -----
+
+    /// Exact smoothed marginals `P(s_τ | o_{1:T})` by brute-force enumeration over
+    /// all `S^T` joint trajectories of a single-factor HMM. This is the reference
+    /// the marginal-message-passing fixed point is measured against.
+    fn brute_force_smoother(
+        b: &DMatrix<f64>,
+        a: &DMatrix<f64>,
+        d: &[f64],
+        obs: &[usize],
+    ) -> Vec<Vec<f64>> {
+        let t = obs.len();
+        let s = d.len();
+        let mut gamma = vec![vec![0.0; s]; t];
+        let mut norm = 0.0;
+        for idx in 0..s.pow(t as u32) {
+            let mut traj = vec![0usize; t];
+            let mut r = idx;
+            for slot in traj.iter_mut() {
+                *slot = r % s;
+                r /= s;
+            }
+            let mut w = d[traj[0]] * a[(obs[0], traj[0])];
+            for k in 1..t {
+                w *= b[(traj[k], traj[k - 1])] * a[(obs[k], traj[k])];
+            }
+            norm += w;
+            for (k, &st) in traj.iter().enumerate() {
+                gamma[k][st] += w;
+            }
+        }
+        for g in &mut gamma {
+            for x in g.iter_mut() {
+                *x /= norm;
+            }
+        }
+        gamma
+    }
+
+    /// Exact smoothed marginals via the forward–backward (sum-product) algorithm,
+    /// which is exact on a chain and must agree with [`brute_force_smoother`].
+    fn forward_backward_smoother(
+        b: &DMatrix<f64>,
+        a: &DMatrix<f64>,
+        d: &[f64],
+        obs: &[usize],
+    ) -> Vec<Vec<f64>> {
+        let t = obs.len();
+        let s = d.len();
+        let lvec = |o: usize| DVector::from_iterator(s, (0..s).map(|st| a[(o, st)]));
+        // forward
+        let mut alpha: Vec<DVector<f64>> = Vec::with_capacity(t);
+        let d0 = DVector::from_column_slice(d);
+        let mut a0 = d0.component_mul(&lvec(obs[0]));
+        a0 /= a0.sum();
+        alpha.push(a0);
+        for k in 1..t {
+            let mut ak = (b * &alpha[k - 1]).component_mul(&lvec(obs[k]));
+            ak /= ak.sum();
+            alpha.push(ak);
+        }
+        // backward
+        let mut beta: Vec<DVector<f64>> = vec![DVector::from_element(s, 1.0); t];
+        for k in (0..t - 1).rev() {
+            let mut bk = b.transpose() * beta[k + 1].component_mul(&lvec(obs[k + 1]));
+            bk /= bk.sum();
+            beta[k] = bk;
+        }
+        (0..t)
+            .map(|k| {
+                let mut g = alpha[k].component_mul(&beta[k]);
+                g /= g.sum();
+                (0..s).map(|x| g[x]).collect()
+            })
+            .collect()
+    }
+
+    /// Single-factor, single-modality agent with an explicit stochastic `B` and
+    /// marginal message passing over `horizon` timesteps.
+    fn mmp_chain_agent(
+        b: DMatrix<f64>,
+        a: DMatrix<f64>,
+        d: Vec<f64>,
+        horizon: usize,
+    ) -> Result<POMDPAgent, AifError> {
+        let n_obs = a.nrows();
+        let model = GenerativeModel {
+            a: vec![a],
+            b: vec![vec![b]],
+            c: vec![vec![0.5; n_obs]],
+            d: vec![d],
+        };
+        POMDPAgent::from_model(
+            model,
+            AgentParams {
+                alpha: 1.0,
+                state_inference: StateInference::MarginalMessagePassing {
+                    horizon,
+                    iters: 1000,
+                },
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn test_mmp_meanfield_depth1_mab_equivalence() -> Result<(), AifError> {
+        // On a MAB the transition B is deterministic, so efe_step's neg-G depends
+        // only on the action (not the belief). MMP and MeanField therefore produce
+        // identical action marginals even though they compute the current belief
+        // differently. F_π is constant across policies in both modes, so Eq. 22
+        // reduces to σ(γ·neg_g)×E either way.
+        let probs = [0.8, 0.4, 0.4];
+        let mut mf = POMDPAgent::new(3, Some(probs.to_vec()), None, vec![0.7, 0.3], None, 0.8, false)?;
+
+        let a = DMatrix::from_row_slice(2, 3, &[
+            probs[0], probs[1], probs[2], //
+            1.0 - probs[0], 1.0 - probs[1], 1.0 - probs[2],
+        ]);
+        let model = GenerativeModel {
+            a: vec![a],
+            b: vec![mab_transitions(3)],
+            c: vec![vec![0.7, 0.3]],
+            d: vec![vec![1.0 / 3.0; 3]],
+        };
+        let mut mmp = POMDPAgent::from_model(
+            model,
+            AgentParams {
+                alpha: 0.8,
+                state_inference: StateInference::MarginalMessagePassing { horizon: 1, iters: 10 },
+                ..Default::default()
+            },
+        )?;
+
+        let obs_seq = [1usize, 0, 1, 0, 1];
+        let act_seq = [0usize, 1, 2, 0, 1];
+        for i in 0..obs_seq.len() {
+            let p_mf = mf.action_probabilities(obs_seq[i]);
+            let p_mmp = mmp.action_probabilities(obs_seq[i]);
+            for k in 0..3 {
+                assert_relative_eq!(p_mf[k], p_mmp[k], epsilon = 1e-12);
+            }
+            mf.record_action(act_seq[i]);
+            mmp.record_action(act_seq[i]);
+        }
+        // MMP surfaces per-policy F; MeanField does not.
+        assert!(mmp.policy_free_energies().is_some());
+        assert!(mf.policy_free_energies().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_mmp_exact_smoother_anchor() -> Result<(), AifError> {
+        // 2-state, 3-step, single-factor, single-modality chain with STOCHASTIC B
+        // and a full observation history o = [0, 1, 0].
+        //   B (col-stochastic) = [[0.9, 0.2], [0.1, 0.8]]
+        //   A (col-stochastic) = [[0.8, 0.3], [0.2, 0.7]]
+        //   D = [0.5, 0.5]
+        //
+        // Exact smoothed marginals (brute force over the 2³ = 8 trajectories,
+        // hand-verified):
+        //   γ₁ = [0.631171, 0.368829]
+        //   γ₂ = [0.566312, 0.433688]
+        //   γ₃ = [0.717135, 0.282865]
+        //
+        // OUTCOME (design decision 6): the ½-weighted Eq. 23 fixed point does NOT
+        // reproduce the exact smoother — the exact smoother is not even a fixed
+        // point of Eq. 23 (a variational, not sum-product, scheme). The MMP
+        // marginals here are
+        //   s₁ = [0.659424, 0.340576]   (err vs exact ≈ 0.028)
+        //   s₂ = [0.331069, 0.668931]   (err vs exact ≈ 0.235)
+        //   s₃ = [0.699195, 0.300805]   (err vs exact ≈ 0.018)
+        // Both Smith variants (½-weighted Eq. 23 and the no-½ Eq. 16 VMP form)
+        // deviate; neither is exact-consistent, so — per the decision-6 contract —
+        // we do NOT loosen a 1e-6 tolerance to a false pass. Instead we pin the
+        // exact reference to 1e-6, pin the MMP fixed point as a regression, and
+        // assert the qualitative smoothing property that IS true: at τ=1 the
+        // window revises the forward-only filter toward the exact posterior.
+        let b = DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8]);
+        let a = DMatrix::from_row_slice(2, 2, &[0.8, 0.3, 0.2, 0.7]);
+        let d = vec![0.5, 0.5];
+        let obs = [0usize, 1, 0];
+
+        // 1. The exact reference: forward–backward == brute force to 1e-6.
+        let brute = brute_force_smoother(&b, &a, &d, &obs);
+        let fb = forward_backward_smoother(&b, &a, &d, &obs);
+        let exact_hand = [
+            [0.631171, 0.368829],
+            [0.566312, 0.433688],
+            [0.717135, 0.282865],
+        ];
+        for tau in 0..3 {
+            for x in 0..2 {
+                assert_relative_eq!(brute[tau][x], fb[tau][x], epsilon = 1e-6);
+                assert_relative_eq!(brute[tau][x], exact_hand[tau][x], epsilon = 1e-5);
+            }
+        }
+
+        // 2. Run the production MMP over the full observation history.
+        let mut agent = mmp_chain_agent(b.clone(), a.clone(), d.clone(), 3)?;
+        agent.action_probabilities(obs[0]);
+        agent.record_action(0);
+        agent.action_probabilities(obs[1]);
+        agent.record_action(0);
+        agent.action_probabilities(obs[2]);
+
+        let s1 = agent.bma_state_belief(1).expect("invariant: MMP window has node 1");
+        let s2 = agent.bma_state_belief(2).expect("invariant: MMP window has node 2");
+        let s3 = agent.bma_state_belief(3).expect("invariant: MMP window has node 3");
+        // Each smoothed marginal is a proper distribution.
+        for s in [&s1, &s2, &s3] {
+            assert_eq!(s.len(), 1);
+            assert_relative_eq!(s[0].sum(), 1.0, epsilon = 1e-9);
+        }
+        // Pinned MMP fixed point (regression on the Eq. 23 variational solution).
+        assert_relative_eq!(s1[0][0], 0.659424, epsilon = 1e-4);
+        assert_relative_eq!(s2[0][0], 0.331069, epsilon = 1e-4);
+        assert_relative_eq!(s3[0][0], 0.699195, epsilon = 1e-4);
+
+        // 3. The MMP fixed point genuinely deviates from the exact smoother
+        //    (documents "NOT exact-consistent" — do not fudge to a 1e-6 pass).
+        assert!(
+            (s2[0][0] - brute[1][0]).abs() > 0.2,
+            "MMP must deviate from the exact smoother at τ=2 (variational, not exact)"
+        );
+
+        // 4. Retrospective smoothing IS in the correct direction at τ=1: the
+        //    forward-only filter P(s₁|o₁) = σ(ln D ⊙ A[o₁]) = [0.727273, 0.272727];
+        //    future observations pull it DOWN toward the exact γ₁ = 0.631171, and
+        //    MMP moves it the same way and lands closer to exact than the filter.
+        let filter_1 = 0.5 * a[(obs[0], 0)] / (0.5 * a[(obs[0], 0)] + 0.5 * a[(obs[0], 1)]);
+        assert_relative_eq!(filter_1, 0.727273, epsilon = 1e-5);
+        assert!(s1[0][0] < filter_1, "MMP τ=1 belief must move away from the filter");
+        assert!(
+            (s1[0][0] - brute[0][0]).abs() < (filter_1 - brute[0][0]).abs(),
+            "MMP τ=1 belief must be closer to the exact smoother than the filter"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_mmp_retrospective_smoothing() -> Result<(), AifError> {
+        // 2-state, 2-step stochastic-B chain: does the τ=2 observation revise the
+        // τ=1 belief toward the truth? o = [0, 1].
+        //   Exact smoother: γ₁ = [0.526316, 0.473684], γ₂ = [0.410526, 0.589474].
+        //   Forward-only filter at τ=1 (o₁ only) = [0.727273, 0.272727].
+        // The τ=2 observation (favouring state 1) pulls the τ=1 belief DOWN from
+        // 0.727 toward the exact 0.526. MMP reproduces the direction and shrinks
+        // the gap relative to the filter (½-weighted Eq. 23; not exact).
+        let b = DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8]);
+        let a = DMatrix::from_row_slice(2, 2, &[0.8, 0.3, 0.2, 0.7]);
+        let d = vec![0.5, 0.5];
+        let obs = [0usize, 1];
+
+        let brute = brute_force_smoother(&b, &a, &d, &obs);
+        assert_relative_eq!(brute[0][0], 0.526316, epsilon = 1e-5);
+        assert_relative_eq!(brute[1][0], 0.410526, epsilon = 1e-5);
+
+        let mut agent = mmp_chain_agent(b.clone(), a.clone(), d.clone(), 2)?;
+        agent.action_probabilities(obs[0]);
+        agent.record_action(0);
+        agent.action_probabilities(obs[1]);
+
+        let s1 = agent.bma_state_belief(1).expect("invariant: node 1");
+        let filter_1 = 0.5 * a[(obs[0], 0)] / (0.5 * a[(obs[0], 0)] + 0.5 * a[(obs[0], 1)]);
+
+        // Direction: the smoothed τ=1 belief moves below the filter (toward truth).
+        assert!(brute[0][0] < filter_1, "exact smoother must revise τ=1 downward");
+        assert!(s1[0][0] < filter_1, "MMP must revise τ=1 downward (same direction)");
+        // Magnitude: MMP closes part of the filter→exact gap (strictly closer).
+        assert!(
+            (s1[0][0] - brute[0][0]).abs() < (filter_1 - brute[0][0]).abs(),
+            "MMP τ=1 belief must be closer to exact than the filter"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_meanfield_free_energy_neg_log_evidence() -> Result<(), AifError> {
+        // Single factor, delta prior D = [1, 0], identity B, A col-stochastic
+        // [[0.9, 0.2], [0.1, 0.8]]. MeanField F = −ln p(oₜ) under the pre-update
+        // predictive prior:
+        //   Step 1: predictive prior = D = [1, 0]; p(o=0) = A[0,0] = 0.9;
+        //           F = −ln 0.9 = 0.1053605.
+        //   Step 2: predictive prior = B·[1,0] = [1, 0]; p(o=1) = A[1,0] = 0.1;
+        //           F = −ln 0.1 = 2.3025851.
+        let model = GenerativeModel {
+            a: vec![DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8])],
+            b: vec![vec![DMatrix::identity(2, 2)]],
+            c: vec![vec![0.5, 0.5]],
+            d: vec![vec![1.0, 0.0]],
+        };
+        let mut agent = POMDPAgent::from_model(
+            model,
+            AgentParams { alpha: 1.0, ..Default::default() },
+        )?;
+        // No observation yet → 0.0.
+        assert_relative_eq!(agent.variational_free_energy(), 0.0, epsilon = 1e-12);
+
+        agent.action_probabilities(0);
+        assert_relative_eq!(agent.variational_free_energy(), -0.9_f64.ln(), epsilon = 1e-9);
+        agent.record_action(0);
+        agent.action_probabilities(1);
+        assert_relative_eq!(agent.variational_free_energy(), -0.1_f64.ln(), epsilon = 1e-9);
+
+        // MeanField exposes no per-policy F or BMA.
+        assert!(agent.policy_free_energies().is_none());
+        assert!(agent.bma_state_belief(1).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_mmp_policy_free_energy_independence() -> Result<(), AifError> {
+        // Depth-1 MMP agent, 2 states, 2 stochastic controls. F_π is accumulated
+        // over the observed window (shared, recorded-action history), so every
+        // per-policy F is identical.
+        let model = GenerativeModel {
+            a: vec![DMatrix::from_row_slice(2, 2, &[0.8, 0.3, 0.2, 0.7])],
+            b: vec![vec![
+                DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8]),
+                DMatrix::from_row_slice(2, 2, &[0.6, 0.5, 0.4, 0.5]),
+            ]],
+            c: vec![vec![0.5, 0.5]],
+            d: vec![vec![0.5, 0.5]],
+        };
+        let mut agent = POMDPAgent::from_model(
+            model,
+            AgentParams {
+                alpha: 1.0,
+                state_inference: StateInference::MarginalMessagePassing { horizon: 2, iters: 500 },
+                ..Default::default()
+            },
+        )?;
+        agent.action_probabilities(0);
+        agent.record_action(0);
+        agent.action_probabilities(1);
+
+        let fpi = agent.policy_free_energies().expect("invariant: MMP surfaces F_π");
+        assert_eq!(fpi.len(), agent.n_actions()); // depth 1 → n_policies = n_actions
+        for &f in &fpi {
+            assert_relative_eq!(f, fpi[0], epsilon = 1e-12);
+        }
+        // The scalar accessor is the (trivially) policy-weighted window F.
+        assert_relative_eq!(agent.variational_free_energy(), fpi[0], epsilon = 1e-12);
+        assert!(agent.variational_free_energy().is_finite());
+        Ok(())
+    }
+
+    #[test]
+    fn test_mmp_bma_and_reset_window() -> Result<(), AifError> {
+        let b = DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8]);
+        let a = DMatrix::from_row_slice(2, 2, &[0.8, 0.3, 0.2, 0.7]);
+        let mut agent = mmp_chain_agent(b, a, vec![0.5, 0.5], 3)?;
+
+        agent.action_probabilities(0);
+        agent.record_action(0);
+        agent.action_probabilities(1);
+
+        // BMA sanity: one factor, valid distribution, 1-based τ, out-of-range None.
+        let x1 = agent.bma_state_belief(1).expect("invariant: node 1 present");
+        let x2 = agent.bma_state_belief(2).expect("invariant: node 2 present");
+        assert_eq!(x1.len(), 1);
+        assert_relative_eq!(x1[0].sum(), 1.0, epsilon = 1e-9);
+        assert_relative_eq!(x2[0].sum(), 1.0, epsilon = 1e-9);
+        assert!(agent.bma_state_belief(0).is_none());
+        assert!(agent.bma_state_belief(3).is_none());
+
+        // reset_window clears the trajectory and history.
+        agent.reset_window();
+        assert!(agent.bma_state_belief(1).is_none());
+        assert_relative_eq!(agent.variational_free_energy(), 0.0, epsilon = 1e-12);
+
+        // The agent is reusable after reset (fresh trial).
+        agent.action_probabilities(1);
+        assert!(agent.bma_state_belief(1).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn test_mmp_validation_rejections() {
+        let base = || GenerativeModel {
+            a: vec![DMatrix::from_row_slice(2, 2, &[0.8, 0.3, 0.2, 0.7])],
+            b: vec![vec![DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8])]],
+            c: vec![vec![0.5, 0.5]],
+            d: vec![vec![0.5, 0.5]],
+        };
+
+        // horizon < policy_depth.
+        let short_horizon = POMDPAgent::from_model(
+            base(),
+            AgentParams {
+                alpha: 1.0,
+                policy_depth: 2,
+                state_inference: StateInference::MarginalMessagePassing { horizon: 1, iters: 5 },
+                ..Default::default()
+            },
+        );
+        assert!(matches!(short_horizon, Err(AifError::InvalidDistribution(_))));
+
+        // iters == 0.
+        let zero_iters = POMDPAgent::from_model(
+            base(),
+            AgentParams {
+                alpha: 1.0,
+                state_inference: StateInference::MarginalMessagePassing { horizon: 2, iters: 0 },
+                ..Default::default()
+            },
+        );
+        assert!(matches!(zero_iters, Err(AifError::InvalidDistribution(_))));
+
+        // Learning is out of scope under MMP (issue #13).
+        let learn_mmp = POMDPAgent::from_model(
+            base(),
+            AgentParams {
+                alpha: 1.0,
+                learn_a: true,
+                initial_precision: Some(vec![1.0, 1.0]),
+                state_inference: StateInference::MarginalMessagePassing { horizon: 2, iters: 5 },
+                ..Default::default()
+            },
+        );
+        assert!(matches!(learn_mmp, Err(AifError::InvalidDistribution(_))));
     }
 }

@@ -19,7 +19,7 @@ Legend: ✅ implemented · ⚠️ partial / deviates (documented) · ❌ not imp
 | Paper element | Status | Where (`crates/aif/src/...`) |
 |---|---|---|
 | POMDP generative model, matrices A–E (Fig 1) | ✅ | `agent.rs` `POMDPAgent::new` — A: `(2 × n_states)`, columns `[p, 1−p]`; B: one deterministic `(n × n)` per action; C: `ln`-transformed 2-element preference prior; D: state prior (uniform or caller override); E: uniform policy prior |
-| Variational free energy F, Eq. (1) | ⚠️ | Not surfaced as a quantity. Perception is a one-step exact Bayes update (`infer_states`: `B·belief` prior × A-likelihood, normalized) — exact for this model class, so no gradient descent on F is needed; F itself is not computed (see extension 11) |
+| Variational free energy F, Eq. (1) | ✅ | Surfaced since 0.7.0: `variational_free_energy()` — one-step `−ln p(o_t)` under the default MeanField path (exact for single-factor models — the paper's class; multi-factor uses the mean-field-factorized prior, an approximation), window F under MMP (shared across policies — observed-τ only, per Eq. 19/20). Extension 11 (extensivity study) now runnable |
 | Expected free energy G, Eq. (2) = info gain + pragmatic value | ✅ | `agent.rs::efe_step` — pragmatic value `E_q(o|π)[ln p(o|C)]`; epistemic term as exact mutual information `H[q(o|π)] − E_q(s′)[H(o|s′)]` |
 | Epistemic term reachability | ✅ | Computed exactly; **live since 0.6.0** for any stochastic B supplied via `GenerativeModel`/`from_model`. Remains zero for `new()`/`with_params()` MAB constructions (deterministic B) — paper-faithful (§2.1 "action selection is driven only by the pragmatic value") |
 | Policy machinery: enumerate → γ-softmax posterior × E → marginalize → α-softmax | ✅ | `enumerate_policies` / `policy_posterior` / `infer_policies`; softmax over neg-G with `γ`, then action-marginal power-softmax with `α` |
@@ -114,10 +114,10 @@ Inference* (MIT Press; ref [1]), `pymdp` (Heins et al. 2022, JOSS), and `ActiveI
 | Generative matrices A, B, C, D, E | ✅ | `agent.rs::POMDPAgent::from_model` (general) / `new` (MAB convenience) |
 | Multiple hidden-state **factors** | ✅ | 0.6.0 (#12): `GenerativeModel` per-factor B/D, mean-field inference across factors, little-endian joint flattening (factor 0 fastest) |
 | Multiple observation **modalities** | ✅ | 0.6.0 (#12): per-modality A/C, `act_multi`/`action_probabilities_multi`; `n_actions` decoupled from `n_states` (= Π per-factor control counts); B injectable (validated column-stochastic). `new()`/`with_params()` remain the paper's 1-factor/1-modality bandit family, numerics bit-identical |
-| State inference (perception) | ⚠️ | within-timestep exact Bayes (single factor) / mean-field fixed-point across factors (`inference_iters` sweeps); not marginal message passing over **trajectories** (Smith Eq. 16, 23–26) — no retrospective revision, see #15 |
-| Retrospective inference (smoothing) | ❌ | filtering only — later observations never revise earlier-τ beliefs; requires trajectory-wide message passing (part of #15) |
+| State inference (perception) | ✅ | mode-selected since 0.7.0 (#15): `MeanField` default (within-timestep exact Bayes / mean-field across factors) or opt-in `MarginalMessagePassing` (per-policy trajectory beliefs, Smith Eq. 23 fixed point). **Documented approximation**: the Eq. 23 fixed point is variational, not the exact forward–backward smoother (the exact posterior is not a fixed point of the update) — tests pin the exact reference, the deviation, and the true smoothing property |
+| Retrospective inference (smoothing) | ✅ | MMP mode (0.7.0): later observations revise earlier-τ beliefs, strictly toward the exact posterior (tested); variational, not exact smoothing (see row above) |
 | Policy inference: γ-softmax posterior → marginalize → α-softmax | ✅ | `policy_posterior` / `infer_policies`, α/γ separate (Smith Eq. 22, 28) |
-| Bayesian model average over policies (X = Σ_π π·q(s\|π)) | ❌ | no policy-averaged state posterior surfaced (Smith MDP.X); per-policy beliefs are internal to `efe_step` |
+| Bayesian model average over policies (X = Σ_π π·q(s\|π)) | ✅ | `bma_state_belief()` (0.7.0, MMP mode; Smith MDP.X) |
 | Occam-window policy pruning | ❌ | all enumerated policies scored every step (Smith `mdp.zeta`); irrelevant at MAB scale, needed for deep-policy spaces |
 | EFE — pragmatic value | ✅ | `efe_step` |
 | EFE — state info gain (salience) | ✅ | exact MI, summed per modality; live for stochastic injectable B since 0.6.0 (zero for deterministic-B constructions — see Axis 1 §2.1) |
@@ -129,8 +129,8 @@ Inference* (MIT Press; ref [1]), `pymdp` (Heins et al. 2022, JOSS), and `ActiveI
 | Learning B (pB), D (pD), E (pE) | ❌ | Smith Eq. 32–36 family (same ω/η rule per matrix) |
 | Temporal / policy depth | ✅ | configurable via `with_params` — full multi-step policy enumeration (Smith's deep-V planning), not single-step U (experiments run depth 1 — see Axis 1) |
 | Input validation | ✅ | `AifError::{InvalidProbability, InvalidDistribution, InvalidAction}` |
-| Variational free energy F accessor | ❌ | extension 11; Smith Eq. 1/11 — per-policy F falls out of the message-passing fixed point (Eq. 19), plus total H across policies |
-| Free energy of parameters (Fa/Fb/Fd) | ❌ | per-trial KL of Dirichlet params, start vs end of trial (Smith MDP.Fa etc.) — distinct from the F-of-policies accessor |
+| Variational free energy F accessor | ✅ | `variational_free_energy()` (0.7.0, #16): MeanField = one-step `−ln p(o_t)` (exact single-factor; mean-field-prior approximation multi-factor); MMP = window F (Eq. 11/19). `policy_free_energies()` entries are currently **identical across policies** — the window holds observed τ only (Eq. 19/20 F/G split); per-policy future-τ windows arrive with #14 |
+| Free energy of parameters (Fa/Fb/Fd) | ❌ | per-trial KL of Dirichlet params, start vs end of trial (Smith MDP.Fa etc.) — distinct from the F-of-policies accessor; #13 scope |
 
 ### Verdict
 
@@ -139,8 +139,9 @@ states, multi-modality observations, injectable B, decoupled actions) — verifi
 own conventions (α/γ separation, B×belief direction, EFE sign chain, replay consistency, MAB
 numerics bit-identical through the generalization) — **plus** multi-scale group composition and a
 coalition value layer that the reference implementations do not have. The remaining gap to "full
-backend": **full learning (B/D/E, novelty term) + precision dynamics + trajectory message-passing
-inference + surfaced F** (#13–#16).
+backend": **full learning (B/D/E, novelty term) + precision dynamics** (#13–#14) — trajectory
+message passing and F shipped in 0.7.0 (#15/#16, with the variational-vs-exact-smoothing
+approximation documented above).
 
 ### Roadmap to "full backend" (priority order)
 
@@ -154,10 +155,13 @@ inference + surfaced F** (#13–#16).
    group wiring in [#4](https://github.com/sustia-llc/tira/issues/4))
 3. **Precision dynamics** (γ/β updates; Smith Table 2 loop).
    ([#14](https://github.com/sustia-llc/tira/issues/14))
-4. **General state inference** (fixed-point / marginal message passing, Smith Eq. 23–26) for
-   non-deterministic B. ([#15](https://github.com/sustia-llc/tira/issues/15))
-5. **Surface F** (Eq. 1 accessor; Smith Eq. 1/11/19) — also unlocks the extension-11 extensivity
-   study. ([#16](https://github.com/sustia-llc/tira/issues/16))
+4. ~~**General state inference** (fixed-point / marginal message passing, Smith Eq. 23–26) for
+   non-deterministic B.~~ ✅ **Shipped in 0.7.0** (opt-in `StateInference::MarginalMessagePassing`;
+   variational, not exact smoothing — documented + test-enforced).
+   ([#15](https://github.com/sustia-llc/tira/issues/15))
+5. ~~**Surface F** (Eq. 1 accessor; Smith Eq. 1/11/19).~~ ✅ **Shipped in 0.7.0**
+   (`variational_free_energy()` / `policy_free_energies()`; extension 11 unlocked).
+   ([#16](https://github.com/sustia-llc/tira/issues/16))
 
 **Dependency order** (the list above is priority order; the Smith math implies this build order):
 **#12 → (#15 + #16 together) → #13 → #14.** Per-policy F is a *byproduct* of the

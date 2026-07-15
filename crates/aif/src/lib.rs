@@ -7,7 +7,7 @@ mod coalition;
 mod communication;
 mod group;
 
-pub use agent::{Agent, CopyAgent, POMDPAgent};
+pub use agent::{Agent, AgentParams, CopyAgent, GenerativeModel, POMDPAgent, StateInference};
 pub use coalition::{
     AgentId, CoalitionHistory, CompatibilityBeliefs, ObsPrecisionParams, TrustBeliefs,
     belief_weighted_preference, competence_efe,

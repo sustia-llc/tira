@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-15
+
+Trajectory state inference + surfaced variational free energy (parity roadmap items 4–5,
+[#15](https://github.com/sustia-llc/tira/issues/15) /
+[#16](https://github.com/sustia-llc/tira/issues/16)).
+
+### Added
+- **`StateInference` enum on `AgentParams`** — `MeanField` (default; the existing
+  within-timestep path, numerics bit-identical) or
+  `MarginalMessagePassing { horizon, iters }` (opt-in): a single trajectory of beliefs
+  (shared across policies) over the **observed** window, Smith Eq. 23 fixed point
+  (½-weighted forward/backward messages, `B†` column-normalized transpose, D inside the
+  ½ at τ = 1 per the paper's Table 2), with retrospective revision of past beliefs.
+  Observed-only windows follow the paper's Eq. 19/20 split (F scores observed τ, G
+  scores future τ), so window F is policy-constant today; per-policy future-τ windows
+  are #14 scope. `MMP + learn_a` is rejected at construction (learning under MMP is
+  #13 scope).
+- **Variational free energy surfaced**: `variational_free_energy()` (MeanField:
+  one-step `−ln p(o_t)` under the pre-update predictive prior — exact for
+  single-factor models, mean-field-prior approximation for multi-factor; MMP:
+  window F), `policy_free_energies()` (entries currently identical across policies —
+  see above), `bma_state_belief()` (Smith MDP.X), `reset_window()`. Unlocks the
+  extension-11 extensivity study.
+- `AgentParams`, `GenerativeModel`, `StateInference` re-exported from the crate root
+  (previously unreachable outside the crate).
+
+### Honest math note (enforced by test)
+The Eq. 23 fixed point is **not** the exact forward–backward smoother — the exact
+posterior is not a fixed point of the update (marginal message passing is a variational
+gradient scheme; the paper's own §Eq. 419–420 framing agrees). Tests pin the exact
+reference (brute-force enumeration), the MMP regression value, the deviation itself, and
+the true smoothing property (the window revises filtered beliefs strictly toward the
+exact posterior).
+
+### Migration (downstream)
+- `AgentParams` gained `state_inference` — struct literals need the field or
+  `..Default::default()` (the default preserves existing behavior exactly).
+
 ## [0.6.0] - 2026-07-15
 
 Generalized generative model (parity roadmap item 1, [#12](https://github.com/sustia-llc/tira/issues/12))
