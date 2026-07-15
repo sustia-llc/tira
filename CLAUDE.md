@@ -31,7 +31,7 @@ the coalition-value primitive `competence_efe` (koalisi currently pins git tag
 `aif-v0.5.0`; `aif-v0.6.0` is the current release — parity item #12 landed: multi-factor,
 multi-modality, injectable B via `GenerativeModel`/`from_model`).
 
-- **83 tests** (82 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
+- **84 tests** (83 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
 - `cargo run --release -p reproduce --bin reproduce` — full reproduction in ~16s
 
 ## Module map

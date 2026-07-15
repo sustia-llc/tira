@@ -367,8 +367,14 @@ impl CoalitionHistory {
     }
 
     /// Record `performance` for the coalition `members` (overwrites any prior value).
+    /// Clamped to `[0.0, 1.0]` on write, matching the Trust/Compat write-side clamps
+    /// (NaN is rejected as a no-op rather than stored).
     pub fn record(&mut self, members: &[AgentId], performance: f64) {
-        self.history.insert(Self::key(members), performance);
+        if performance.is_nan() {
+            return;
+        }
+        self.history
+            .insert(Self::key(members), performance.clamp(0.0, 1.0));
     }
 
     /// Recorded performance for `members`, if any (membership order-insensitive).
@@ -436,6 +442,15 @@ mod tests {
         // Overwrite.
         h.record(&[0, 1, 2], 0.9);
         assert_eq!(h.get(&[0, 1, 2]), Some(0.9));
+
+        // Write-side clamp to [0, 1] (matches Trust/Compat write paths).
+        h.record(&[3, 4], 1.5);
+        assert_eq!(h.get(&[3, 4]), Some(1.0));
+        h.record(&[3, 4], -0.3);
+        assert_eq!(h.get(&[3, 4]), Some(0.0));
+        // NaN is a no-op, not a stored value.
+        h.record(&[3, 4], f64::NAN);
+        assert_eq!(h.get(&[3, 4]), Some(0.0));
     }
 
     #[test]

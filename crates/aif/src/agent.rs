@@ -274,6 +274,16 @@ impl POMDPAgent {
             alpha,
             learn_a,
         )?;
+        // gamma/policy_depth are set after construction here, bypassing from_model's
+        // params check — re-validate the overridden values before applying them.
+        validate_agent_params(&AgentParams {
+            alpha,
+            gamma,
+            policy_depth,
+            learn_a,
+            initial_precision: None,
+            inference_iters: agent.inference_iters,
+        })?;
         agent.gamma = gamma;
         agent.policy_depth = policy_depth;
 
@@ -298,6 +308,7 @@ impl POMDPAgent {
     pub fn from_model(model: GenerativeModel, params: AgentParams) -> Result<Self, AifError> {
         let GenerativeModel { a, b, c, d } = model;
 
+        validate_agent_params(&params)?;
         if a.is_empty() || b.is_empty() || c.is_empty() || d.is_empty() {
             return Err(AifError::InvalidAction(0));
         }
@@ -901,6 +912,38 @@ fn validate_column_stochastic(m: &DMatrix<f64>) -> Result<(), AifError> {
     Ok(())
 }
 
+/// Validate the [`AgentParams`] domain: `alpha` must be finite and >= 0 (0 = uniform
+/// action selection — the recovery grid's lower bound; a NEGATIVE `alpha` silently
+/// inverts action preferences through the power softmax), `gamma` finite and > 0,
+/// `policy_depth` >= 1 (depth 0 enumerates empty policies and panics on action
+/// marginalization), and `inference_iters` >= 1 (zero sweeps would skip the
+/// multi-factor belief update).
+fn validate_agent_params(params: &AgentParams) -> Result<(), AifError> {
+    if !params.alpha.is_finite() || params.alpha < 0.0 {
+        return Err(AifError::InvalidDistribution(format!(
+            "AgentParams.alpha must be finite and >= 0.0, got {}",
+            params.alpha
+        )));
+    }
+    if !params.gamma.is_finite() || params.gamma <= 0.0 {
+        return Err(AifError::InvalidDistribution(format!(
+            "AgentParams.gamma must be finite and > 0.0, got {}",
+            params.gamma
+        )));
+    }
+    if params.policy_depth == 0 {
+        return Err(AifError::InvalidDistribution(
+            "AgentParams.policy_depth must be >= 1".to_owned(),
+        ));
+    }
+    if params.inference_iters == 0 {
+        return Err(AifError::InvalidDistribution(
+            "AgentParams.inference_iters must be >= 1".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate that `v` is a distribution: finite, non-negative, summing to 1 (± 1e-6).
 fn validate_distribution(v: &[f64]) -> Result<(), AifError> {
     let mut sum = 0.0;
@@ -1004,6 +1047,40 @@ mod tests {
             matches!(non_positive, Err(AifError::InvalidProbability(_))),
             "Should reject preference <= 0.0"
         );
+    }
+
+    #[test]
+    fn test_constructors_reject_degenerate_agent_params() {
+        // policy_depth = 0 would enumerate empty policies and panic on the
+        // action marginalization; must be rejected at construction.
+        let depth0 =
+            POMDPAgent::with_params(3, None, None, vec![0.7, 0.3], None, 1.0, 16.0, 0, false);
+        assert!(matches!(depth0, Err(AifError::InvalidDistribution(_))));
+
+        // Negative alpha inverts action preferences via the power softmax.
+        let neg_alpha = POMDPAgent::new(3, None, None, vec![0.7, 0.3], None, -1.0, false);
+        assert!(matches!(neg_alpha, Err(AifError::InvalidDistribution(_))));
+
+        // NaN / infinite precisions poison every downstream softmax.
+        let nan_alpha = POMDPAgent::new(3, None, None, vec![0.7, 0.3], None, f64::NAN, false);
+        assert!(matches!(nan_alpha, Err(AifError::InvalidDistribution(_))));
+        let inf_gamma = POMDPAgent::with_params(
+            3,
+            None,
+            None,
+            vec![0.7, 0.3],
+            None,
+            1.0,
+            f64::INFINITY,
+            1,
+            false,
+        );
+        assert!(matches!(inf_gamma, Err(AifError::InvalidDistribution(_))));
+
+        // alpha = 0.0 stays constructible: it is the recovery grid's lower bound
+        // (uniform action selection, well-defined).
+        let alpha0 = POMDPAgent::new(3, None, None, vec![0.7, 0.3], None, 0.0, false);
+        assert!(alpha0.is_ok());
     }
 
     #[test]

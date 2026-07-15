@@ -32,6 +32,12 @@ plus coalition-surface cleanup ([#1](https://github.com/sustia-llc/tira/issues/1
   B (previously structurally zero for every constructible agent).
 - `act_multi` / `action_probabilities_multi` (per-modality observations) and accessors
   `state_beliefs` / `n_actions` / `n_modalities` / `n_factors`.
+- **Constructor parameter validation** (review finding, issue #6's α/γ/depth half): all
+  three constructors now reject negative/non-finite `alpha` (α = 0 stays valid — the
+  recovery grid's lower bound), non-finite or ≤ 0 `gamma`, `policy_depth = 0`
+  (previously a guaranteed panic at the first `act()`), and `inference_iters = 0`.
+  `CoalitionHistory::record` clamps performance to `[0, 1]` on write (NaN = no-op),
+  matching the Trust/Compat write paths.
 - **`ObsPrecisionParams::transition_noise`** — opt-in stochastic-B bridge POMDP in
   `competence_efe` (mass `1−ε` to the selected state), making the info-gain term live in
   the coalition value. Honest sign note: G **rises** with noise across most of the
