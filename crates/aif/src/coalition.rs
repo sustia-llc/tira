@@ -195,6 +195,7 @@ pub fn competence_efe(competence: f64, params: ObsPrecisionParams) -> Result<f64
             learn_a: false,
             initial_precision: None,
             inference_iters: 10,
+            ..Default::default()
         };
         let agent = POMDPAgent::from_model(model, params)?;
         return Ok(agent.expected_free_energy());
