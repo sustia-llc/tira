@@ -11,15 +11,20 @@ Trajectory state inference + surfaced variational free energy (parity roadmap it
 ### Added
 - **`StateInference` enum on `AgentParams`** — `MeanField` (default; the existing
   within-timestep path, numerics bit-identical) or
-  `MarginalMessagePassing { horizon, iters }` (opt-in): per-policy trajectory beliefs
-  over an observation window, Smith Eq. 23 fixed point (½-weighted forward/backward
-  messages, `B†` column-normalized transpose, D at τ = 1), with retrospective revision
-  of past beliefs. `MMP + learn_a` is rejected at construction (learning under MMP is
+  `MarginalMessagePassing { horizon, iters }` (opt-in): a single trajectory of beliefs
+  (shared across policies) over the **observed** window, Smith Eq. 23 fixed point
+  (½-weighted forward/backward messages, `B†` column-normalized transpose, D inside the
+  ½ at τ = 1 per the paper's Table 2), with retrospective revision of past beliefs.
+  Observed-only windows follow the paper's Eq. 19/20 split (F scores observed τ, G
+  scores future τ), so window F is policy-constant today; per-policy future-τ windows
+  are #14 scope. `MMP + learn_a` is rejected at construction (learning under MMP is
   #13 scope).
-- **Variational free energy surfaced**: `variational_free_energy()` (MeanField: exact
-  one-step `−ln p(o_t)` under the pre-update predictive prior; MMP: policy-weighted
-  window F), `policy_free_energies()`, `bma_state_belief()` (Smith MDP.X),
-  `reset_window()`. Unlocks the extension-11 extensivity study.
+- **Variational free energy surfaced**: `variational_free_energy()` (MeanField:
+  one-step `−ln p(o_t)` under the pre-update predictive prior — exact for
+  single-factor models, mean-field-prior approximation for multi-factor; MMP:
+  window F), `policy_free_energies()` (entries currently identical across policies —
+  see above), `bma_state_belief()` (Smith MDP.X), `reset_window()`. Unlocks the
+  extension-11 extensivity study.
 - `AgentParams`, `GenerativeModel`, `StateInference` re-exported from the crate root
   (previously unreachable outside the crate).
 

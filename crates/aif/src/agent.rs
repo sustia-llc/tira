@@ -79,11 +79,19 @@ pub struct GenerativeModel {
 ///   exact one-step negative log evidence `−ln p(o_t)` under the pre-update
 ///   predictive prior. [`POMDPAgent::policy_free_energies`] and
 ///   [`POMDPAgent::bma_state_belief`] return `None`.
-/// - **`MarginalMessagePassing`** — per-trial trajectory beliefs over a sliding
-///   window of the last `horizon` observed timesteps, iterated to the Eq. 23
-///   (Smith, Friston & Whyte 2022) fixed point with `iters` Jacobi sweeps.
-///   Enables retrospective smoothing, a policy-posterior-weighted variational
-///   free energy, per-policy `F`, and Bayesian-model-average state marginals.
+/// - **`MarginalMessagePassing`** — a single trajectory of beliefs (shared across
+///   policies) over a sliding window of the last `horizon` **observed** timesteps,
+///   iterated to the Eq. 23 (Smith, Friston & Whyte 2022) fixed point with `iters`
+///   Jacobi sweeps. Enables retrospective smoothing, a window variational free
+///   energy, and Bayesian-model-average state marginals. The window holds observed
+///   timesteps only, matching the paper's Eq. 19/20 split (F scores observed τ,
+///   G scores hypothesized future τ) — so `F` is identical across policies today;
+///   per-policy future-τ windows (which would make `F_π` genuinely policy-varying)
+///   arrive with the precision-dynamics work (#14).
+///   Window contract: callers must alternate exactly one
+///   `act`/`action_probabilities*` call with one recorded action per timestep;
+///   "peeking" (repeated inference without `record_action`) desynchronizes the
+///   observation/action histories.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum StateInference {
     /// Within-timestep filtering (pre-0.7.0 behavior; the default).
@@ -446,19 +454,6 @@ impl POMDPAgent {
         {
             return Err(AifError::InvalidAction(prec.len()));
         }
-        // A-matrix learning under marginal message passing is out of scope for
-        // 0.7.0 (paper Eq. 34/36 wire learning into trajectory posteriors; tracked
-        // in issue #13). Reject the combination rather than silently learn from the
-        // smoothed last-node belief.
-        if params.learn_a
-            && matches!(params.state_inference, StateInference::MarginalMessagePassing { .. })
-        {
-            return Err(AifError::InvalidDistribution(
-                "A-matrix learning is not supported under MarginalMessagePassing (issue #13)"
-                    .to_owned(),
-            ));
-        }
-
         let n_actions: usize = n_controls.iter().product();
         let e_len = if params.policy_depth > 1 {
             n_actions.pow(params.policy_depth as u32)
@@ -778,8 +773,13 @@ impl POMDPAgent {
     /// Iterates `iters` Jacobi sweeps over window nodes `τ = 1..W` and factors:
     /// `s_{τ,f} = σ(½(ln fwd_{τ,f} + ln bwd_{τ,f}) + E[ln L_{τ,f}])`, where the
     /// backward term is omitted at the last node (`½ ln fwd` there), `D_f`
-    /// replaces the forward message at the first node, and every window node
-    /// carries an observation term (the window holds only observed timesteps).
+    /// replaces the forward message at the first node (inside the ½, per the
+    /// paper's Table 2 τ=1 form), and every window node carries an observation
+    /// term (the window holds only observed timesteps). Note: the paper is silent
+    /// on the last-node weighting when no backward message exists; keeping the ½
+    /// on the lone forward term is an interpretive choice (the JAX pymdp
+    /// reimplementation uses full weight there) — a documented design decision,
+    /// not Eq. 23 verbatim.
     /// Early exit on max-abs-change `< 1e-8`. Sets `self.beliefs` to the smoothed
     /// belief at the current (last) node and records the window free energy and
     /// trajectory for the public accessors.
@@ -1329,8 +1329,9 @@ fn softmax(v: &DVector<f64>) -> DVector<f64> {
 /// Column-normalized transpose `B†` of a column-stochastic transition matrix `B`
 /// (Smith et al. 2022): `B†[i, j] = B[j, i] / Σ_k B[j, k]`. This is the backward
 /// transition used by the marginal-message-passing backward message. A zero row
-/// sum in `B` (unreachable for a valid column-stochastic `B`) yields a uniform
-/// column to keep the result a proper distribution.
+/// sum in `B` — reachable for a valid column-stochastic `B` whenever some target
+/// state is never transitioned into (e.g. an absorbing chain's unreached state) —
+/// yields a uniform column to keep the result a proper distribution.
 fn column_normalized_transpose(b: &DMatrix<f64>) -> DMatrix<f64> {
     let n = b.nrows();
     let mut bdag = DMatrix::zeros(n, n);
@@ -1415,6 +1416,17 @@ fn validate_agent_params(params: &AgentParams) -> Result<(), AifError> {
                  >= policy_depth ({})",
                 params.policy_depth
             )));
+        }
+        // A-matrix learning under marginal message passing is out of scope for
+        // 0.7.0 (paper Eq. 34/36 wire learning into trajectory posteriors; tracked
+        // in issue #13). Rejected here — the single re-checkable gate all
+        // constructor paths route through — rather than silently learning from the
+        // smoothed last-node belief.
+        if params.learn_a {
+            return Err(AifError::InvalidDistribution(
+                "A-matrix learning is not supported under MarginalMessagePassing (issue #13)"
+                    .to_owned(),
+            ));
         }
     }
     Ok(())

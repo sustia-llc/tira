@@ -19,7 +19,7 @@ Legend: ✅ implemented · ⚠️ partial / deviates (documented) · ❌ not imp
 | Paper element | Status | Where (`crates/aif/src/...`) |
 |---|---|---|
 | POMDP generative model, matrices A–E (Fig 1) | ✅ | `agent.rs` `POMDPAgent::new` — A: `(2 × n_states)`, columns `[p, 1−p]`; B: one deterministic `(n × n)` per action; C: `ln`-transformed 2-element preference prior; D: state prior (uniform or caller override); E: uniform policy prior |
-| Variational free energy F, Eq. (1) | ✅ | Surfaced since 0.7.0: `variational_free_energy()` — exact one-step `−ln p(o_t)` under the default MeanField path (perception is exact Bayes for this model class, so F equals the negative log evidence), per-policy window F under MMP. Extension 11 (extensivity study) now runnable |
+| Variational free energy F, Eq. (1) | ✅ | Surfaced since 0.7.0: `variational_free_energy()` — one-step `−ln p(o_t)` under the default MeanField path (exact for single-factor models — the paper's class; multi-factor uses the mean-field-factorized prior, an approximation), window F under MMP (shared across policies — observed-τ only, per Eq. 19/20). Extension 11 (extensivity study) now runnable |
 | Expected free energy G, Eq. (2) = info gain + pragmatic value | ✅ | `agent.rs::efe_step` — pragmatic value `E_q(o|π)[ln p(o|C)]`; epistemic term as exact mutual information `H[q(o|π)] − E_q(s′)[H(o|s′)]` |
 | Epistemic term reachability | ✅ | Computed exactly; **live since 0.6.0** for any stochastic B supplied via `GenerativeModel`/`from_model`. Remains zero for `new()`/`with_params()` MAB constructions (deterministic B) — paper-faithful (§2.1 "action selection is driven only by the pragmatic value") |
 | Policy machinery: enumerate → γ-softmax posterior × E → marginalize → α-softmax | ✅ | `enumerate_policies` / `policy_posterior` / `infer_policies`; softmax over neg-G with `γ`, then action-marginal power-softmax with `α` |
@@ -129,7 +129,7 @@ Inference* (MIT Press; ref [1]), `pymdp` (Heins et al. 2022, JOSS), and `ActiveI
 | Learning B (pB), D (pD), E (pE) | ❌ | Smith Eq. 32–36 family (same ω/η rule per matrix) |
 | Temporal / policy depth | ✅ | configurable via `with_params` — full multi-step policy enumeration (Smith's deep-V planning), not single-step U (experiments run depth 1 — see Axis 1) |
 | Input validation | ✅ | `AifError::{InvalidProbability, InvalidDistribution, InvalidAction}` |
-| Variational free energy F accessor | ✅ | `variational_free_energy()` (0.7.0, #16): MeanField = exact one-step `−ln p(o_t)`; MMP = policy-weighted window F (Eq. 11/19); `policy_free_energies()` per policy. Unlocks extension 11 |
+| Variational free energy F accessor | ✅ | `variational_free_energy()` (0.7.0, #16): MeanField = one-step `−ln p(o_t)` (exact single-factor; mean-field-prior approximation multi-factor); MMP = window F (Eq. 11/19). `policy_free_energies()` entries are currently **identical across policies** — the window holds observed τ only (Eq. 19/20 F/G split); per-policy future-τ windows arrive with #14 |
 | Free energy of parameters (Fa/Fb/Fd) | ❌ | per-trial KL of Dirichlet params, start vs end of trial (Smith MDP.Fa etc.) — distinct from the F-of-policies accessor; #13 scope |
 
 ### Verdict
