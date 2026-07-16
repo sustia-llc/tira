@@ -2,6 +2,67 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-16
+
+Full Dirichlet learning + novelty EFE term (parity roadmap item 2,
+[#13](https://github.com/sustia-llc/tira/issues/13)) and the group A-learning wiring fix
+([#4](https://github.com/sustia-llc/tira/issues/4)).
+
+### Added
+- **pB/pD/pE learning** alongside the existing pA (Smith Eq. 34/36 family):
+  `AgentParams` gains `learn_b`/`learn_d`/`learn_e` with Dirichlet concentration scales
+  `initial_precision_b/d/e` (`pX = scale·X`; required iff the matching flag is set).
+  Update conventions (paper gives only "analogous rules", L1035 — pymdp/SPM forms
+  adopted): `pb[f][u] ← ω·pb + η·(s_t ⊗ s_{t−1})` on the taken control (all controls
+  decay), `pd ← ω·pd + η·q(s₁|o₁)` once per trial (MeanField: exact joint posterior
+  conditioned on o₁, marginalized per factor; MMP: the smoothed window-origin belief X₁,
+  committed at first window slide or `reset_window`), `pe ← ω·pe + η·q(π)` per step.
+  Learned counts write back column-normalized into A/B/D/E, so all four model surfaces
+  genuinely move during learning.
+- **Learning rate η / forgetting rate ω** (`eta`/`omega` on `AgentParams`, both
+  default 1.0 = the pre-0.8.0 behavior, bit-identical). ω applies **per step**
+  (`pX ← ω·pX + η·increment`, pymdp convention) rather than per trial — the paper's
+  trial-indexed Eq. 34/36 is recovered for pD (single update per trial) but pA/pB decay
+  within-trial when ω < 1; documented deviation.
+- **Novelty / parameter info-gain EFE term** (Smith Eq. 39–40): opt-in
+  `use_param_info_gain` (pymdp's flag name and default-off; SPM auto-enables — deviation
+  documented, default-off preserves existing numerics). Adds `As′·(W s′)` per modality
+  to neg-G with `W = ½(pa^{⊙−1} − pa_sums^{⊙−1})`; the paper's worked anchors (0.505
+  low-confidence, 0.00505 high-confidence) are pinned as tests. B-novelty deferred (no
+  paper form; pymdp `calc_pB_info_gain` is the reference for a follow-up).
+- **Parameter free energies** (Smith Table 3 MDP.Fa/Fb/Fd/Fe):
+  `parameter_free_energies() → ParameterFreeEnergies` — per-column Dirichlet KL between
+  current and trial-start concentrations (positive KL; SPM surfaces the negation).
+  Backed by a new private `special.rs` (Lanczos lgamma, digamma, Dirichlet KL — no new
+  dependencies).
+- **`MMP + learn_a` construction error lifted** (the 0.7.0 gate): learning under MMP now
+  draws on smoothed trajectory beliefs (pA/pB from the window nodes, pD from X₁).
+- **Group A-learning fixed (#4)**: `GroupAgentBuilder` gains an `initial_precision`
+  setter threaded through all three build paths (a `learn_a(true)` group was previously
+  unbuildable); the CertaintyWeighted branch now learns because
+  `action_probabilities` replays the flag-selected generation path (below). Group
+  surface is pA-only this release.
+- **Learning-aware replay**: `action_probabilities`/`action_probabilities_multi` now
+  honor the agent's `learn_*` flags (previously documented as a strictly non-learning
+  path — contract change; unreachable for existing callers, all of which construct
+  non-learning agents). Enables `reproduce::log_likelihood_learning` (replay that
+  relearns; the fixed-A `log_likelihood`/`recover_alpha` are untouched). The
+  learning-group *study* (extension 3) remains future work.
+
+### Honest math notes
+- Learning updates run per step against the entering model (pD reads A before pA
+  rewrites it — trial-boundary semantics); SPM re-sums the full BMA trajectory at trial
+  end, so MMP pA/pB counts do not re-count retrospectively revised nodes.
+- MeanField pD conditions on o₁ (pymdp-style exact posterior) while the belief path's
+  first step deliberately does not — inconsistency is intentional and documented.
+- Zero concentrations (deterministic-B pb, delta-D pd) are floored at 1e-10 in
+  novelty/KL paths.
+
+### Migration (downstream)
+- `AgentParams` gained nine fields — struct literals need `..Default::default()`
+  (defaults preserve existing behavior exactly, verified bit-identical).
+- One 0.7.0 test contract flipped: `MMP + learn_a` constructs instead of erroring.
+
 ## [0.7.0] - 2026-07-15
 
 Trajectory state inference + surfaced variational free energy (parity roadmap items 4–5,

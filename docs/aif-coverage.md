@@ -76,7 +76,7 @@ CLAUDE.md §"Possible extensions"); the paper lists these in prose in §4.
 |---|---|---|
 | 1 | MCMC parameter estimation (replace grid MAP; posterior median) | ❌ planned — prior + likelihood ready |
 | 2 | Recover additional parameters (γ, matrix contents, learning rates) | ❌ |
-| 3 | Parameter learning in group experiments (temporal dynamics) | ⚠️ pA→A learning implemented and tested at agent level (`update_a`); group wiring incomplete — `GroupAgentBuilder::learn_a(true)` cannot currently build (missing initial-precision plumbing), and the certainty-weighted path bypasses learning entirely |
+| 3 | Parameter learning in group experiments (temporal dynamics) | ⚠️ engine + group wiring **done since 0.8.0** (#13/#4: full pA/pB/pD/pE learning with η/ω; `GroupAgentBuilder::initial_precision` builds learning groups; the CW path learns via the learning-aware `action_probabilities`; `log_likelihood_learning` replays learning) — the *study* (learning-enabled experiment factories, learning-aware `recover_alpha` recovery) is the remaining work |
 | 4 | Sensory/active agents as proper AIF agents | ❌ |
 | 5 | Certainty-weighted voting (§4: "certainty-weighted Bayesian model average") | ➕✅ implemented **and evaluated** — `VotingMode::CertaintyWeighted`, weights `exp(−H(P_i))`, mixture `Σ w_i P_i / Σ w_i`; Figure 6 (`plots/figure6_certainty_weighted.png`) shows CW tracks the identity line closer than probabilistic voting, confirming the paper's prediction. Beyond-paper: the paper proposes but does not simulate this |
 | 6 | Network communication structures | ⚠️ latent scaffolding only — `communication.rs` (`CommunicationChannel`, `CommunicatingPOMDPAgent`, flume) exists and is exercised by tests, but is not wired into the group pipeline and has known dead surfaces (tracked in issues) |
@@ -121,16 +121,16 @@ Inference* (MIT Press; ref [1]), `pymdp` (Heins et al. 2022, JOSS), and `ActiveI
 | Occam-window policy pruning | ❌ | all enumerated policies scored every step (Smith `mdp.zeta`); irrelevant at MAB scale, needed for deep-policy spaces |
 | EFE — pragmatic value | ✅ | `efe_step` |
 | EFE — state info gain (salience) | ✅ | exact MI, summed per modality; live for stochastic injectable B since 0.6.0 (zero for deterministic-B constructions — see Axis 1 §2.1) |
-| EFE — novelty / parameter info gain | ❌ | relevant once model learning is active (Smith Eq. 38–40 — the W matrix is built from Dirichlet concentrations, so novelty presupposes pA/pB) |
+| EFE — novelty / parameter info gain | ✅ | 0.8.0 (#13): opt-in `use_param_info_gain` (pymdp flag/default; SPM auto-enables — documented deviation, default-off preserves numerics). A-novelty per Smith Eq. 39–40: `As′·(W s′)` added to neg-G, `W = ½(pa^{⊙−1} − pa_sums^{⊙−1})`; paper's worked anchors (0.505 / 0.00505) pinned as tests. B-novelty ⚠️ deferred — no paper form (L1057); pymdp `calc_pB_info_gain` is the reference |
 | Action selection | ✅ | `act` samples the α-softmaxed marginal |
 | Policy precision (γ/β) dynamics | ❌ | γ fixed; the Smith Table 2 loop `π ← σ(ln E − F − γG)`, `β ← β − (β − β₀ + G_error)/ψ` consumes per-policy **F** — blocked on the F accessor |
-| Learning A (Dirichlet pA, posterior write-back) | ⚠️ | `update_a` correct at agent level; group wiring incomplete (extension 3 row above) |
-| Learning rate η / forgetting ω | ❌ | `update_a` is Smith Eq. 36 with fixed η = 1, ω = 1 (`pa[o,s] += belief`, no decay, no rate) — not parameterized |
-| Learning B (pB), D (pD), E (pE) | ❌ | Smith Eq. 32–36 family (same ω/η rule per matrix) |
+| Learning A (Dirichlet pA, posterior write-back) | ✅ | `update_a` at agent level; group wiring fixed in 0.8.0 (#4: builder precision plumbing + CW branch learns through the learning-aware `action_probabilities`) |
+| Learning rate η / forgetting ω | ✅ | 0.8.0 (#13): `eta`/`omega` on `AgentParams` (defaults 1.0 = pre-0.8.0 bit-identical). ω applies **per step** (pymdp convention) — recovers the paper's trial-indexed Eq. 34 exactly for pD (one update/trial); pA/pB decay within-trial when ω < 1 (documented deviation from the trial-indexed form) |
+| Learning B (pB), D (pD), E (pE) | ✅ | 0.8.0 (#13): Smith Eq. 32–36 family; B/E forms are pymdp/SPM conventions (paper says "analogous", L1035): pB from `s_t ⊗ s_{t−1}` on the taken control, pD once per trial (MeanField: exact o₁-conditioned posterior; MMP: smoothed X₁), pE from q(π). Counts write back into A/B/D/E. MMP+learn_a construction error lifted |
 | Temporal / policy depth | ✅ | configurable via `with_params` — full multi-step policy enumeration (Smith's deep-V planning), not single-step U (experiments run depth 1 — see Axis 1) |
 | Input validation | ✅ | `AifError::{InvalidProbability, InvalidDistribution, InvalidAction}` |
 | Variational free energy F accessor | ✅ | `variational_free_energy()` (0.7.0, #16): MeanField = one-step `−ln p(o_t)` (exact single-factor; mean-field-prior approximation multi-factor); MMP = window F (Eq. 11/19). `policy_free_energies()` entries are currently **identical across policies** — the window holds observed τ only (Eq. 19/20 F/G split); per-policy future-τ windows arrive with #14 |
-| Free energy of parameters (Fa/Fb/Fd) | ❌ | per-trial KL of Dirichlet params, start vs end of trial (Smith MDP.Fa etc.) — distinct from the F-of-policies accessor; #13 scope |
+| Free energy of parameters (Fa/Fb/Fd) | ✅ | 0.8.0 (#13): `parameter_free_energies()` → `ParameterFreeEnergies` — per-column Dirichlet KL(current ‖ trial-start) per Smith Table 3 (MDP.Fa/Fb/Fd/Fe); positive KL surfaced (SPM stores the negation — documented). Live mid-trial; trial boundary = `reset_window()` |
 
 ### Verdict
 
@@ -139,9 +139,9 @@ states, multi-modality observations, injectable B, decoupled actions) — verifi
 own conventions (α/γ separation, B×belief direction, EFE sign chain, replay consistency, MAB
 numerics bit-identical through the generalization) — **plus** multi-scale group composition and a
 coalition value layer that the reference implementations do not have. The remaining gap to "full
-backend": **full learning (B/D/E, novelty term) + precision dynamics** (#13–#14) — trajectory
-message passing and F shipped in 0.7.0 (#15/#16, with the variational-vs-exact-smoothing
-approximation documented above).
+backend": **precision dynamics** (#14) — full learning (pA/pB/pD/pE with η/ω, novelty term,
+parameter free energies) shipped in 0.8.0 (#13/#4); trajectory message passing and F shipped in
+0.7.0 (#15/#16, with the variational-vs-exact-smoothing approximation documented above).
 
 ### Roadmap to "full backend" (priority order)
 
@@ -149,8 +149,10 @@ approximation documented above).
    observations, decouple `n_actions` from `n_states`.~~ ✅ **Shipped in 0.6.0**
    (`GenerativeModel`/`from_model`; epistemic term live for stochastic B).
    ([#12](https://github.com/sustia-llc/tira/issues/12))
-2. **Full learning** — pB/pD/pE alongside pA (Smith Eq. 32–36, with η/ω); wire learning into the
-   group path; add the novelty EFE term (Smith Eq. 38–40) so learning is drivable.
+2. ~~**Full learning** — pB/pD/pE alongside pA (Smith Eq. 32–36, with η/ω); wire learning into the
+   group path; add the novelty EFE term (Smith Eq. 38–40) so learning is drivable.~~
+   ✅ **Shipped in 0.8.0** (learning surface + novelty + Fa/Fb/Fd/Fe + group wiring +
+   learning replay; B-novelty deferred).
    ([#13](https://github.com/sustia-llc/tira/issues/13),
    group wiring in [#4](https://github.com/sustia-llc/tira/issues/4))
 3. **Precision dynamics** (γ/β updates; Smith Table 2 loop).
