@@ -1183,41 +1183,68 @@ impl POMDPAgent {
             .collect()
     }
 
-    /// Commit the once-per-trial pD Dirichlet update from a per-factor posterior
-    /// over the initial state (Smith Eq. 34): `pd[f] = ω·pd[f] + η·post[f]`, then
-    /// write back `D[f] = pd[f]/Σ`. Latches [`Self::d_committed_this_trial`].
-    fn commit_pd(&mut self, post: &[DVector<f64>]) {
+    /// Accumulate the once-per-trial pD Dirichlet count from a per-factor posterior
+    /// over the initial state (Smith Eq. 34): `pd[f] = ω·pd[f] + η·post[f]`. Latches
+    /// [`Self::d_committed_this_trial`].
+    ///
+    /// This does **not** write `self.d` — the `D` write-back is a separate step
+    /// ([`Self::sync_d_from_pd`]) so callers control its timing. Under
+    /// [`StateInference::MarginalMessagePassing`] the write-back must be deferred to
+    /// the trial boundary: [`Self::mmp_messages`] re-reads `self.d` as the `τ = 0`
+    /// forward anchor on every subsequent window, so mutating `D` mid-trial would
+    /// permanently shift the within-trial belief trajectory.
+    fn accumulate_pd(&mut self, post: &[DVector<f64>]) {
         let (omega, eta) = (self.omega, self.eta);
-        let mut new_d: Vec<DVector<f64>> = Vec::new();
         if let Some(pd) = self.pd.as_mut() {
             for f in 0..pd.len() {
                 pd[f] *= omega;
                 pd[f] += &post[f] * eta;
-                let sum = pd[f].sum().max(1e-10);
-                new_d.push(pd[f].map(|x| x / sum));
+            }
+        }
+        self.d_committed_this_trial = true;
+    }
+
+    /// Write back the learned initial-state prior `D[f] = pd[f]/Σ` per factor from
+    /// the accumulated pD counts. No-op when `pd` is `None`.
+    fn sync_d_from_pd(&mut self) {
+        let mut new_d: Vec<DVector<f64>> = Vec::new();
+        if let Some(pd) = self.pd.as_ref() {
+            for pdf in pd {
+                let sum = pdf.sum().max(1e-10);
+                new_d.push(pdf.map(|x| x / sum));
             }
         }
         for (f, nd) in new_d.into_iter().enumerate() {
             self.d[f] = nd;
         }
-        self.d_committed_this_trial = true;
     }
 
-    /// Marginal-message-passing pD commit: fold the smoothed window node 0 (the
-    /// initial state `X₁`) into pD, once per trial. No-op unless `learn_d`, the
+    /// Marginal-message-passing pD accumulation: fold the smoothed window node 0
+    /// (the initial state `X₁`) into pD, once per trial. No-op unless `learn_d`, the
     /// latch is clear, and the trajectory window is populated.
+    ///
+    /// The `D` write-back is **deferred** to [`Self::reset_window`] (the trial
+    /// boundary), so mid-trial MMP inference never observes a mutated `D` — the
+    /// pre-0.8.0 within-trial-immutable-`D` invariant. pD itself accumulates here,
+    /// at the first window slide, before node 0 retires from the window.
     fn commit_pd_mmp(&mut self) {
         if !self.learn_d || self.d_committed_this_trial || self.mmp_traj.is_empty() {
             return;
         }
         let x1 = self.mmp_traj[0].clone();
-        self.commit_pd(&x1);
+        self.accumulate_pd(&x1);
     }
 
     /// [`StateInference::MeanField`] pD update: commit the exact initial-state
     /// posterior at the first observation of the trial (`last_action` still
-    /// `None`), latched to fire once. MMP commits elsewhere (window slide /
+    /// `None`), latched to fire once. MMP accumulates elsewhere (window slide /
     /// [`Self::reset_window`]).
+    ///
+    /// The `D` write-back is applied immediately here because under MeanField
+    /// `self.d` is read only at the trial boundary (first `belief_step` /
+    /// `reset_window`), never mid-trial — so the write is inert within the trial and
+    /// the belief trajectory is unaffected. (Under MMP the write must be deferred;
+    /// see [`Self::commit_pd_mmp`].)
     fn update_d(&mut self, obs: &[usize]) {
         if self.d_committed_this_trial {
             return;
@@ -1226,7 +1253,8 @@ impl POMDPAgent {
             && self.last_action.is_none()
         {
             let post = self.initial_state_posterior(obs);
-            self.commit_pd(&post);
+            self.accumulate_pd(&post);
+            self.sync_d_from_pd();
         }
     }
 
@@ -1642,12 +1670,22 @@ impl POMDPAgent {
     ///
     /// Under [`StateInference::MarginalMessagePassing`] with `learn_d`, if the
     /// trial ended before the window ever slid (so the initial-state node never
-    /// left the window), the pending pD commit is flushed here from the smoothed
-    /// `X₁`. The pending re-snapshots the Dirichlet trial-boundary references
-    /// (so [`Self::parameter_free_energies`] reads zero right after a reset).
+    /// left the window), the pending pD accumulation is flushed here from the
+    /// smoothed `X₁`. The learned `D` write-back (`D = pd/Σ`) is then applied here,
+    /// at the trial boundary, for **both** inference modes: under MMP it was
+    /// deferred (mid-trial `D` mutation would corrupt the [`Self::mmp_messages`]
+    /// `τ = 0` anchor); under MeanField it was already written mid-trial and this
+    /// re-sync is idempotent. `D` thus updates exactly at the trial boundary,
+    /// matching the paper's trial-indexed Eq. 34. The method then re-snapshots the
+    /// Dirichlet trial-boundary references (so [`Self::parameter_free_energies`]
+    /// reads zero right after a reset).
     pub fn reset_window(&mut self) {
-        // Flush any pending MMP pD commit before the trajectory is cleared.
+        // Flush any pending MMP pD accumulation before the trajectory is cleared,
+        // then write the learned D back at the trial boundary (deferred under MMP).
         self.commit_pd_mmp();
+        if self.learn_d {
+            self.sync_d_from_pd();
+        }
         self.last_action = None;
         self.beliefs = self.d.clone();
         self.mmp_obs_hist.clear();
@@ -1657,8 +1695,8 @@ impl POMDPAgent {
         self.last_predictive_prior = None;
         self.last_obs = None;
         self.d_committed_this_trial = false;
-        // Re-snapshot the Dirichlet references at the end (after any commit above),
-        // so post-reset parameter free energies are all zero.
+        // Re-snapshot the Dirichlet references at the end (after the commit + sync
+        // above), so post-reset parameter free energies are all zero.
         self.snapshot_params();
     }
 
@@ -3591,6 +3629,9 @@ mod tests {
         };
 
         // --- Slide variant (horizon 2) ---
+        // Contract: pD ACCUMULATES at the first slide, but the D write-back is
+        // DEFERRED to reset_window (a mid-trial D mutation would corrupt the MMP
+        // τ=0 anchor).
         let mut agent = make(2)?;
         agent.action_probabilities(0);
         agent.record_action(0);
@@ -3598,17 +3639,27 @@ mod tests {
         // X₁ of the current 2-node window (about to leave on the next observation).
         let x1 = agent.bma_state_belief(1).expect("invariant: node 1 present")[0].clone();
         agent.record_action(0);
-        agent.action_probabilities(0); // triggers the slide + pD commit
+        agent.action_probabilities(0); // triggers the slide + pD accumulation
 
+        // pD moved at the slide...
         let pd = agent.pd.as_ref().expect("invariant: pd is Some");
         assert_relative_eq!(pd[0][0], 0.5 + x1[0], epsilon = 1e-9);
         assert_relative_eq!(pd[0][1], 0.5 + x1[1], epsilon = 1e-9);
+        // ...but D is UNCHANGED mid-trial (still the [.5, .5] prior).
+        assert_relative_eq!(agent.d[0][0], 0.5, epsilon = 1e-15);
+        assert_relative_eq!(agent.d[0][1], 0.5, epsilon = 1e-15);
 
-        // Latch prevents a second commit on the next slide.
+        // Latch prevents a second accumulation on the next slide.
         agent.record_action(0);
         agent.action_probabilities(1);
         let pd = agent.pd.as_ref().expect("invariant: pd is Some");
         assert_relative_eq!(pd[0][0], 0.5 + x1[0], epsilon = 1e-9);
+        assert_relative_eq!(agent.d[0][0], 0.5, epsilon = 1e-15);
+
+        // reset_window applies the deferred D write-back at the trial boundary.
+        agent.reset_window();
+        assert_relative_eq!(agent.d[0][0], (0.5 + x1[0]) / 2.0, epsilon = 1e-9);
+        assert_relative_eq!(agent.d[0][1], (0.5 + x1[1]) / 2.0, epsilon = 1e-9);
 
         // --- Reset-before-slide variant (horizon 3, only 2 observations) ---
         let mut agent2 = make(3)?;
@@ -3616,14 +3667,77 @@ mod tests {
         agent2.record_action(0);
         agent2.action_probabilities(1);
         let x1b = agent2.bma_state_belief(1).expect("invariant: node 1 present")[0].clone();
-        agent2.reset_window(); // no slide happened ⇒ commit fires here
-        // pd is re-snapshotted at reset, so compare against the fresh start.
+        // Still no slide ⇒ D untouched before reset.
+        assert_relative_eq!(agent2.d[0][0], 0.5, epsilon = 1e-15);
+        agent2.reset_window(); // no slide happened ⇒ accumulate + write-back fire here
+        // pd is re-snapshotted at reset, so parameter free energies read zero.
         let pf = agent2.parameter_free_energies();
         assert!(pf.fd.expect("invariant: learn_d")[0].abs() < 1e-12, "fd resets to 0 post-reset");
-        // The commit happened: reconstruct pd from the internal field pre-snapshot is
-        // gone, so assert the committed value landed in D (D = pd/Σ after commit).
+        // The learned value landed in D at the trial boundary (D = pd/Σ).
         let d_sum = 0.5 + x1b[0] + 0.5 + x1b[1]; // = 2 (x1b sums to 1)
         assert_relative_eq!(agent2.d[0][0], (0.5 + x1b[0]) / d_sum, epsilon = 1e-9);
+        Ok(())
+    }
+
+    #[test]
+    fn test_mmp_learn_d_preserves_within_trial_beliefs() -> Result<(), AifError> {
+        // Invariant (0.7.0): under MMP, D is immutable within a trial, so a learn_d
+        // agent must produce a bit-identical within-trial belief trajectory to an
+        // otherwise-identical non-learning agent — even across several window slides
+        // (the deferred-D-write-back contract). Learning still lands: after
+        // reset_window, the learner's D has moved off its initial value.
+        let b = DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8]);
+        let a = DMatrix::from_row_slice(2, 2, &[0.8, 0.3, 0.2, 0.7]);
+        let make = |learn_d: bool| {
+            POMDPAgent::from_model(
+                single_factor_model(a.clone(), vec![b.clone()], vec![0.5, 0.5]),
+                AgentParams {
+                    alpha: 1.0,
+                    learn_d,
+                    initial_precision_d: if learn_d { Some(1.0) } else { None },
+                    state_inference: StateInference::MarginalMessagePassing { horizon: 2, iters: 500 },
+                    ..Default::default()
+                },
+            )
+        };
+        let mut learner = make(true)?;
+        let mut plain = make(false)?;
+
+        // Horizon 2 ⇒ slides on obs 3, 4, 5 (three slides over six observations).
+        let obs = [0usize, 1, 0, 1, 0, 1];
+        for (i, &o) in obs.iter().enumerate() {
+            let p_learn = learner.action_probabilities(o);
+            let p_plain = plain.action_probabilities(o);
+            // Smoothed current-node belief bit-identical at every step.
+            let bl = learner.state_beliefs();
+            let bp = plain.state_beliefs();
+            for f in 0..bl.len() {
+                for s in 0..bl[f].len() {
+                    assert!(
+                        (bl[f][s] - bp[f][s]).abs() < 1e-15,
+                        "step {i} factor {f} state {s}: learn_d belief {} != plain {}",
+                        bl[f][s],
+                        bp[f][s]
+                    );
+                }
+            }
+            // Action probabilities likewise identical (single control here).
+            for k in 0..p_learn.len() {
+                assert!((p_learn[k] - p_plain[k]).abs() < 1e-15, "step {i}: action probs diverged");
+            }
+            // D stays at the [.5, .5] prior throughout the trial for the learner.
+            assert_relative_eq!(learner.d[0][0], 0.5, epsilon = 1e-15);
+            learner.record_action(0);
+            plain.record_action(0);
+        }
+
+        // Learning DID land: the trial-boundary write-back moves D.
+        learner.reset_window();
+        assert!(
+            (learner.d[0][0] - 0.5).abs() > 1e-6,
+            "learn_d must move D at the trial boundary, got {}",
+            learner.d[0][0]
+        );
         Ok(())
     }
 
