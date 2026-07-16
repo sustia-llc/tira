@@ -27,13 +27,17 @@ All 5 paper implementation phases complete + Extension 5 (certainty-weighted vot
 Four paper experiments reproduced (Figures 4-5) plus CW comparison (Figure 6).
 Now a **Cargo workspace** (`crates/aif` engine + `crates/reproduce` harness) serving as
 the reference active-inference engine for the koalisi coalition runtime, which consumes
-the coalition-value primitive `competence_efe` (koalisi currently pins git tag
-`aif-v0.5.0`; `aif-v0.9.0` is the current release — **the canonical-AIF parity roadmap
-is complete**: #12 (multi-factor, multi-modality, injectable B via
-`GenerativeModel`/`from_model`), #15 (opt-in marginal message passing), #16 (surfaced F),
-#13 (full pA/pB/pD/pE learning with η/ω, novelty EFE term, parameter free energies) +
-the #4 group-learning wiring fix, and #14 (opt-in γ/β precision dynamics, per-policy
-future-τ MMP windows); bump + rematch tracked in koalisi #43).
+the coalition-value primitive `competence_efe` and, since koalisi's K4-v3 arm, builds a
+multi-modality `GenerativeModel` directly (koalisi pins git tag `aif-v0.9.0`, the
+current release — **the canonical-AIF parity roadmap is complete**: #12 (multi-factor,
+multi-modality, injectable B via `GenerativeModel`/`from_model`), #15 (opt-in marginal
+message passing), #16 (surfaced F), #13 (full pA/pB/pD/pE learning with η/ω, novelty
+EFE term, parameter free energies) + the #4 group-learning wiring fix, and #14 (opt-in
+γ/β precision dynamics, per-policy future-τ MMP windows). Downstream K4-v3 rematch
+(koalisi #43, closed): the pre-registered multimodal arm proved *decision-equivalent*
+to the scalar `competence_efe` bridge — G affine in covered-bit count under binary
+coverage + deterministic B — verdict `FALSIFIED (multimodality)`; a live-info-gain
+persistent-agent v4 is parked as koalisi #44).
 
 - **130 tests** (129 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
 - `cargo run --release -p reproduce --bin reproduce` — full reproduction in ~16s
