@@ -22,7 +22,7 @@ This is a Cargo workspace with two crates:
 
 | Crate | Role |
 |-------|------|
-| [`crates/aif`](crates/aif) | Reusable active-inference engine: `POMDPAgent` (A–E matrices, expected free energy, α/γ precision), `GroupAgent` (Markov-blanket nesting), and a `coalition` layer (the `competence_efe` value primitive + trust/compatibility/history beliefs). No plotting or environment coupling — this is the crate downstream projects depend on. The generative-model family is currently MAB-shaped (binary observations, deterministic transitions); see [aif-coverage.md](docs/aif-coverage.md) for the parity matrix and roadmap. |
+| [`crates/aif`](crates/aif) | Reusable active-inference engine: `POMDPAgent` (general generative models — multi-factor states, multi-modality observations, injectable B via `GenerativeModel`/`from_model`; expected free energy with pragmatic + epistemic + novelty terms; full Dirichlet learning of A/B/D/E with η/ω; mean-field or marginal-message-passing state inference; surfaced variational free energy; opt-in γ/β precision dynamics), `GroupAgent` (Markov-blanket nesting), and a `coalition` layer (the `competence_efe` value primitive + trust/compatibility/history beliefs). No plotting or environment coupling — this is the crate downstream projects depend on. **The canonical-AIF parity roadmap is complete as of 0.9.0** — see [aif-coverage.md](docs/aif-coverage.md) for the parity scorecard and documented deviations. The convenience constructors (`new`/`with_params`) still build the paper's MAB special case with bit-identical numerics. |
 | [`crates/reproduce`](crates/reproduce) | The paper-reproduction harness: bandit environments, simulation/parameter-recovery, plotting, and the `reproduce` binary. Depends on `aif`. |
 
 ## What this does
@@ -80,7 +80,7 @@ Environment (BanditEnvironment)
 
 | Module | Role |
 |--------|------|
-| `crates/aif/src/agent.rs` | POMDP active inference agent (A-E matrices, expected free energy G, α/γ precision, `expected_free_energy()`) |
+| `crates/aif/src/agent.rs` | POMDP active inference agent: A–E matrices (multi-factor/multi-modality via `GenerativeModel`), expected free energy G (pragmatic + info-gain + novelty), α/γ precision, Dirichlet learning (pA/pB/pD/pE, η/ω, `parameter_free_energies()`), `StateInference` (MeanField / marginal message passing), `variational_free_energy()`, opt-in `PrecisionDynamics` (Smith Table 2 γ/β loop) |
 | `crates/aif/src/group.rs` | VotingMode, GroupAgent, VotingAgent (discrete + certainty-weighted), GroupAgentBuilder |
 | `crates/aif/src/coalition.rs` | `competence_efe` + `ObsPrecisionParams` (the coalition-value primitive, opt-in `transition_noise` since 0.6.0), `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory`, `belief_weighted_preference` |
 | `crates/aif/src/communication.rs` | Flume-based inter-agent messaging (for extended scenarios) |
