@@ -1,4 +1,5 @@
 use crate::AifError;
+use crate::special::dirichlet_kl;
 use nalgebra::{DMatrix, DVector};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -125,9 +126,43 @@ pub struct AgentParams {
     pub policy_depth: usize,
     /// Enable A-matrix (pA) learning.
     pub learn_a: bool,
+    /// Enable B-matrix (pB) transition-model learning (Smith Eq. 36/37).
+    pub learn_b: bool,
+    /// Enable D-vector (pD) initial-state-prior learning (Smith Eq. 34).
+    pub learn_d: bool,
+    /// Enable E-vector (pE) policy-prior learning.
+    pub learn_e: bool,
+    /// Learning rate `η ∈ (0, 1]` (Smith Eq. 34/36): the fraction of the new
+    /// coincidence count folded into every Dirichlet update. `1.0` reproduces
+    /// full "add-one" counting.
+    pub eta: f64,
+    /// Forgetting rate `ω ∈ (0, 1]` (Smith Eq. 34/36). Applied **per step**
+    /// (pymdp convention), not per trial as the paper's `_{trial}` subscript
+    /// suggests — a deliberate deviation so within-trial multi-step learning
+    /// decays consistently. `1.0` is no forgetting and, with `η = 1`, is
+    /// bit-identical to the pre-learning-extension pA update.
+    pub omega: f64,
+    /// Enable the novelty (parameter information gain) term in expected free
+    /// energy (Smith Eq. 39/40). Built from `pA`, so it requires `learn_a`.
+    /// pymdp's flag name and default (`false`); SPM auto-enables it whenever A is
+    /// learned — we do not, to keep the default numerics bit-identical.
+    pub use_param_info_gain: bool,
     /// Initial pA concentration per joint-state column (replicated across
     /// modalities). Required when `learn_a` is true.
     pub initial_precision: Option<Vec<f64>>,
+    /// Dirichlet concentration scale for pB: `pb[f][u] = s_b · B[f][u]`. Required
+    /// when `learn_b` is true. Named "precision" for family consistency with
+    /// [`initial_precision`](Self::initial_precision) (pA), though it is a
+    /// Dirichlet concentration scale, not a precision.
+    pub initial_precision_b: Option<f64>,
+    /// Dirichlet concentration scale for pD: `pd[f] = s_d · D[f]`. Required when
+    /// `learn_d` is true. See [`initial_precision_b`](Self::initial_precision_b)
+    /// on the "precision" naming.
+    pub initial_precision_d: Option<f64>,
+    /// Dirichlet concentration scale for pE: `pe = s_e · E`. Required when
+    /// `learn_e` is true. See [`initial_precision_b`](Self::initial_precision_b)
+    /// on the "precision" naming.
+    pub initial_precision_e: Option<f64>,
     /// Maximum mean-field sweeps for multi-factor state inference.
     pub inference_iters: usize,
     /// State-inference scheme. Defaults to
@@ -142,11 +177,41 @@ impl Default for AgentParams {
             gamma: 16.0,
             policy_depth: 1,
             learn_a: false,
+            learn_b: false,
+            learn_d: false,
+            learn_e: false,
+            eta: 1.0,
+            omega: 1.0,
+            use_param_info_gain: false,
             initial_precision: None,
+            initial_precision_b: None,
+            initial_precision_d: None,
+            initial_precision_e: None,
             inference_iters: 10,
             state_inference: StateInference::MeanField,
         }
     }
+}
+
+/// Parameter (Dirichlet) free energies for the learned generative-model
+/// components, returned by [`POMDPAgent::parameter_free_energies`].
+///
+/// Each entry is `KL(Dir(now) ‖ Dir(start))` between the current concentration
+/// parameters and their snapshot at the last trial boundary (construction or the
+/// most recent [`POMDPAgent::reset_window`]) — the KL that Smith, Friston & Whyte
+/// (2022) Table 3 assigns to `MDP.Fa`/`Fb`/`Fd` (SPM stores the negation; we
+/// surface the positive KL). A field is `None` when its matching `learn_*` flag
+/// is off, and every present entry is `0.0` immediately after a reset.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParameterFreeEnergies {
+    /// One entry per observation modality: `Σ_columns KL(pA col now ‖ pA col start)`.
+    pub fa: Option<Vec<f64>>,
+    /// One entry per hidden-state factor: `Σ_{controls,columns} KL(pB now ‖ pB start)`.
+    pub fb: Option<Vec<f64>>,
+    /// One entry per hidden-state factor: `KL(pD now ‖ pD start)`.
+    pub fd: Option<Vec<f64>>,
+    /// `KL(pE now ‖ pE start)` over the enumerated policy space.
+    pub fe: Option<f64>,
 }
 
 /// POMDP active inference agent following Waade et al. (Entropy 2025, 27, 143),
@@ -175,10 +240,27 @@ pub struct POMDPAgent {
     e_vector: DVector<f64>,        // policy prior over n_actions^policy_depth
     beliefs: Vec<DVector<f64>>,    // per factor: current posterior
     pa: Option<Vec<DMatrix<f64>>>, // per modality: pA counts, when learning
+    pb: Option<Vec<Vec<DMatrix<f64>>>>, // per factor, per control: pB counts, when learning
+    pd: Option<Vec<DVector<f64>>>, // per factor: pD counts, when learning
+    pe: Option<DVector<f64>>,      // over policy space: pE counts, when learning
+    // Trial-boundary snapshots of the Dirichlet parameters (construction / reset),
+    // used by `parameter_free_energies` as the `KL(now ‖ start)` reference.
+    pa_start: Option<Vec<DMatrix<f64>>>,
+    pb_start: Option<Vec<Vec<DMatrix<f64>>>>,
+    pd_start: Option<Vec<DVector<f64>>>,
+    pe_start: Option<DVector<f64>>,
     last_action: Option<usize>,    // flat joint-control index
     gamma: f64,
     alpha: f64,
     learn_a: bool,
+    learn_b: bool,
+    learn_d: bool,
+    learn_e: bool,
+    eta: f64,
+    omega: f64,
+    use_param_info_gain: bool,
+    /// Latches the once-per-trial pD commit (reset by [`Self::reset_window`]).
+    d_committed_this_trial: bool,
     policy_depth: usize,
     n_states: Vec<usize>,
     n_controls: Vec<usize>,
@@ -320,6 +402,7 @@ impl POMDPAgent {
             initial_precision: precision,
             inference_iters: 10,
             state_inference: StateInference::MeanField,
+            ..Default::default()
         };
         Self::from_model(model, params)
     }
@@ -356,6 +439,7 @@ impl POMDPAgent {
             initial_precision: None,
             inference_iters: agent.inference_iters,
             state_inference: StateInference::MeanField,
+            ..Default::default()
         })?;
         agent.gamma = gamma;
         agent.policy_depth = policy_depth;
@@ -474,7 +558,7 @@ impl POMDPAgent {
             d.iter().map(|df| DVector::from_vec(df.clone())).collect();
 
         // pA per modality: (n_obs[m] × n_joint), column value from initial_precision.
-        let pa = if params.learn_a {
+        let pa: Option<Vec<DMatrix<f64>>> = if params.learn_a {
             params.initial_precision.as_ref().map(|prec| {
                 a.iter()
                     .map(|am| DMatrix::from_fn(am.nrows(), n_joint, |_row, col| prec[col]))
@@ -483,6 +567,43 @@ impl POMDPAgent {
         } else {
             None
         };
+        // pB per factor per control: s_b · B[f][u]. Scale presence is guaranteed by
+        // validate_agent_params when learn_b is set.
+        let pb: Option<Vec<Vec<DMatrix<f64>>>> = if params.learn_b {
+            let s_b = params
+                .initial_precision_b
+                .expect("invariant: learn_b requires initial_precision_b (validated)");
+            Some(
+                b.iter()
+                    .map(|bf| bf.iter().map(|bu| bu * s_b).collect())
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        // pD per factor: s_d · D[f].
+        let pd: Option<Vec<DVector<f64>>> = if params.learn_d {
+            let s_d = params
+                .initial_precision_d
+                .expect("invariant: learn_d requires initial_precision_d (validated)");
+            Some(d_vectors.iter().map(|df| df * s_d).collect())
+        } else {
+            None
+        };
+        // pE over the enumerated policy space: s_e · E.
+        let pe: Option<DVector<f64>> = if params.learn_e {
+            let s_e = params
+                .initial_precision_e
+                .expect("invariant: learn_e requires initial_precision_e (validated)");
+            Some(&e_vector * s_e)
+        } else {
+            None
+        };
+
+        let pa_start = pa.clone();
+        let pb_start = pb.clone();
+        let pd_start = pd.clone();
+        let pe_start = pe.clone();
 
         Ok(Self {
             a,
@@ -492,10 +613,24 @@ impl POMDPAgent {
             e_vector,
             beliefs: d_vectors,
             pa,
+            pb,
+            pd,
+            pe,
+            pa_start,
+            pb_start,
+            pd_start,
+            pe_start,
             last_action: None,
             gamma: params.gamma,
             alpha: params.alpha,
             learn_a: params.learn_a,
+            learn_b: params.learn_b,
+            learn_d: params.learn_d,
+            learn_e: params.learn_e,
+            eta: params.eta,
+            omega: params.omega,
+            use_param_info_gain: params.use_param_info_gain,
+            d_committed_this_trial: false,
             policy_depth: params.policy_depth,
             n_states,
             n_controls,
@@ -534,6 +669,19 @@ impl POMDPAgent {
     #[must_use]
     pub fn state_beliefs(&self) -> &[DVector<f64>] {
         &self.beliefs
+    }
+
+    /// Test-only view of the per-modality observation model `A` (for asserting
+    /// learning drift from sibling modules' tests).
+    #[cfg(test)]
+    pub(crate) fn a_matrices(&self) -> &[DMatrix<f64>] {
+        &self.a
+    }
+
+    /// Test-only view of the pA concentration counts (`None` when not learning).
+    #[cfg(test)]
+    pub(crate) fn pa_counts(&self) -> Option<&Vec<DMatrix<f64>>> {
+        self.pa.as_ref()
     }
 
     /// Number of (joint) actions: `Π_f n_controls[f]`.
@@ -590,6 +738,10 @@ impl POMDPAgent {
                 // Slide the window: drop the oldest observation (and the transition
                 // leaving it) once the window exceeds `horizon`.
                 while self.mmp_obs_hist.len() > horizon {
+                    // The node about to leave the window carries the smoothed initial
+                    // state X₁; commit its once-per-trial pD Dirichlet count before it
+                    // is lost (no-op unless learn_d, and latched to fire once).
+                    self.commit_pd_mmp();
                     self.mmp_obs_hist.remove(0);
                     if !self.mmp_act_hist.is_empty() {
                         self.mmp_act_hist.remove(0);
@@ -899,22 +1051,30 @@ impl POMDPAgent {
         -p_o.max(LN_FLOOR).ln()
     }
 
-    /// Update pA concentration parameters per modality and recompute each A[m]
-    /// (column-normalized) from the posterior.
+    /// Update pA concentration parameters per modality (Smith Eq. 36/37) and
+    /// recompute each A[m] (column-normalized) from the posterior.
     ///
-    /// `pa[m][(o_m, j)] += joint[j]`, where `joint` is the folded per-factor
-    /// posterior over the flattened joint state.
+    /// Per modality: decay the whole matrix by the forgetting rate
+    /// `pa[m] *= ω`, then add the coincidence count
+    /// `pa[m][(o_m, j)] += η · joint[j]`, where `joint` is the folded per-factor
+    /// posterior over the flattened joint state. Under marginal message passing
+    /// `joint` is folded from the smoothed last-node belief.
+    ///
+    /// At `η = ω = 1` this is bit-identical to the pre-learning-extension update
+    /// (`x·1.0 == x` and `x + 1.0·y == x + y` exactly in IEEE-754).
     fn update_a(&mut self, obs: &[usize]) {
         if self.pa.is_none() {
             return;
         }
         let joint = joint_belief(&self.beliefs);
+        let (omega, eta) = (self.omega, self.eta);
         let a = &mut self.a;
         let pa = self.pa.as_mut().expect("invariant: pa is Some (checked above)");
         for (m, &o) in obs.iter().enumerate() {
             let n_joint = a[m].ncols();
+            pa[m] *= omega;
             for j in 0..n_joint {
-                pa[m][(o, j)] += joint[j];
+                pa[m][(o, j)] += eta * joint[j];
             }
             // Recompute A[m] from pA: A[o,j] = pA[o,j] / Σ_o'(pA[o',j]).
             for j in 0..n_joint {
@@ -928,6 +1088,216 @@ impl POMDPAgent {
         }
     }
 
+    /// Update pB transition-model concentrations for the taken control
+    /// (Smith Eq. 36/37) and recompute the affected `B[f][u]` columns.
+    ///
+    /// For each factor `f`, decay every control `pb[f][u] *= ω`, then add the
+    /// state-transition coincidence count to the taken control:
+    /// `pb[f][u_f] += η · (s_t,f ⊗ s_{t−1},f)` (outer product, next state in rows,
+    /// previous state in columns — matching the `B·s` convention). Every control
+    /// of `f` is then column-normalized back into `b[f][u]`; untaken controls only
+    /// decay, so their normalized `B` is unchanged.
+    ///
+    /// `prev_meanfield` is the pre-`belief_step` per-factor belief `s_{t−1}` under
+    /// [`StateInference::MeanField`]. Under
+    /// [`StateInference::MarginalMessagePassing`] the last two **smoothed**
+    /// trajectory nodes are used instead (retrospectively revised `s_t`/`s_{t−1}`);
+    /// the update is skipped if the window holds fewer than two nodes.
+    fn update_b(&mut self, prev_meanfield: &[DVector<f64>]) {
+        let Some(action) = self.last_action else {
+            return;
+        };
+        if self.pb.is_none() {
+            return;
+        }
+        let controls = flat_to_multi(action, &self.n_controls);
+        let (omega, eta) = (self.omega, self.eta);
+
+        // (s_t, s_{t−1}) per factor.
+        let (st, sprev): (Vec<DVector<f64>>, Vec<DVector<f64>>) = match self.state_inference {
+            StateInference::MeanField => (self.beliefs.clone(), prev_meanfield.to_vec()),
+            StateInference::MarginalMessagePassing { .. } => {
+                let w = self.mmp_traj.len();
+                if w < 2 {
+                    return;
+                }
+                (self.mmp_traj[w - 1].clone(), self.mmp_traj[w - 2].clone())
+            }
+        };
+
+        let b = &mut self.b;
+        let pb = self.pb.as_mut().expect("invariant: pb is Some (checked above)");
+        for f in 0..st.len() {
+            let uf = controls[f];
+            let n = st[f].len();
+            for u in 0..pb[f].len() {
+                pb[f][u] *= omega;
+            }
+            for i in 0..n {
+                for j in 0..n {
+                    pb[f][uf][(i, j)] += eta * st[f][i] * sprev[f][j];
+                }
+            }
+            // Column-normalize every control of factor f back into B.
+            for u in 0..pb[f].len() {
+                for j in 0..n {
+                    let col_sum: f64 = (0..n).map(|r| pb[f][u][(r, j)]).sum();
+                    if col_sum > 1e-10 {
+                        for r in 0..n {
+                            b[f][u][(r, j)] = pb[f][u][(r, j)] / col_sum;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Exact one-pass posterior over the initial states conditioned on the first
+    /// observation, marginalized per factor — the target of the
+    /// [`StateInference::MeanField`] pD update (Smith Eq. 34, `s_{τ=1}`).
+    ///
+    /// Computed as the normalized joint `D ⊙ L(o₁)` folded to per-factor marginals;
+    /// exact for a single factor and the exact marginal of the joint posterior for
+    /// multiple factors. The agent's belief path is untouched — this is used only
+    /// to form the Dirichlet count.
+    fn initial_state_posterior(&self, obs: &[usize]) -> Vec<DVector<f64>> {
+        let mut joint_post = joint_belief(&self.d);
+        for (j, v) in joint_post.iter_mut().enumerate() {
+            let mut lik = 1.0;
+            for (m, &o) in obs.iter().enumerate() {
+                lik *= self.a[m][(o, j)];
+            }
+            *v *= lik;
+        }
+        let sum = joint_post.sum().max(1e-10);
+        joint_post /= sum;
+        (0..self.n_states.len())
+            .map(|f| {
+                let mut marg = DVector::zeros(self.n_states[f]);
+                for (j, &pj) in joint_post.iter().enumerate() {
+                    let multi = flat_to_multi(j, &self.n_states);
+                    marg[multi[f]] += pj;
+                }
+                marg
+            })
+            .collect()
+    }
+
+    /// Accumulate the once-per-trial pD Dirichlet count from a per-factor posterior
+    /// over the initial state (Smith Eq. 34): `pd[f] = ω·pd[f] + η·post[f]`. Latches
+    /// [`Self::d_committed_this_trial`].
+    ///
+    /// This does **not** write `self.d` — the `D` write-back is a separate step
+    /// ([`Self::sync_d_from_pd`]) so callers control its timing. Under
+    /// [`StateInference::MarginalMessagePassing`] the write-back must be deferred to
+    /// the trial boundary: [`Self::mmp_messages`] re-reads `self.d` as the `τ = 0`
+    /// forward anchor on every subsequent window, so mutating `D` mid-trial would
+    /// permanently shift the within-trial belief trajectory.
+    fn accumulate_pd(&mut self, post: &[DVector<f64>]) {
+        let (omega, eta) = (self.omega, self.eta);
+        if let Some(pd) = self.pd.as_mut() {
+            for f in 0..pd.len() {
+                pd[f] *= omega;
+                pd[f] += &post[f] * eta;
+            }
+        }
+        self.d_committed_this_trial = true;
+    }
+
+    /// Write back the learned initial-state prior `D[f] = pd[f]/Σ` per factor from
+    /// the accumulated pD counts. No-op when `pd` is `None`.
+    fn sync_d_from_pd(&mut self) {
+        let mut new_d: Vec<DVector<f64>> = Vec::new();
+        if let Some(pd) = self.pd.as_ref() {
+            for pdf in pd {
+                let sum = pdf.sum().max(1e-10);
+                new_d.push(pdf.map(|x| x / sum));
+            }
+        }
+        for (f, nd) in new_d.into_iter().enumerate() {
+            self.d[f] = nd;
+        }
+    }
+
+    /// Marginal-message-passing pD accumulation: fold the smoothed window node 0
+    /// (the initial state `X₁`) into pD, once per trial. No-op unless `learn_d`, the
+    /// latch is clear, and the trajectory window is populated.
+    ///
+    /// The `D` write-back is **deferred** to [`Self::reset_window`] (the trial
+    /// boundary), so mid-trial MMP inference never observes a mutated `D` — the
+    /// pre-0.8.0 within-trial-immutable-`D` invariant. pD itself accumulates here,
+    /// at the first window slide, before node 0 retires from the window.
+    fn commit_pd_mmp(&mut self) {
+        if !self.learn_d || self.d_committed_this_trial || self.mmp_traj.is_empty() {
+            return;
+        }
+        let x1 = self.mmp_traj[0].clone();
+        self.accumulate_pd(&x1);
+    }
+
+    /// [`StateInference::MeanField`] pD update: commit the exact initial-state
+    /// posterior at the first observation of the trial (`last_action` still
+    /// `None`), latched to fire once. MMP accumulates elsewhere (window slide /
+    /// [`Self::reset_window`]).
+    ///
+    /// The `D` write-back is applied immediately here because under MeanField
+    /// `self.d` is read only at the trial boundary (first `belief_step` /
+    /// `reset_window`), never mid-trial — so the write is inert within the trial and
+    /// the belief trajectory is unaffected. (Under MMP the write must be deferred;
+    /// see [`Self::commit_pd_mmp`].)
+    fn update_d(&mut self, obs: &[usize]) {
+        if self.d_committed_this_trial {
+            return;
+        }
+        if let StateInference::MeanField = self.state_inference
+            && self.last_action.is_none()
+        {
+            let post = self.initial_state_posterior(obs);
+            self.accumulate_pd(&post);
+            self.sync_d_from_pd();
+        }
+    }
+
+    /// Perceive an observation and apply per-step parameter learning, preserving
+    /// the act-time ordering `belief_step → {pA, pB, pD} learning`. pE learning
+    /// happens later, at policy inference, in [`Self::infer_policies`].
+    fn perceive_and_learn(&mut self, obs: &[usize]) {
+        // pB scores the (s_{t−1} → s_t) transition; snapshot s_{t−1} before the
+        // belief update overwrites it (MeanField path only — MMP uses trajectory
+        // nodes).
+        let prev = if self.learn_b {
+            Some(self.beliefs.clone())
+        } else {
+            None
+        };
+
+        self.belief_step(obs);
+
+        // pD reads the entering observation model, so it runs before pA rewrites A
+        // (each Dirichlet update uses the trial's pre-update model, as in the paper's
+        // trial-boundary learning). pB is independent of the A/B rewrites.
+        if self.learn_d {
+            self.update_d(obs);
+        }
+        if self.learn_a {
+            self.update_a(obs);
+        }
+        if self.learn_b
+            && let Some(prev) = &prev
+        {
+            self.update_b(prev);
+        }
+    }
+
+    /// Snapshot the current Dirichlet parameters as the trial-boundary reference
+    /// for [`Self::parameter_free_energies`].
+    fn snapshot_params(&mut self) {
+        self.pa_start = self.pa.clone();
+        self.pb_start = self.pb.clone();
+        self.pd_start = self.pd.clone();
+        self.pe_start = self.pe.clone();
+    }
+
     /// Compute neg-G for a single step under a flat joint-control index.
     ///
     /// Propagates each factor `qs'_f = B[f][u_f]·qs_f`, folds to the joint state,
@@ -939,6 +1309,11 @@ impl POMDPAgent {
     /// Note: with the deterministic B a MAB agent constructs, the predicted next
     /// state is a delta and the information-gain term is exactly zero; it becomes
     /// live once a stochastic B is injected via [`Self::from_model`].
+    ///
+    /// When `use_param_info_gain` is set (and pA is present), the novelty term
+    /// (Smith Eq. 39/40) `qo_m · (W_m·joint)` is added to neg-G per modality — the
+    /// paper subtracts it from G, so it *raises* neg-G, favoring policies expected
+    /// to sharpen the observation model.
     fn efe_step(&self, beliefs: &[DVector<f64>], action_flat: usize) -> (f64, Vec<DVector<f64>>) {
         let controls = flat_to_multi(action_flat, &self.n_controls);
         let next: Vec<DVector<f64>> = (0..beliefs.len())
@@ -948,6 +1323,7 @@ impl POMDPAgent {
 
         let mut pragmatic = 0.0;
         let mut info_gain = 0.0;
+        let novelty_on = self.use_param_info_gain && self.pa.is_some();
         for m in 0..self.n_obs.len() {
             let qo = &self.a[m] * &joint;
 
@@ -976,6 +1352,12 @@ impl POMDPAgent {
                 })
                 .sum();
             info_gain += obs_entropy - expected_conditional_entropy;
+
+            // Novelty (parameter information gain, Smith Eq. 39/40).
+            if novelty_on {
+                let pa = self.pa.as_ref().expect("invariant: pa is Some (novelty_on)");
+                info_gain += a_novelty(&pa[m], &qo, &joint);
+            }
         }
 
         (info_gain + pragmatic, next)
@@ -1093,10 +1475,15 @@ impl POMDPAgent {
         -expected_neg_g
     }
 
-    /// Marginalize the policy posterior to next-action probabilities under α precision.
-    fn infer_policies(&self) -> DVector<f64> {
-        let (policies, policy_posterior) = self.policy_posterior();
-
+    /// Marginalize a policy posterior to next-action probabilities under α
+    /// precision. Split out of [`Self::infer_policies`] verbatim so the α-softmax
+    /// float-op order is unchanged (bit-identity) while the caller can interpose
+    /// the pE update between forming the posterior and marginalizing it.
+    fn action_probs_from_posterior(
+        &self,
+        policies: &[(Vec<usize>, f64)],
+        policy_posterior: &[f64],
+    ) -> DVector<f64> {
         // Marginalize to next-action probabilities
         let mut action_probs = vec![0.0f64; self.n_actions];
         for (i, &prob) in policy_posterior.iter().enumerate() {
@@ -1123,18 +1510,53 @@ impl POMDPAgent {
         DVector::from_iterator(self.n_actions, exp_probs.iter().map(|&e| e / sum_exp))
     }
 
+    /// Form the policy posterior, apply the pE (policy-prior) Dirichlet update when
+    /// `learn_e` is set, and marginalize to next-action probabilities.
+    ///
+    /// The pE update `pe = ω·pe + η·q(π)` uses the posterior computed under the
+    /// *current* `E`; the renormalized `E = pe/Σ` write-back therefore takes effect
+    /// on the next step. With `learn_e` off this is exactly the pre-extension
+    /// action marginalization.
+    fn infer_policies(&mut self) -> DVector<f64> {
+        let (policies, policy_posterior) = self.policy_posterior();
+
+        if self.learn_e {
+            let (omega, eta) = (self.omega, self.eta);
+            let new_e = self.pe.as_mut().map(|pe| {
+                for (i, p) in pe.iter_mut().enumerate() {
+                    *p = omega * *p + eta * policy_posterior[i];
+                }
+                let sum = pe.sum().max(1e-10);
+                pe.map(|x| x / sum)
+            });
+            if let Some(e) = new_e {
+                self.e_vector = e;
+            }
+        }
+
+        self.action_probs_from_posterior(&policies, &policy_posterior)
+    }
+
     /// Update beliefs given a single-modality observation and return action
     /// probabilities without sampling.
     ///
     /// This is the single-modality entry point (`observation` is the modality-0
     /// index). For multi-modality agents use [`Self::action_probabilities_multi`].
+    ///
+    /// **Replays the flag-selected generation path.** When any `learn_*` flag is
+    /// set this mutates the model (pA/pB/pD via belief-time learning, pE at policy
+    /// inference) exactly as [`Self::act_multi`] would — the recovery pipeline that
+    /// drives this accessor must replay learning too. With learning off it is the
+    /// pure inference path.
     pub fn action_probabilities(&mut self, observation: usize) -> DVector<f64> {
-        self.belief_step(&[observation]);
+        self.perceive_and_learn(&[observation]);
         self.infer_policies()
     }
 
     /// Multi-modality form of [`Self::action_probabilities`]: `obs` carries one
-    /// observation index per modality.
+    /// observation index per modality. Like `action_probabilities`, this replays
+    /// the flag-selected generation path and mutates the model when `learn_*` flags
+    /// are set.
     #[allow(clippy::missing_errors_doc)]
     pub fn action_probabilities_multi(
         &mut self,
@@ -1143,22 +1565,19 @@ impl POMDPAgent {
         if obs.len() != self.n_modalities() {
             return Err(AifError::InvalidAction(obs.len()));
         }
-        self.belief_step(obs);
+        self.perceive_and_learn(obs);
         Ok(self.infer_policies())
     }
 
     /// Multi-modality form of [`Agent::act`]: `obs` carries one observation index
-    /// per modality. Updates beliefs, optionally learns, and samples an action.
+    /// per modality. Updates beliefs, optionally learns (pA/pB/pD then pE), and
+    /// samples an action.
     #[allow(clippy::missing_errors_doc)]
     pub fn act_multi(&mut self, obs: &[usize]) -> Result<usize, AifError> {
         if obs.len() != self.n_modalities() {
             return Err(AifError::InvalidAction(obs.len()));
         }
-        self.belief_step(obs);
-
-        if self.learn_a {
-            self.update_a(obs);
-        }
+        self.perceive_and_learn(obs);
 
         let action_probs = self.infer_policies();
         let dist = WeightedIndex::new(action_probs.as_slice())?;
@@ -1248,7 +1667,25 @@ impl POMDPAgent {
     /// Resets `last_action`, restores beliefs to the `D` prior, and empties the
     /// marginal-message-passing observation/action history, trajectory, and free
     /// energy. Safe in either inference mode.
+    ///
+    /// Under [`StateInference::MarginalMessagePassing`] with `learn_d`, if the
+    /// trial ended before the window ever slid (so the initial-state node never
+    /// left the window), the pending pD accumulation is flushed here from the
+    /// smoothed `X₁`. The learned `D` write-back (`D = pd/Σ`) is then applied here,
+    /// at the trial boundary, for **both** inference modes: under MMP it was
+    /// deferred (mid-trial `D` mutation would corrupt the [`Self::mmp_messages`]
+    /// `τ = 0` anchor); under MeanField it was already written mid-trial and this
+    /// re-sync is idempotent. `D` thus updates exactly at the trial boundary,
+    /// matching the paper's trial-indexed Eq. 34. The method then re-snapshots the
+    /// Dirichlet trial-boundary references (so [`Self::parameter_free_energies`]
+    /// reads zero right after a reset).
     pub fn reset_window(&mut self) {
+        // Flush any pending MMP pD accumulation before the trajectory is cleared,
+        // then write the learned D back at the trial boundary (deferred under MMP).
+        self.commit_pd_mmp();
+        if self.learn_d {
+            self.sync_d_from_pd();
+        }
         self.last_action = None;
         self.beliefs = self.d.clone();
         self.mmp_obs_hist.clear();
@@ -1257,6 +1694,56 @@ impl POMDPAgent {
         self.mmp_free_energy = 0.0;
         self.last_predictive_prior = None;
         self.last_obs = None;
+        self.d_committed_this_trial = false;
+        // Re-snapshot the Dirichlet references at the end (after the commit + sync
+        // above), so post-reset parameter free energies are all zero.
+        self.snapshot_params();
+    }
+
+    /// Parameter (Dirichlet) free energies of the learned components:
+    /// `KL(Dir(now) ‖ Dir(start))` against the last trial-boundary snapshot
+    /// (Smith Table 3 `MDP.Fa`/`Fb`/`Fd`). Each field is `None` when its `learn_*`
+    /// flag is off, live mid-trial, and `0.0` immediately after
+    /// [`Self::reset_window`]. See [`ParameterFreeEnergies`].
+    #[must_use]
+    pub fn parameter_free_energies(&self) -> ParameterFreeEnergies {
+        let fa = match (&self.pa, &self.pa_start) {
+            (Some(pa), Some(pa0)) => Some(
+                pa.iter()
+                    .zip(pa0.iter())
+                    .map(|(m, m0)| dmatrix_column_kl(m, m0))
+                    .collect(),
+            ),
+            _ => None,
+        };
+        let fb = match (&self.pb, &self.pb_start) {
+            (Some(pb), Some(pb0)) => Some(
+                pb.iter()
+                    .zip(pb0.iter())
+                    .map(|(bf, bf0)| {
+                        bf.iter()
+                            .zip(bf0.iter())
+                            .map(|(bu, bu0)| dmatrix_column_kl(bu, bu0))
+                            .sum()
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        };
+        let fd = match (&self.pd, &self.pd_start) {
+            (Some(pd), Some(pd0)) => Some(
+                pd.iter()
+                    .zip(pd0.iter())
+                    .map(|(v, v0)| dirichlet_kl(v.as_slice(), v0.as_slice()))
+                    .collect(),
+            ),
+            _ => None,
+        };
+        let fe = match (&self.pe, &self.pe_start) {
+            (Some(pe), Some(pe0)) => Some(dirichlet_kl(pe.as_slice(), pe0.as_slice())),
+            _ => None,
+        };
+        ParameterFreeEnergies { fa, fb, fd, fe }
     }
 }
 
@@ -1309,6 +1796,47 @@ fn joint_belief(factors: &[DVector<f64>]) -> DVector<f64> {
         joint = DVector::from_column_slice(k.as_slice());
     }
     joint
+}
+
+/// Novelty (parameter information gain) for one modality, `qo · (W·joint)`, with
+/// `W = ½(pa^{⊙−1} − pa_sums^{⊙−1})` (Smith et al. 2022, Eq. 39/40).
+///
+/// `pa_sums[(o, j)]` is the column-`j` sum of `pa` broadcast down the column;
+/// element-wise reciprocals are floored at `1e-10`. `qo = A[m]·joint` is the
+/// predicted observation distribution and `joint` the predicted next joint state.
+fn a_novelty(pa_m: &DMatrix<f64>, qo: &DVector<f64>, joint: &DVector<f64>) -> f64 {
+    let nrows = pa_m.nrows();
+    let ncols = pa_m.ncols();
+    let col_sums: Vec<f64> = (0..ncols)
+        .map(|j| (0..nrows).map(|o| pa_m[(o, j)]).sum())
+        .collect();
+    let mut novelty = 0.0;
+    for o in 0..nrows {
+        // (W·joint)[o] = Σ_j ½(1/pa[(o,j)] − 1/col_sum[j]) · joint[j].
+        let mut wj = 0.0;
+        for j in 0..ncols {
+            let inv_pa = 1.0 / pa_m[(o, j)].max(1e-10);
+            let inv_sum = 1.0 / col_sums[j].max(1e-10);
+            wj += 0.5 * (inv_pa - inv_sum) * joint[j];
+        }
+        novelty += qo[o] * wj;
+    }
+    novelty
+}
+
+/// Sum of per-column Dirichlet KL divergences between two equal-shape Dirichlet
+/// count matrices (each column is one Dirichlet distribution). Backs the
+/// per-modality `Fa` and per-control `Fb` parameter free energies.
+fn dmatrix_column_kl(now: &DMatrix<f64>, start: &DMatrix<f64>) -> f64 {
+    let nrows = now.nrows();
+    let ncols = now.ncols();
+    let mut total = 0.0;
+    for j in 0..ncols {
+        let q: Vec<f64> = (0..nrows).map(|r| now[(r, j)]).collect();
+        let p: Vec<f64> = (0..nrows).map(|r| start[(r, j)]).collect();
+        total += dirichlet_kl(&q, &p);
+    }
+    total
 }
 
 /// Probability floor applied before every `ln` in the marginal-message-passing
@@ -1402,8 +1930,34 @@ fn validate_agent_params(params: &AgentParams) -> Result<(), AifError> {
             "AgentParams.inference_iters must be >= 1".to_owned(),
         ));
     }
+    // Learning rate η and forgetting rate ω both lie in (0, 1] (paper: scalars in
+    // 0–1; 0 would freeze/erase learning).
+    if !params.eta.is_finite() || params.eta <= 0.0 || params.eta > 1.0 {
+        return Err(AifError::InvalidDistribution(format!(
+            "AgentParams.eta must be finite and in (0, 1], got {}",
+            params.eta
+        )));
+    }
+    if !params.omega.is_finite() || params.omega <= 0.0 || params.omega > 1.0 {
+        return Err(AifError::InvalidDistribution(format!(
+            "AgentParams.omega must be finite and in (0, 1], got {}",
+            params.omega
+        )));
+    }
+    // Each Dirichlet learning flag needs its concentration scale (finite, > 0).
+    validate_precision_scale(params.learn_b, params.initial_precision_b, "initial_precision_b")?;
+    validate_precision_scale(params.learn_d, params.initial_precision_d, "initial_precision_d")?;
+    validate_precision_scale(params.learn_e, params.initial_precision_e, "initial_precision_e")?;
+    // The novelty term is built from the pA counts, so it requires A-matrix learning.
+    if params.use_param_info_gain && !params.learn_a {
+        return Err(AifError::InvalidDistribution(
+            "AgentParams.use_param_info_gain (novelty term) is built from pA; requires learn_a"
+                .to_owned(),
+        ));
+    }
     // Marginal message passing needs a window at least as long as the policy
-    // horizon and at least one Jacobi sweep.
+    // horizon and at least one Jacobi sweep. (A-matrix learning under MMP is
+    // supported since #13 — learning replays from the smoothed last-node belief.)
     if let StateInference::MarginalMessagePassing { horizon, iters } = params.state_inference {
         if iters == 0 {
             return Err(AifError::InvalidDistribution(
@@ -1417,17 +1971,21 @@ fn validate_agent_params(params: &AgentParams) -> Result<(), AifError> {
                 params.policy_depth
             )));
         }
-        // A-matrix learning under marginal message passing is out of scope for
-        // 0.7.0 (paper Eq. 34/36 wire learning into trajectory posteriors; tracked
-        // in issue #13). Rejected here — the single re-checkable gate all
-        // constructor paths route through — rather than silently learning from the
-        // smoothed last-node belief.
-        if params.learn_a {
-            return Err(AifError::InvalidDistribution(
-                "A-matrix learning is not supported under MarginalMessagePassing (issue #13)"
-                    .to_owned(),
-            ));
-        }
+    }
+    Ok(())
+}
+
+/// Validate that a Dirichlet concentration scale is present and finite/positive
+/// whenever its learning flag is set.
+fn validate_precision_scale(
+    learn: bool,
+    scale: Option<f64>,
+    field: &str,
+) -> Result<(), AifError> {
+    if learn && !matches!(scale, Some(s) if s.is_finite() && s > 0.0) {
+        return Err(AifError::InvalidDistribution(format!(
+            "AgentParams.{field} must be present, finite and > 0 when its learn flag is set"
+        )));
     }
     Ok(())
 }
@@ -2681,7 +3239,8 @@ mod tests {
         );
         assert!(matches!(zero_iters, Err(AifError::InvalidDistribution(_))));
 
-        // Learning is out of scope under MMP (issue #13).
+        // A-matrix learning under MMP is now supported (#13): construction succeeds
+        // and learning replays from the smoothed last-node belief.
         let learn_mmp = POMDPAgent::from_model(
             base(),
             AgentParams {
@@ -2692,6 +3251,703 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(matches!(learn_mmp, Err(AifError::InvalidDistribution(_))));
+        assert!(learn_mmp.is_ok(), "MMP + learn_a must now construct (#13)");
+    }
+
+    // ----- Stage A (tira #13): Dirichlet learning (pB/pD/pE) + novelty EFE -----
+
+    /// 1-factor / 1-modality model with `n_controls` explicit transition matrices.
+    fn single_factor_model(
+        a: DMatrix<f64>,
+        b: Vec<DMatrix<f64>>,
+        d: Vec<f64>,
+    ) -> GenerativeModel {
+        let n_obs = a.nrows();
+        GenerativeModel {
+            a: vec![a],
+            b: vec![b],
+            c: vec![vec![0.5; n_obs]],
+            d: vec![d],
+        }
+    }
+
+    #[test]
+    fn test_novelty_paper_anchor_low_confidence() {
+        // Smith Eq. 39/40 anchor. pa = [[.25, 1], [.75, 1]] (rows = obs), so
+        //   pa_sums = [[1, 2], [1, 2]] and
+        //   W = ½(pa^{⊙−1} − pa_sums^{⊙−1}) = [[1.5, .25], [1/6, .25]].
+        // With A = [[.25, .5], [.75, .5]] and s = joint = [.9, .1]:
+        //   qo = A·s = [.275, .725]; W·s = [1.375, .175];
+        //   novelty = qo·(W·s) = .275·1.375 + .725·.175 = 0.505.
+        let pa = DMatrix::from_row_slice(2, 2, &[0.25, 1.0, 0.75, 1.0]);
+        let a = DMatrix::from_row_slice(2, 2, &[0.25, 0.5, 0.75, 0.5]);
+        let joint = DVector::from_vec(vec![0.9, 0.1]);
+        let qo = &a * &joint;
+        assert_relative_eq!(a_novelty(&pa, &qo, &joint), 0.505, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_novelty_paper_anchor_high_confidence() {
+        // Same A/s as the low-confidence anchor but pa scaled ×100
+        // (pa = [[25, 100], [75, 100]]), so W scales ×1/100 and novelty ×1/100:
+        //   novelty = 0.00505.
+        let pa = DMatrix::from_row_slice(2, 2, &[25.0, 100.0, 75.0, 100.0]);
+        let a = DMatrix::from_row_slice(2, 2, &[0.25, 0.5, 0.75, 0.5]);
+        let joint = DVector::from_vec(vec![0.9, 0.1]);
+        let qo = &a * &joint;
+        assert_relative_eq!(a_novelty(&pa, &qo, &joint), 0.00505, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_novelty_added_to_neg_g() -> Result<(), AifError> {
+        // 2-state MAB (control i → deterministic state i), discriminative A, learn_a
+        // with asymmetric initial pA columns: state 0 has 10 counts, state 1 has 1.
+        // Arm 0 predicts state 0 (high count → low novelty); arm 1 predicts state 1
+        // (low count → high novelty), so the novelty term favors arm 1.
+        let build = |novelty: bool| {
+            POMDPAgent::from_model(
+                single_factor_model(
+                    DMatrix::from_row_slice(2, 2, &[0.8, 0.2, 0.2, 0.8]),
+                    mab_transitions(2),
+                    vec![0.5, 0.5],
+                ),
+                AgentParams {
+                    alpha: 1.0,
+                    learn_a: true,
+                    use_param_info_gain: novelty,
+                    initial_precision: Some(vec![10.0, 1.0]),
+                    ..Default::default()
+                },
+            )
+        };
+        let mut off = build(false)?;
+        let mut on = build(true)?;
+
+        // Without novelty the two arms are symmetric (equal pragmatic value, zero
+        // info gain), so their neg-G ties.
+        let (g0_off, _) = off.efe_step(&off.beliefs, 0);
+        let (g1_off, _) = off.efe_step(&off.beliefs, 1);
+        assert_relative_eq!(g0_off, g1_off, epsilon = 1e-12);
+
+        // Novelty only raises neg-G, and raises the low-count arm 1 more.
+        let (g0_on, _) = on.efe_step(&on.beliefs, 0);
+        let (g1_on, _) = on.efe_step(&on.beliefs, 1);
+        assert!(g0_on >= g0_off - 1e-12, "novelty must not lower neg-G");
+        assert!(g1_on >= g1_off - 1e-12, "novelty must not lower neg-G");
+        assert!(g1_on > g0_on, "low-count arm 1 must gain more novelty: {g1_on} vs {g0_on}");
+
+        // G (lower = better) is strictly lower with novelty.
+        assert!(
+            on.expected_free_energy() < off.expected_free_energy(),
+            "novelty must lower G"
+        );
+
+        // Directional: action mass shifts toward the low-count arm 1.
+        let p_off = off.infer_policies();
+        let p_on = on.infer_policies();
+        assert_relative_eq!(p_off[0], p_off[1], epsilon = 1e-9);
+        assert!(p_on[1] > p_off[1], "novelty must shift mass to arm 1: {} vs {}", p_on[1], p_off[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_novelty_requires_learn_a() {
+        // use_param_info_gain without learn_a is a construction error.
+        let res = POMDPAgent::from_model(
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.8, 0.2, 0.2, 0.8]),
+                vec![DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8])],
+                vec![0.5, 0.5],
+            ),
+            AgentParams {
+                alpha: 1.0,
+                use_param_info_gain: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(res, Err(AifError::InvalidDistribution(_))));
+    }
+
+    #[test]
+    fn test_defaults_bit_identical_with_new_params() -> Result<(), AifError> {
+        // η = ω = 1, novelty off: pA accumulates exactly the folded posterior with
+        // no scaling (the pre-extension update_a). Identity B and a symmetric A keep
+        // the belief at [.5, .5] so the two-step counts are hand-exact.
+        let mut agent = POMDPAgent::from_model(
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.9, 0.1, 0.1, 0.9]),
+                vec![DMatrix::identity(2, 2)],
+                vec![0.5, 0.5],
+            ),
+            AgentParams {
+                alpha: 1.0,
+                learn_a: true,
+                initial_precision: Some(vec![1.0, 1.0]),
+                ..Default::default()
+            },
+        )?;
+        // Step 1: belief = D = [.5, .5]; pA row 0 += [.5, .5].
+        agent.action_probabilities(0);
+        agent.record_action(0);
+        // Step 2: A recomputed symmetric ⇒ belief stays [.5, .5]; pA row 0 += [.5, .5].
+        agent.action_probabilities(0);
+
+        let pa = agent.pa.as_ref().expect("invariant: learn_a ⇒ pa is Some");
+        assert_relative_eq!(pa[0][(0, 0)], 2.0, epsilon = 1e-15);
+        assert_relative_eq!(pa[0][(0, 1)], 2.0, epsilon = 1e-15);
+        assert_relative_eq!(pa[0][(1, 0)], 1.0, epsilon = 1e-15);
+        assert_relative_eq!(pa[0][(1, 1)], 1.0, epsilon = 1e-15);
+        Ok(())
+    }
+
+    #[test]
+    fn test_eta_scales_pa_update() -> Result<(), AifError> {
+        // η = 0.5 on a delta belief D = [1, 0]: the observed row 0 gains exactly
+        // 0.5·joint = [0.5, 0] on top of the initial count 1.
+        let mut agent = POMDPAgent::from_model(
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.9, 0.1, 0.1, 0.9]),
+                vec![DMatrix::identity(2, 2)],
+                vec![1.0, 0.0],
+            ),
+            AgentParams {
+                alpha: 1.0,
+                learn_a: true,
+                eta: 0.5,
+                omega: 1.0,
+                initial_precision: Some(vec![1.0, 1.0]),
+                ..Default::default()
+            },
+        )?;
+        agent.action_probabilities(0);
+        let pa = agent.pa.as_ref().expect("invariant: pa is Some");
+        assert_relative_eq!(pa[0][(0, 0)], 1.5, epsilon = 1e-15);
+        assert_relative_eq!(pa[0][(0, 1)], 1.0, epsilon = 1e-15);
+        assert_relative_eq!(pa[0][(1, 0)], 1.0, epsilon = 1e-15);
+        assert_relative_eq!(pa[0][(1, 1)], 1.0, epsilon = 1e-15);
+        Ok(())
+    }
+
+    #[test]
+    fn test_omega_per_step_decay() -> Result<(), AifError> {
+        // (a) pD forgetting anchor. pd_start = 100·[.5, .5] = [50, 50]; ω = 0.1,
+        // η = 1. First observation o₁ = 0 with A = [[.8, .2], [.2, .8]] gives the
+        // exact init posterior normalize(D ⊙ A[0,:]) = normalize([.4, .1]) = [.8, .2],
+        // so pd = 0.1·[50, 50] + 1·[.8, .2] = [5.8, 5.2].
+        let mut d_agent = POMDPAgent::from_model(
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.8, 0.2, 0.2, 0.8]),
+                vec![DMatrix::identity(2, 2)],
+                vec![0.5, 0.5],
+            ),
+            AgentParams {
+                alpha: 1.0,
+                learn_d: true,
+                eta: 1.0,
+                omega: 0.1,
+                initial_precision_d: Some(100.0),
+                ..Default::default()
+            },
+        )?;
+        d_agent.action_probabilities(0);
+        let pd = d_agent.pd.as_ref().expect("invariant: learn_d ⇒ pd is Some");
+        assert_relative_eq!(pd[0][0], 5.8, epsilon = 1e-12);
+        assert_relative_eq!(pd[0][1], 5.2, epsilon = 1e-12);
+
+        // (b) pA two-step decay on a delta belief (identity B, D = [1, 0] ⇒ belief
+        // stays [1, 0]). ω = 0.5, η = 1, o = 0 each step:
+        //   start pa row 0 col 0 = 1
+        //   step 1: ×0.5 → 0.5, +1 → 1.5   (col 1 row 0: 0.5)
+        //   step 2: ×0.5 → 0.75, +1 → 1.75 (col 1 row 0: 0.25)
+        let mut a_agent = POMDPAgent::from_model(
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.9, 0.1, 0.1, 0.9]),
+                vec![DMatrix::identity(2, 2)],
+                vec![1.0, 0.0],
+            ),
+            AgentParams {
+                alpha: 1.0,
+                learn_a: true,
+                eta: 1.0,
+                omega: 0.5,
+                initial_precision: Some(vec![1.0, 1.0]),
+                ..Default::default()
+            },
+        )?;
+        a_agent.action_probabilities(0);
+        a_agent.record_action(0);
+        a_agent.action_probabilities(0);
+        let pa = a_agent.pa.as_ref().expect("invariant: pa is Some");
+        assert_relative_eq!(pa[0][(0, 0)], 1.75, epsilon = 1e-12);
+        assert_relative_eq!(pa[0][(0, 1)], 0.25, epsilon = 1e-12);
+        assert_relative_eq!(pa[0][(1, 0)], 0.25, epsilon = 1e-12);
+        assert_relative_eq!(pa[0][(1, 1)], 0.25, epsilon = 1e-12);
+
+        // (c) ω = 1 ⇒ no decay: the same delta setup accumulates 1 + 1 + 1 = 3.
+        let mut noforget = POMDPAgent::from_model(
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.9, 0.1, 0.1, 0.9]),
+                vec![DMatrix::identity(2, 2)],
+                vec![1.0, 0.0],
+            ),
+            AgentParams {
+                alpha: 1.0,
+                learn_a: true,
+                eta: 1.0,
+                omega: 1.0,
+                initial_precision: Some(vec![1.0, 1.0]),
+                ..Default::default()
+            },
+        )?;
+        noforget.action_probabilities(0);
+        noforget.record_action(0);
+        noforget.action_probabilities(0);
+        let pa = noforget.pa.as_ref().expect("invariant: pa is Some");
+        assert_relative_eq!(pa[0][(0, 0)], 3.0, epsilon = 1e-15);
+        Ok(())
+    }
+
+    #[test]
+    fn test_learn_b_updates_transition_model() -> Result<(), AifError> {
+        // 2-state, 2-control stochastic B, learn_b (scale 1 ⇒ pb = B), ω = η = 1.
+        // D = [1, 0] ⇒ s_{t−1} = [1, 0]; take control 0; observe o₂ = 1 with
+        // A = [[.9, .2], [.1, .8]]:
+        //   prior = B0·[1,0] = [.7, .3]; L(1) = A[1,:] = [.1, .8];
+        //   s_t ∝ [.07, .24] ⇒ [.225806, .774194].
+        // pb[0][0] += s_t ⊗ [1,0] adds s_t to column 0 only.
+        let b0 = DMatrix::from_row_slice(2, 2, &[0.7, 0.4, 0.3, 0.6]);
+        let b1 = DMatrix::from_row_slice(2, 2, &[0.6, 0.5, 0.4, 0.5]);
+        let mut agent = POMDPAgent::from_model(
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8]),
+                vec![b0.clone(), b1.clone()],
+                vec![1.0, 0.0],
+            ),
+            AgentParams {
+                alpha: 1.0,
+                learn_b: true,
+                initial_precision_b: Some(1.0),
+                ..Default::default()
+            },
+        )?;
+        agent.action_probabilities(0); // o₁ = 0, belief = D
+        agent.record_action(0); // take control 0
+        agent.action_probabilities(1); // o₂ = 1 ⇒ infer s_t, update pb
+
+        let denom = 0.07 + 0.24;
+        let (st0, st1) = (0.07 / denom, 0.24 / denom);
+        // Belief path yields s_t.
+        assert_relative_eq!(agent.state_belief()[0], st0, epsilon = 1e-12);
+        assert_relative_eq!(agent.state_belief()[1], st1, epsilon = 1e-12);
+
+        let pb = agent.pb.as_ref().expect("invariant: learn_b ⇒ pb is Some");
+        // Taken control 0: column 0 gained s_t; column 1 untouched (s_{t−1}[1] = 0).
+        assert_relative_eq!(pb[0][0][(0, 0)], 0.7 + st0, epsilon = 1e-12);
+        assert_relative_eq!(pb[0][0][(1, 0)], 0.3 + st1, epsilon = 1e-12);
+        assert_relative_eq!(pb[0][0][(0, 1)], 0.4, epsilon = 1e-12);
+        assert_relative_eq!(pb[0][0][(1, 1)], 0.6, epsilon = 1e-12);
+        // Untaken control 1 only decayed (ω = 1 ⇒ unchanged from B1).
+        for i in 0..2 {
+            for j in 0..2 {
+                assert_relative_eq!(pb[0][1][(i, j)], b1[(i, j)], epsilon = 1e-12);
+            }
+        }
+        // B[0][0] write-back is column-stochastic.
+        for j in 0..2 {
+            let col_sum = agent.b[0][0][(0, j)] + agent.b[0][0][(1, j)];
+            assert_relative_eq!(col_sum, 1.0, epsilon = 1e-12);
+        }
+        assert_relative_eq!(agent.b[0][0][(0, 0)], (0.7 + st0) / (1.0 + st0 + st1), epsilon = 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_learn_d_meanfield_first_step() -> Result<(), AifError> {
+        // D = [.5, .5], A = [[.8, .2], [.2, .8]], o₁ = 0. pd_start = [.5, .5];
+        // init posterior = normalize([.4, .1]) = [.8, .2]; pd = [.5, .5] + [.8, .2]
+        // = [1.3, .7]. The pD update must NOT perturb the belief path, so beliefs
+        // match an otherwise-identical non-learning agent bit-for-bit.
+        let model = || {
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.8, 0.2, 0.2, 0.8]),
+                vec![DMatrix::identity(2, 2)],
+                vec![0.5, 0.5],
+            )
+        };
+        let mut learner = POMDPAgent::from_model(
+            model(),
+            AgentParams {
+                alpha: 1.0,
+                learn_d: true,
+                initial_precision_d: Some(1.0),
+                ..Default::default()
+            },
+        )?;
+        let mut plain = POMDPAgent::from_model(model(), AgentParams { alpha: 1.0, ..Default::default() })?;
+
+        // Step 1, o₁ = 0.
+        learner.action_probabilities(0);
+        plain.action_probabilities(0);
+        let pd = learner.pd.as_ref().expect("invariant: pd is Some");
+        assert_relative_eq!(pd[0][0], 1.3, epsilon = 1e-12);
+        assert_relative_eq!(pd[0][1], 0.7, epsilon = 1e-12);
+        assert_relative_eq!(learner.state_belief()[0], plain.state_belief()[0], epsilon = 1e-15);
+        assert_relative_eq!(learner.state_belief()[1], plain.state_belief()[1], epsilon = 1e-15);
+
+        // Step 2 must NOT re-commit pd (latched once per trial) and beliefs stay in
+        // lock-step with the non-learning agent.
+        learner.record_action(0);
+        plain.record_action(0);
+        learner.action_probabilities(1);
+        plain.action_probabilities(1);
+        let pd = learner.pd.as_ref().expect("invariant: pd is Some");
+        assert_relative_eq!(pd[0][0], 1.3, epsilon = 1e-12);
+        assert_relative_eq!(pd[0][1], 0.7, epsilon = 1e-12);
+        assert_relative_eq!(learner.state_belief()[0], plain.state_belief()[0], epsilon = 1e-15);
+        assert_relative_eq!(learner.state_belief()[1], plain.state_belief()[1], epsilon = 1e-15);
+        Ok(())
+    }
+
+    #[test]
+    fn test_learn_d_mmp_commits_smoothed_x1() -> Result<(), AifError> {
+        // MMP horizon 2, learn_d, ω = η = 1, pd_start = D = [.5, .5]. The window
+        // slides on the third observation; the node about to leave carries the
+        // smoothed X₁, which is folded into pd.
+        let b = DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8]);
+        let a = DMatrix::from_row_slice(2, 2, &[0.8, 0.3, 0.2, 0.7]);
+        let make = |horizon: usize| {
+            POMDPAgent::from_model(
+                single_factor_model(a.clone(), vec![b.clone()], vec![0.5, 0.5]),
+                AgentParams {
+                    alpha: 1.0,
+                    learn_d: true,
+                    initial_precision_d: Some(1.0),
+                    state_inference: StateInference::MarginalMessagePassing { horizon, iters: 500 },
+                    ..Default::default()
+                },
+            )
+        };
+
+        // --- Slide variant (horizon 2) ---
+        // Contract: pD ACCUMULATES at the first slide, but the D write-back is
+        // DEFERRED to reset_window (a mid-trial D mutation would corrupt the MMP
+        // τ=0 anchor).
+        let mut agent = make(2)?;
+        agent.action_probabilities(0);
+        agent.record_action(0);
+        agent.action_probabilities(1);
+        // X₁ of the current 2-node window (about to leave on the next observation).
+        let x1 = agent.bma_state_belief(1).expect("invariant: node 1 present")[0].clone();
+        agent.record_action(0);
+        agent.action_probabilities(0); // triggers the slide + pD accumulation
+
+        // pD moved at the slide...
+        let pd = agent.pd.as_ref().expect("invariant: pd is Some");
+        assert_relative_eq!(pd[0][0], 0.5 + x1[0], epsilon = 1e-9);
+        assert_relative_eq!(pd[0][1], 0.5 + x1[1], epsilon = 1e-9);
+        // ...but D is UNCHANGED mid-trial (still the [.5, .5] prior).
+        assert_relative_eq!(agent.d[0][0], 0.5, epsilon = 1e-15);
+        assert_relative_eq!(agent.d[0][1], 0.5, epsilon = 1e-15);
+
+        // Latch prevents a second accumulation on the next slide.
+        agent.record_action(0);
+        agent.action_probabilities(1);
+        let pd = agent.pd.as_ref().expect("invariant: pd is Some");
+        assert_relative_eq!(pd[0][0], 0.5 + x1[0], epsilon = 1e-9);
+        assert_relative_eq!(agent.d[0][0], 0.5, epsilon = 1e-15);
+
+        // reset_window applies the deferred D write-back at the trial boundary.
+        agent.reset_window();
+        assert_relative_eq!(agent.d[0][0], (0.5 + x1[0]) / 2.0, epsilon = 1e-9);
+        assert_relative_eq!(agent.d[0][1], (0.5 + x1[1]) / 2.0, epsilon = 1e-9);
+
+        // --- Reset-before-slide variant (horizon 3, only 2 observations) ---
+        let mut agent2 = make(3)?;
+        agent2.action_probabilities(0);
+        agent2.record_action(0);
+        agent2.action_probabilities(1);
+        let x1b = agent2.bma_state_belief(1).expect("invariant: node 1 present")[0].clone();
+        // Still no slide ⇒ D untouched before reset.
+        assert_relative_eq!(agent2.d[0][0], 0.5, epsilon = 1e-15);
+        agent2.reset_window(); // no slide happened ⇒ accumulate + write-back fire here
+        // pd is re-snapshotted at reset, so parameter free energies read zero.
+        let pf = agent2.parameter_free_energies();
+        assert!(pf.fd.expect("invariant: learn_d")[0].abs() < 1e-12, "fd resets to 0 post-reset");
+        // The learned value landed in D at the trial boundary (D = pd/Σ).
+        let d_sum = 0.5 + x1b[0] + 0.5 + x1b[1]; // = 2 (x1b sums to 1)
+        assert_relative_eq!(agent2.d[0][0], (0.5 + x1b[0]) / d_sum, epsilon = 1e-9);
+        Ok(())
+    }
+
+    #[test]
+    fn test_mmp_learn_d_preserves_within_trial_beliefs() -> Result<(), AifError> {
+        // Invariant (0.7.0): under MMP, D is immutable within a trial, so a learn_d
+        // agent must produce a bit-identical within-trial belief trajectory to an
+        // otherwise-identical non-learning agent — even across several window slides
+        // (the deferred-D-write-back contract). Learning still lands: after
+        // reset_window, the learner's D has moved off its initial value.
+        let b = DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8]);
+        let a = DMatrix::from_row_slice(2, 2, &[0.8, 0.3, 0.2, 0.7]);
+        let make = |learn_d: bool| {
+            POMDPAgent::from_model(
+                single_factor_model(a.clone(), vec![b.clone()], vec![0.5, 0.5]),
+                AgentParams {
+                    alpha: 1.0,
+                    learn_d,
+                    initial_precision_d: if learn_d { Some(1.0) } else { None },
+                    state_inference: StateInference::MarginalMessagePassing { horizon: 2, iters: 500 },
+                    ..Default::default()
+                },
+            )
+        };
+        let mut learner = make(true)?;
+        let mut plain = make(false)?;
+
+        // Horizon 2 ⇒ slides on obs 3, 4, 5 (three slides over six observations).
+        let obs = [0usize, 1, 0, 1, 0, 1];
+        for (i, &o) in obs.iter().enumerate() {
+            let p_learn = learner.action_probabilities(o);
+            let p_plain = plain.action_probabilities(o);
+            // Smoothed current-node belief bit-identical at every step.
+            let bl = learner.state_beliefs();
+            let bp = plain.state_beliefs();
+            for f in 0..bl.len() {
+                for s in 0..bl[f].len() {
+                    assert!(
+                        (bl[f][s] - bp[f][s]).abs() < 1e-15,
+                        "step {i} factor {f} state {s}: learn_d belief {} != plain {}",
+                        bl[f][s],
+                        bp[f][s]
+                    );
+                }
+            }
+            // Action probabilities likewise identical (single control here).
+            for k in 0..p_learn.len() {
+                assert!((p_learn[k] - p_plain[k]).abs() < 1e-15, "step {i}: action probs diverged");
+            }
+            // D stays at the [.5, .5] prior throughout the trial for the learner.
+            assert_relative_eq!(learner.d[0][0], 0.5, epsilon = 1e-15);
+            learner.record_action(0);
+            plain.record_action(0);
+        }
+
+        // Learning DID land: the trial-boundary write-back moves D.
+        learner.reset_window();
+        assert!(
+            (learner.d[0][0] - 0.5).abs() > 1e-6,
+            "learn_d must move D at the trial boundary, got {}",
+            learner.d[0][0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_learn_e_shifts_policy_prior() -> Result<(), AifError> {
+        // Symmetric MAB (uniform A) ⇒ uniform q(π); pe stays uniform under the fixed
+        // point pe ← ω·pe + η·uniform, so E is unchanged bit-for-bit.
+        let mut sym = POMDPAgent::from_model(
+            single_factor_model(
+                DMatrix::from_element(2, 2, 0.5),
+                mab_transitions(2),
+                vec![0.5, 0.5],
+            ),
+            AgentParams {
+                alpha: 1.0,
+                learn_e: true,
+                initial_precision_e: Some(1.0),
+                ..Default::default()
+            },
+        )?;
+        for _ in 0..5 {
+            sym.action_probabilities(0);
+            sym.record_action(0);
+        }
+        assert_relative_eq!(sym.e_vector[0], 0.5, epsilon = 1e-15);
+        assert_relative_eq!(sym.e_vector[1], 0.5, epsilon = 1e-15);
+
+        // Asymmetric: discriminative A + preference for obs 0 favors arm 0, so its
+        // policy-prior mass rises and E stays a distribution.
+        let mut asym = POMDPAgent::from_model(
+            GenerativeModel {
+                a: vec![DMatrix::from_row_slice(2, 2, &[0.9, 0.1, 0.1, 0.9])],
+                b: vec![mab_transitions(2)],
+                c: vec![vec![0.9, 0.1]],
+                d: vec![vec![0.5, 0.5]],
+            },
+            AgentParams {
+                alpha: 1.0,
+                learn_e: true,
+                initial_precision_e: Some(1.0),
+                ..Default::default()
+            },
+        )?;
+        for _ in 0..10 {
+            asym.action_probabilities(0);
+            asym.record_action(0);
+        }
+        assert!(asym.e_vector[0] > asym.e_vector[1], "preferred policy mass must rise");
+        assert!(asym.e_vector[0] > 0.5, "arm 0 prior must exceed its uniform start");
+        assert_relative_eq!(asym.e_vector.sum(), 1.0, epsilon = 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_mmp_learn_a_now_constructs_and_learns() -> Result<(), AifError> {
+        // MMP + learn_a: constructs and accumulates pA from the smoothed last-node
+        // belief; A moves off its initial value.
+        let b = DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8]);
+        let a = DMatrix::from_row_slice(2, 2, &[0.7, 0.3, 0.3, 0.7]);
+        let mut agent = POMDPAgent::from_model(
+            single_factor_model(a.clone(), vec![b.clone()], vec![0.5, 0.5]),
+            AgentParams {
+                alpha: 1.0,
+                learn_a: true,
+                initial_precision: Some(vec![1.0, 1.0]),
+                state_inference: StateInference::MarginalMessagePassing { horizon: 3, iters: 200 },
+                ..Default::default()
+            },
+        )?;
+        agent.rng = StdRng::seed_from_u64(19);
+        let obs = [0usize, 1, 0, 1, 0];
+        for &o in &obs {
+            let act = agent.act(o)?;
+            assert!(act < agent.n_actions());
+        }
+        let pa = agent.pa.as_ref().expect("invariant: pa is Some");
+        // Total pA mass grew by one count per step (single modality).
+        let total: f64 = pa[0].iter().sum();
+        assert!(total > 2.0 + obs.len() as f64 - 1e-6, "pA must accumulate: {total}");
+        let changed = (0..2).any(|r| (0..2).any(|c| (agent.a[0][(r, c)] - a[(r, c)]).abs() > 1e-6));
+        assert!(changed, "A must move off its initial value under MMP learning");
+        Ok(())
+    }
+
+    #[test]
+    fn test_parameter_free_energies() -> Result<(), AifError> {
+        // All learn flags on. At construction every KL(x ‖ x) = 0.
+        let mut agent = POMDPAgent::from_model(
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.8, 0.2, 0.2, 0.8]),
+                vec![DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8])],
+                vec![0.5, 0.5],
+            ),
+            AgentParams {
+                alpha: 1.0,
+                learn_a: true,
+                learn_b: true,
+                learn_d: true,
+                learn_e: true,
+                initial_precision: Some(vec![1.0, 1.0]),
+                initial_precision_b: Some(1.0),
+                initial_precision_d: Some(1.0),
+                initial_precision_e: Some(1.0),
+                ..Default::default()
+            },
+        )?;
+        let pf0 = agent.parameter_free_energies();
+        assert!(pf0.fa.as_ref().unwrap().iter().all(|&x| x.abs() < 1e-12));
+        assert!(pf0.fb.as_ref().unwrap().iter().all(|&x| x.abs() < 1e-12));
+        assert!(pf0.fd.as_ref().unwrap().iter().all(|&x| x.abs() < 1e-12));
+        assert!(pf0.fe.unwrap().abs() < 1e-12);
+
+        // One MeanField step commits pd = [.5,.5] + [.8,.2] = [1.3,.7]; fd matches the
+        // Dirichlet KL of that against the [.5,.5] start.
+        agent.action_probabilities(0);
+        let pf1 = agent.parameter_free_energies();
+        let expected_fd = dirichlet_kl(&[1.3, 0.7], &[0.5, 0.5]);
+        assert!(expected_fd > 0.0);
+        assert_relative_eq!(pf1.fd.unwrap()[0], expected_fd, epsilon = 1e-12);
+        assert!(pf1.fa.unwrap()[0] > 0.0, "pA changed ⇒ fa positive");
+
+        // reset_window re-snapshots ⇒ all parameter free energies return to zero.
+        agent.reset_window();
+        let pf2 = agent.parameter_free_energies();
+        assert!(pf2.fa.as_ref().unwrap().iter().all(|&x| x.abs() < 1e-12));
+        assert!(pf2.fb.as_ref().unwrap().iter().all(|&x| x.abs() < 1e-12));
+        assert!(pf2.fd.as_ref().unwrap().iter().all(|&x| x.abs() < 1e-12));
+        assert!(pf2.fe.unwrap().abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_learning_param_validation() {
+        let base = || {
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.8, 0.2, 0.2, 0.8]),
+                vec![DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8])],
+                vec![0.5, 0.5],
+            )
+        };
+        let reject = |params: AgentParams| {
+            assert!(matches!(
+                POMDPAgent::from_model(base(), params),
+                Err(AifError::InvalidDistribution(_))
+            ));
+        };
+        // η / ω domain.
+        reject(AgentParams { alpha: 1.0, eta: 0.0, ..Default::default() });
+        reject(AgentParams { alpha: 1.0, eta: 1.5, ..Default::default() });
+        reject(AgentParams { alpha: 1.0, omega: 0.0, ..Default::default() });
+        reject(AgentParams { alpha: 1.0, omega: 1.5, ..Default::default() });
+        reject(AgentParams { alpha: 1.0, eta: f64::NAN, ..Default::default() });
+        // learn_b/d/e without their scale.
+        reject(AgentParams { alpha: 1.0, learn_b: true, ..Default::default() });
+        reject(AgentParams { alpha: 1.0, learn_d: true, ..Default::default() });
+        reject(AgentParams { alpha: 1.0, learn_e: true, ..Default::default() });
+        // Non-positive / NaN scale.
+        reject(AgentParams { alpha: 1.0, learn_b: true, initial_precision_b: Some(0.0), ..Default::default() });
+        reject(AgentParams { alpha: 1.0, learn_d: true, initial_precision_d: Some(-1.0), ..Default::default() });
+        reject(AgentParams { alpha: 1.0, learn_e: true, initial_precision_e: Some(f64::NAN), ..Default::default() });
+        // Novelty without learn_a.
+        reject(AgentParams { alpha: 1.0, use_param_info_gain: true, ..Default::default() });
+    }
+
+    #[test]
+    fn test_zero_concentration_robustness() -> Result<(), AifError> {
+        // (a) Deterministic-B MAB with learn_b: pb columns contain exact zeros, so
+        // the parameter free energies exercise the CONC_FLOOR path. All must be
+        // finite through learning steps.
+        let mut b_agent = POMDPAgent::from_model(
+            GenerativeModel {
+                a: vec![DMatrix::from_row_slice(2, 2, &[0.9, 0.1, 0.1, 0.9])],
+                b: vec![mab_transitions(2)],
+                c: vec![vec![0.7, 0.3]],
+                d: vec![vec![0.5, 0.5]],
+            },
+            AgentParams {
+                alpha: 1.0,
+                learn_b: true,
+                initial_precision_b: Some(1.0),
+                ..Default::default()
+            },
+        )?;
+        b_agent.rng = StdRng::seed_from_u64(5);
+        for _ in 0..6 {
+            b_agent.act(1)?;
+        }
+        let pf = b_agent.parameter_free_energies();
+        assert!(pf.fb.expect("invariant: learn_b").iter().all(|&x| x.is_finite()));
+
+        // (b) learn_a with a zero-count pA column + novelty on: reciprocals hit the
+        // floor but expected free energy and the parameter free energies stay finite.
+        let mut a_agent = POMDPAgent::from_model(
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.9, 0.1, 0.1, 0.9]),
+                vec![DMatrix::identity(2, 2)],
+                vec![0.5, 0.5],
+            ),
+            AgentParams {
+                alpha: 1.0,
+                learn_a: true,
+                use_param_info_gain: true,
+                initial_precision: Some(vec![1.0, 0.0]),
+                ..Default::default()
+            },
+        )?;
+        assert!(a_agent.expected_free_energy().is_finite());
+        a_agent.action_probabilities(0);
+        let pf = a_agent.parameter_free_energies();
+        assert!(pf.fa.expect("invariant: learn_a").iter().all(|&x| x.is_finite()));
+        Ok(())
     }
 }

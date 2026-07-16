@@ -14,7 +14,8 @@ mod simulation;
 pub use simulation::{
     RecoveryResult, TrialData, experiment_certainty_weighted, experiment_deterministic,
     experiment_identical, experiment_varying_alpha, experiment_varying_preferences, log_likelihood,
-    parameter_recovery_single, recover_alpha, run_group_simulation, run_single_simulation,
+    log_likelihood_learning, parameter_recovery_single, recover_alpha, run_group_simulation,
+    run_single_simulation,
 };
 
 pub use plotter::ScatterPoint;

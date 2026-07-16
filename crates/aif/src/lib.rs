@@ -6,8 +6,12 @@ mod agent;
 mod coalition;
 mod communication;
 mod group;
+mod special;
 
-pub use agent::{Agent, AgentParams, CopyAgent, GenerativeModel, POMDPAgent, StateInference};
+pub use agent::{
+    Agent, AgentParams, CopyAgent, GenerativeModel, POMDPAgent, ParameterFreeEnergies,
+    StateInference,
+};
 pub use coalition::{
     AgentId, CoalitionHistory, CompatibilityBeliefs, ObsPrecisionParams, TrustBeliefs,
     belief_weighted_preference, competence_efe,

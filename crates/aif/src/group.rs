@@ -318,6 +318,7 @@ pub struct GroupAgentBuilder {
     alpha: f64,
     voting_mode: VotingMode,
     learn_a: bool,
+    initial_precision: Option<Vec<f64>>,
     seed: Option<u64>,
 }
 
@@ -332,6 +333,7 @@ impl GroupAgentBuilder {
             alpha: 1.0,
             voting_mode: VotingMode::Probabilistic,
             learn_a: false,
+            initial_precision: None,
             seed: None,
         }
     }
@@ -390,6 +392,20 @@ impl GroupAgentBuilder {
         self
     }
 
+    /// Set the pA initial concentration (one per bandit/joint-state column) shared
+    /// by every internal agent when `learn_a` is enabled.
+    ///
+    /// Required whenever [`learn_a(true)`](Self::learn_a) is set: without it every
+    /// `build_*` method fails at [`POMDPAgent::new`] with
+    /// [`AifError::InvalidAction`] (the same guard single agents use). This release
+    /// exposes only pA learning at the group level — the per-agent `η`/`ω`/`learn_b`
+    /// /`learn_d`/`learn_e` knobs are not plumbed through the builder.
+    #[must_use]
+    pub fn initial_precision(mut self, precision: Vec<f64>) -> Self {
+        self.initial_precision = Some(precision);
+        self
+    }
+
     /// Seed the group's RNGs for reproducible runs.
     ///
     /// When set, every `build_*` method constructs the [`GroupAgent`] via
@@ -419,7 +435,7 @@ impl GroupAgentBuilder {
                 POMDPAgent::new(
                     self.n_bandits,
                     Some(self.observation_probs.clone()),
-                    None,
+                    self.initial_precision.clone(),
                     self.preferences.clone(),
                     None,
                     self.alpha,
@@ -442,7 +458,7 @@ impl GroupAgentBuilder {
                 POMDPAgent::new(
                     self.n_bandits,
                     Some(self.observation_probs.clone()),
-                    None,
+                    self.initial_precision.clone(),
                     self.preferences.clone(),
                     None,
                     a,
@@ -468,7 +484,7 @@ impl GroupAgentBuilder {
                 POMDPAgent::new(
                     self.n_bandits,
                     Some(self.observation_probs.clone()),
-                    None,
+                    self.initial_precision.clone(),
                     prefs.clone(),
                     None,
                     self.alpha,
@@ -678,6 +694,140 @@ mod tests {
             .build_varying_preferences(&pref_sets)?;
 
         assert_eq!(group.n_internal(), 4);
+        Ok(())
+    }
+
+    // ----- Stage B (tira #13 / #4): group-level learning plumbing -----
+
+    #[test]
+    fn test_group_learn_a_requires_precision() {
+        // learn_a(true) without initial_precision must fail at POMDPAgent::new
+        // (the same guard single agents use — no default-on-learn).
+        let missing = GroupAgentBuilder::new(3)
+            .n_internal(3)
+            .learn_a(true)
+            .build_identical();
+        assert!(
+            matches!(missing, Err(AifError::InvalidAction(_))),
+            "learn_a without precision must error"
+        );
+
+        // Supplying the precision makes it build.
+        let ok = GroupAgentBuilder::new(3)
+            .n_internal(3)
+            .learn_a(true)
+            .initial_precision(vec![1.0, 1.0, 1.0])
+            .build_identical();
+        assert!(ok.is_ok(), "learn_a with precision must build");
+    }
+
+    #[test]
+    fn test_group_learn_a_builds_with_precision() -> Result<(), AifError> {
+        // All three build_* paths thread the precision through.
+        let identical = GroupAgentBuilder::new(3)
+            .n_internal(3)
+            .learn_a(true)
+            .initial_precision(vec![1.0, 1.0, 1.0])
+            .build_identical()?;
+        assert_eq!(identical.n_internal(), 3);
+
+        let varying_alpha = GroupAgentBuilder::new(3)
+            .n_internal(3)
+            .learn_a(true)
+            .initial_precision(vec![1.0, 1.0, 1.0])
+            .build_varying_alpha(&[0.2, 0.5, 0.8])?;
+        assert_eq!(varying_alpha.n_internal(), 3);
+
+        let varying_prefs = GroupAgentBuilder::new(3)
+            .n_internal(2)
+            .learn_a(true)
+            .initial_precision(vec![1.0, 1.0, 1.0])
+            .build_varying_preferences(&[vec![0.9, 0.1], vec![0.1, 0.9]])?;
+        assert_eq!(varying_prefs.n_internal(), 2);
+
+        // Each path likewise errors when learn_a is on but the precision is missing.
+        assert!(GroupAgentBuilder::new(3).n_internal(3).learn_a(true).build_varying_alpha(&[0.2, 0.5, 0.8]).is_err());
+        assert!(GroupAgentBuilder::new(3).n_internal(2).learn_a(true).build_varying_preferences(&[vec![0.9, 0.1], vec![0.1, 0.9]]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_cw_group_learning_mutates_a() -> Result<(), AifError> {
+        // Certainty-weighted branch routes each internal agent through the
+        // now-learning-aware `action_probabilities`, so a learn_a CW group must move
+        // every internal agent's A off its initial value and grow its pA counts —
+        // with zero group.rs logic changes.
+        let mut group = GroupAgentBuilder::new(3)
+            .n_internal(4)
+            .observation_probs(vec![0.8, 0.2, 0.2])
+            .preferences(vec![0.7, 0.3])
+            .alpha(0.5)
+            .learn_a(true)
+            .initial_precision(vec![1.0, 1.0, 1.0])
+            .certainty_weighted(true)
+            .seed(42)
+            .build_identical()?;
+
+        let a_before: Vec<_> = group
+            .internal_agents()
+            .iter()
+            .map(|ag| ag.a_matrices()[0].clone())
+            .collect();
+        let pa_sum_before: Vec<f64> = group
+            .internal_agents()
+            .iter()
+            .map(|ag| ag.pa_counts().expect("learn_a ⇒ pA")[0].iter().sum())
+            .collect();
+
+        for t in 0..20 {
+            group.act(t % 2)?;
+        }
+
+        for (i, ag) in group.internal_agents().iter().enumerate() {
+            let a_now = &ag.a_matrices()[0];
+            let changed = (0..a_now.nrows())
+                .any(|r| (0..a_now.ncols()).any(|c| (a_now[(r, c)] - a_before[i][(r, c)]).abs() > 1e-9));
+            assert!(changed, "internal agent {i} A must change under CW learning");
+            let pa_sum_now: f64 = ag.pa_counts().expect("learn_a ⇒ pA")[0].iter().sum();
+            assert!(
+                pa_sum_now > pa_sum_before[i] + 1.0,
+                "internal agent {i} pA counts must grow: {pa_sum_now} vs {}",
+                pa_sum_before[i]
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_probabilistic_group_learning_mutates_a() -> Result<(), AifError> {
+        // Parity: the discrete-vote branch drives each internal agent through
+        // `act` (which also runs the learning update), so a learn_a Probabilistic
+        // group learns just like the CW branch.
+        let mut group = GroupAgentBuilder::new(3)
+            .n_internal(3)
+            .observation_probs(vec![0.8, 0.2, 0.2])
+            .preferences(vec![0.7, 0.3])
+            .alpha(0.5)
+            .learn_a(true)
+            .initial_precision(vec![1.0, 1.0, 1.0])
+            .build_identical()?;
+
+        let a_before: Vec<_> = group
+            .internal_agents()
+            .iter()
+            .map(|ag| ag.a_matrices()[0].clone())
+            .collect();
+
+        for t in 0..20 {
+            group.act(t % 2)?;
+        }
+
+        for (i, ag) in group.internal_agents().iter().enumerate() {
+            let a_now = &ag.a_matrices()[0];
+            let changed = (0..a_now.nrows())
+                .any(|r| (0..a_now.ncols()).any(|c| (a_now[(r, c)] - a_before[i][(r, c)]).abs() > 1e-9));
+            assert!(changed, "internal agent {i} A must change under probabilistic learning");
+        }
         Ok(())
     }
 
