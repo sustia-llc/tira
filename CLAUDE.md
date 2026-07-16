@@ -34,7 +34,7 @@ message passing), #16 (surfaced F), and #13 (full pA/pB/pD/pE learning with η/�
 EFE term, parameter free energies) plus the #4 group-learning wiring fix have landed;
 bump + rematch tracked in koalisi #43).
 
-- **118 tests** (117 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
+- **119 tests** (118 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
 - `cargo run --release -p reproduce --bin reproduce` — full reproduction in ~16s
 
 ## Module map
