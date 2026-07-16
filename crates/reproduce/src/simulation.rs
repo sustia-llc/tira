@@ -124,6 +124,47 @@ pub fn log_likelihood(
     Ok(ll)
 }
 
+/// Log-likelihood of an observed sequence under an **A-learning** POMDP model.
+///
+/// Identical replay loop to [`log_likelihood`], but the fresh agent is built with
+/// `learn_a = true` and the supplied pA `initial_precision`, so each replayed
+/// `action_probabilities` call also folds the observation into pA and updates A —
+/// the learning-aware replay contract (Stage A). This reconstructs the exact
+/// generative trajectory of a `learn_a` agent recorded via `act`, so the summed
+/// `ln P(action_t | obs_t)` matches the generating agent's per-step probabilities.
+///
+/// Recovering the learning hyperparameters themselves (η/ω) is out of scope; this
+/// scores α under a fixed, known learning configuration.
+#[allow(clippy::missing_errors_doc)]
+pub fn log_likelihood_learning(
+    data: &TrialData,
+    alpha: f64,
+    n_bandits: usize,
+    observation_probs: &[f64],
+    preferences: &[f64],
+    initial_precision: &[f64],
+) -> Result<f64, AifError> {
+    let mut model = POMDPAgent::new(
+        n_bandits,
+        Some(observation_probs.to_vec()),
+        Some(initial_precision.to_vec()),
+        preferences.to_vec(),
+        None,
+        alpha,
+        true,
+    )?;
+
+    let mut ll = 0.0;
+    for i in 0..data.len() {
+        let obs = if i == 0 { 0 } else { data.observations[i - 1] };
+        let action_probs = model.action_probabilities(obs);
+        let p = action_probs[data.actions[i]].max(1e-15);
+        ll += p.ln();
+        model.record_action(data.actions[i]);
+    }
+    Ok(ll)
+}
+
 /// Recover α from observed behaviour using grid search (MAP estimate).
 ///
 /// Evaluates log-likelihood over a grid of α values and returns the one
@@ -542,5 +583,101 @@ mod tests {
             assert!((p[0] + p[1] - 1.0).abs() < 1e-10, "Prefs should sum to 1");
             assert!(p[0] > 0.0 && p[0] < 1.0);
         }
+    }
+
+    // ----- Stage B (tira #13): learning-aware replay -----
+
+    #[test]
+    fn test_learning_replay_matches_generation() -> Result<(), AifError> {
+        use rand_distr::weighted::WeightedIndex;
+
+        // Generate with a learn_a agent by driving `action_probabilities` (the exact
+        // body `act` runs) and sampling the action with a caller-side seeded RNG, so
+        // the recorded actions — and hence the pA/A learning trajectory — are
+        // reproducible and the per-step probabilities are captured. Sampling does not
+        // feed the learning update (which depends only on obs + the recorded action),
+        // so this is behaviorally identical to generation via `act`.
+        let build = || {
+            POMDPAgent::new(
+                3,
+                Some(vec![0.8, 0.2, 0.2]),
+                Some(vec![1.0, 1.0, 1.0]),
+                vec![0.7, 0.3],
+                None,
+                0.5,
+                true,
+            )
+        };
+        let mut env = BanditEnvironment::new(vec![0.8, 0.2, 0.2])?;
+        let mut gen_agent = build()?;
+        let mut rng = StdRng::seed_from_u64(2026);
+        let mut data = TrialData::new();
+        let mut gen_probs: Vec<Vec<f64>> = Vec::new();
+        let mut prev = 0;
+        for _ in 0..60 {
+            let probs = gen_agent.action_probabilities(prev);
+            gen_probs.push(probs.iter().copied().collect());
+            let action = WeightedIndex::new(probs.as_slice())?.sample(&mut rng);
+            gen_agent.record_action(action);
+            let obs = env.step(action)?;
+            data.record(obs, action);
+            prev = obs;
+        }
+
+        // Replay the recorded (obs, action) sequence through a fresh learn_a agent.
+        // A-learning makes every step's probabilities depend on the whole history, so
+        // bit-identical per-step probabilities prove the replay reconstructs the
+        // generating agent's learned A/pA trajectory exactly.
+        let mut replay = build()?;
+        let mut prev = 0;
+        for (i, gen_p) in gen_probs.iter().enumerate() {
+            let probs = replay.action_probabilities(prev);
+            for k in 0..3 {
+                assert!(
+                    (probs[k] - gen_p[k]).abs() < 1e-15,
+                    "step {i} action {k}: replay {} != generation {}",
+                    probs[k],
+                    gen_p[k]
+                );
+            }
+            replay.record_action(data.actions[i]);
+            prev = data.observations[i];
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_log_likelihood_learning_runs_and_discriminates() -> Result<(), AifError> {
+        // Generate a sequence from a learn_a agent, then score it.
+        let mut agent = POMDPAgent::new(
+            3,
+            Some(vec![0.8, 0.2, 0.2]),
+            Some(vec![1.0, 1.0, 1.0]),
+            vec![0.7, 0.3],
+            None,
+            0.5,
+            true,
+        )?;
+        let mut env = BanditEnvironment::new(vec![0.8, 0.2, 0.2])?;
+        let data = run_single_simulation(&mut agent, &mut env, 200)?;
+
+        let ll = log_likelihood_learning(&data, 0.5, 3, &[0.8, 0.2, 0.2], &[0.7, 0.3], &[1.0, 1.0, 1.0])?;
+        assert!(ll.is_finite() && ll < 0.0, "learning LL must be finite and negative: {ll}");
+
+        // Discriminates over α: a near-uniform α=0 differs from the generating α=0.5.
+        let ll_flat = log_likelihood_learning(&data, 0.0, 3, &[0.8, 0.2, 0.2], &[0.7, 0.3], &[1.0, 1.0, 1.0])?;
+        assert!(
+            (ll - ll_flat).abs() > 1e-6,
+            "learning LL must vary with α: {ll} vs {ll_flat}"
+        );
+
+        // The learning model is a genuinely different likelihood from the fixed-A model
+        // on the same data (A drifts during replay).
+        let ll_fixed = log_likelihood(&data, 0.5, 3, &[0.8, 0.2, 0.2], &[0.7, 0.3])?;
+        assert!(
+            (ll - ll_fixed).abs() > 1e-6,
+            "learning LL must differ from the fixed-A LL: {ll} vs {ll_fixed}"
+        );
+        Ok(())
     }
 }
