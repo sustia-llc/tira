@@ -35,7 +35,7 @@ is complete**: #12 (multi-factor, multi-modality, injectable B via
 the #4 group-learning wiring fix, and #14 (opt-in γ/β precision dynamics, per-policy
 future-τ MMP windows); bump + rematch tracked in koalisi #43).
 
-- **128 tests** (127 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
+- **130 tests** (129 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
 - `cargo run --release -p reproduce --bin reproduce` — full reproduction in ~16s
 
 ## Module map
