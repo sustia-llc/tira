@@ -186,16 +186,27 @@ individual-level selection fosters self-oriented preferences.
 **Where**: New `EvolutionarySimulation` that runs generations of groups, selects by
 group-level free energy, and mutates individual agent parameters (α, C matrix).
 
-### 11. Free energy extensivity
-The paper notes that variational free energy is extensive (group FE = sum of individual FEs)
-and asks whether this holds under a group-level generative model. Numerically testable:
-compute FE for each internal agent and for the group agent, compare sum vs group.
+### 11. Free energy extensivity ✅ STUDY RUN
 
-**Where**: `POMDPAgent::variational_free_energy()` exists since 0.7.0 (#16) — the
-engine-side prerequisite is done. Remaining work is the study itself: sum F across
-internal agents in `GroupAgent`, compare with the group-level agent's F under the
-recovered generative model (reproduce-side experiment; the group path runs MeanField,
-where F is the exact one-step negative log evidence).
+The paper (§4.1) asks whether variational free energy is extensive (group F = sum of
+individual Fs) under a group-level generative model. Run the study:
+`cargo run --release -p reproduce --bin extension11` (~5 s; report
+`docs/extension11-extensivity.md`).
+
+**Finding**: group F is **not** the sum of individual Fs — strict extensivity fails as
+~1/n (`F_grp` is intensive, ~150 nats/300 trials and n-independent; `F_sum` is extensive,
+O(n)). Instead the group is ~**intensive**: `R_mean = F_grp/F_mean ≈ 0.98` at α=0.7 (the
+group is free-energetically indistinguishable from a typical member) and ≈ 0.70 at α=0.3
+(group F undercuts the member mean — the Markov blanket averages out members' low-precision
+exploration noise). The dependence is precision-controlled (α), not size-controlled (n);
+voting mode (Probabilistic vs CertaintyWeighted) has only a minor effect.
+
+**Implemented in**: `crates/reproduce/src/bin/extension11.rs` — mirrors
+`run_group_simulation` but reads `variational_free_energy()` from each
+`GroupAgent::internal_agents()` per trial (individual F, each member conditioning on its
+own sampled arm) and replays the recovered (obs, action) blanket stream through a fresh
+canonical `POMDPAgent` (group F, conditioning on the group action). F is α-independent
+(belief path is α-free), so the recovered α is reported for completeness only.
 
 ### 12. Continuous state-space models
 Move beyond discrete POMDP to continuous generalized coordinates. Would enable modeling

@@ -19,7 +19,7 @@ Legend: ✅ implemented · ⚠️ partial / deviates (documented) · ❌ not imp
 | Paper element | Status | Where (`crates/aif/src/...`) |
 |---|---|---|
 | POMDP generative model, matrices A–E (Fig 1) | ✅ | `agent.rs` `POMDPAgent::new` — A: `(2 × n_states)`, columns `[p, 1−p]`; B: one deterministic `(n × n)` per action; C: `ln`-transformed 2-element preference prior; D: state prior (uniform or caller override); E: uniform policy prior |
-| Variational free energy F, Eq. (1) | ✅ | Surfaced since 0.7.0: `variational_free_energy()` — one-step `−ln p(o_t)` under the default MeanField path (exact for single-factor models — the paper's class; multi-factor uses the mean-field-factorized prior, an approximation), window F under MMP (shared across policies — observed-τ only, per Eq. 19/20). Extension 11 (extensivity study) now runnable |
+| Variational free energy F, Eq. (1) | ✅ | Surfaced since 0.7.0: `variational_free_energy()` — one-step `−ln p(o_t)` under the default MeanField path (exact for single-factor models — the paper's class; multi-factor uses the mean-field-factorized prior, an approximation), window F under MMP (shared across policies — observed-τ only, per Eq. 19/20). Extension 11 (extensivity study) **run** — see `docs/extension11-extensivity.md` |
 | Expected free energy G, Eq. (2) = info gain + pragmatic value | ✅ | `agent.rs::efe_step` — pragmatic value `E_q(o|π)[ln p(o|C)]`; epistemic term as exact mutual information `H[q(o|π)] − E_q(s′)[H(o|s′)]` |
 | Epistemic term reachability | ✅ | Computed exactly; **live since 0.6.0** for any stochastic B supplied via `GenerativeModel`/`from_model`. Remains zero for `new()`/`with_params()` MAB constructions (deterministic B) — paper-faithful (§2.1 "action selection is driven only by the pragmatic value") |
 | Policy machinery: enumerate → γ-softmax posterior × E → marginalize → α-softmax | ✅ | `enumerate_policies` / `policy_posterior` / `infer_policies`; softmax over neg-G with `γ`, then action-marginal power-softmax with `α` |
@@ -84,7 +84,7 @@ CLAUDE.md §"Possible extensions"); the paper lists these in prose in §4.
 | 8 | Greater-than-two-scale nesting (groups of groups) | ❌ — `GroupAgent: Agent` makes this structurally plausible, but internal storage is concrete `Vec<POMDPAgent>`, not trait objects |
 | 9 | Dynamically emerging Markov blankets | ❌ |
 | 10 | Evolutionary selection (group vs individual pressure) | ❌ |
-| 11 | Free energy extensivity (sum of individual F vs group F) | ❌ study not run — but **unblocked since 0.7.0**: `variational_free_energy()` surfaces F (#16); remaining work is the reproduce-side comparison (Σ individual F vs group-agent F) |
+| 11 | Free energy extensivity (sum of individual F vs group F) | ✅ **study run** — `crates/reproduce/src/bin/extension11.rs`, report `docs/extension11-extensivity.md`. Finding: group F is NOT the sum of individual Fs (strict extensivity fails ~1/n: F_grp intensive ~150, F_sum extensive O(n)); the group is instead ~intensive — `R_mean = F_grp/F_mean ≈ 0.98` at α=0.7 (group ≈ typical member) and ≈0.70 at α=0.3 (group F below the member mean; the blanket averages out members' exploration noise). Precision-controlled, not size-controlled |
 | 12 | Continuous state-space models | ❌ planned |
 
 The paper's §4 additionally floats renormalization-group detection of Markov blankets at slower
