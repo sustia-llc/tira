@@ -10,7 +10,7 @@ mod special;
 
 pub use agent::{
     Agent, AgentParams, CopyAgent, GenerativeModel, POMDPAgent, ParameterFreeEnergies,
-    StateInference,
+    PrecisionDynamics, StateInference,
 };
 pub use coalition::{
     AgentId, CoalitionHistory, CompatibilityBeliefs, ObsPrecisionParams, TrustBeliefs,
