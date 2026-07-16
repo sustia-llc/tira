@@ -2,6 +2,53 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-16
+
+Policy precision dynamics (parity roadmap item 3, the final item —
+[#14](https://github.com/sustia-llc/tira/issues/14)). **The canonical-AIF parity
+roadmap (#12–#16) is complete.**
+
+### Added
+- **`PrecisionDynamics { beta_prior: 1.0, psi: 2.0, iters: 16 }`** — opt-in
+  `AgentParams.precision_dynamics` runs the Smith Table 2 γ/β loop per timestep:
+  `π₀ = σ(ln E − γG)`, `π = σ(ln E − F − γG)`, `G_error = (π − π₀)·(−G)`,
+  `β ← β − (β − β₀ + G_error)/ψ`, `γ = 1/β`. β persists across timesteps and resets to
+  β₀ at `reset_window()` (trial boundary). The paper's worked example is pinned as a
+  test anchor (one iteration: G_error = 0.3567, β → 0.82165, γ → 1.21706).
+- **Per-policy future-τ MMP windows** (dynamics-on only): each policy gets its own
+  trajectory over observed nodes (history actions) plus `policy_depth` future nodes
+  (the policy's own actions, no observation term). F still sums observed τ only
+  (Eq. 19/20 split) but becomes genuinely policy-dependent via backward messages from
+  policy-specific futures — `policy_free_energies()` now varies across policies under
+  dynamics. Beliefs/`bma_state_belief()` are the Bayesian model average
+  `X_τ = Σ_π q(π)·s_{π,τ}`; `variational_free_energy()` = `Σ_π q(π)·F_π`.
+- Accessors: `beta() -> Option<f64>`, `gamma_trajectory() -> &[f64]` (γ after each
+  precision iteration — the SPM `MDP.wn` analog; cleared at `reset_window()`).
+
+### Behavior notes (documented in rustdoc)
+- **`gamma` is ignored under dynamics** — γ initializes to 1/β₀ (= 1.0 by default),
+  a 16× drop vs the fixed default 16.0. Expected, documented, not a bug.
+- Requires `MarginalMessagePassing` — MeanField+dynamics is rejected at construction
+  (no per-policy F surface; a silently-inert opt-in would be a footgun).
+- With deterministic MAB B, `B†` is uniform ⇒ F_π is policy-constant ⇒ π = π₀ ⇒ the
+  loop is provably inert (γ pinned at 1/β₀ — tested; the engine analog of the paper's
+  shallow-policy no-update). Precision dynamics is meaningful with stochastic B and
+  `policy_depth > 1`.
+- The action posterior is the loop's final-iteration π (SPM iteration order — computed
+  at that iteration's entering γ; coincides with 1/β_final at convergence).
+- β floored at 1e-6 (defensive deviation; SPM doesn't clamp — β-overshoot would make
+  γ non-finite).
+- G semantics unchanged: the one-step `efe_step` rollout (from each policy's own
+  smoothed current node under dynamics); no Σ_τ-from-futures rewrite. `competence_efe`
+  anchors bit-identical.
+- The dynamics-off MMP path is byte-identical to 0.8.0 (all 0.7.0 smoother anchors and
+  0.8.0 learning tests pass unchanged).
+
+### Migration (downstream)
+- `AgentParams` gained `precision_dynamics` — struct literals need the field or
+  `..Default::default()` (the default preserves existing behavior exactly).
+- Paper extension 2 (recovering γ) is now meaningful: β₀/ψ are recoverable parameters.
+
 ## [0.8.0] - 2026-07-16
 
 Full Dirichlet learning + novelty EFE term (parity roadmap item 2,
