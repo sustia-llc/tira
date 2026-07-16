@@ -41,6 +41,14 @@ roadmap (#12–#16) is complete.**
 - G semantics unchanged: the one-step `efe_step` rollout (from each policy's own
   smoothed current node under dynamics); no Σ_τ-from-futures rewrite. `competence_efe`
   anchors bit-identical.
+- **Dynamics + learning ordering**: the per-policy pass and γ/β loop run *after* the
+  step's Dirichlet updates (`belief_step` runs the shared `mmp_infer` when any
+  `learn_*` flag is set, then the precision loop runs at the tail of
+  `perceive_and_learn`), so the action posterior reflects same-step learning in both
+  inference modes — matching plain MMP. The learning updates themselves consume the
+  shared smoothed trajectory, since the Bayesian model average `X` exists only after
+  the loop produces `q(π)` (a documented deviation from SPM's end-of-trial X-based
+  learning).
 - The dynamics-off MMP path is byte-identical to 0.8.0 (all 0.7.0 smoother anchors and
   0.8.0 learning tests pass unchanged).
 

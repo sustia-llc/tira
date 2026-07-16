@@ -836,11 +836,16 @@ impl POMDPAgent {
                         self.mmp_act_hist.remove(0);
                     }
                 }
-                // Under precision dynamics the per-policy smoother + γ/β loop runs
-                // (single inference pass, sets beliefs/mmp_traj/cache); otherwise the
-                // shared Eq. 23 smoother runs unchanged (dynamics-off path is
-                // byte-identical to 0.8.0).
-                if self.precision_dynamics.is_some() {
+                // Under precision dynamics WITHOUT learning, the per-policy smoother +
+                // γ/β loop runs here (single inference pass, sets beliefs/mmp_traj/
+                // cache). With any learning flag set, the shared Eq. 23 smoother runs
+                // instead so the Dirichlet updates in `perceive_and_learn` consume the
+                // shared smoothed trajectory (the 0.8.0 MMP-learning convention); the
+                // precision pass is then deferred until AFTER those updates so the
+                // cached posterior reflects same-step learning (see
+                // `perceive_and_learn`). The dynamics-off path is byte-identical to
+                // 0.8.0.
+                if self.precision_dynamics.is_some() && !self.any_learn() {
                     self.precision_step(iters);
                 } else {
                     self.mmp_infer(iters);
@@ -1323,14 +1328,23 @@ impl POMDPAgent {
         (q, beta, gamma_traj)
     }
 
-    /// One expected-free-energy precision update (Smith Table 2), run at the tail
-    /// of the marginal-message-passing `belief_step` when
+    /// One expected-free-energy precision update (Smith Table 2), run when
     /// [`PrecisionDynamics`] is enabled.
     ///
-    /// Runs a per-policy extended smoother (one inference pass, replacing the
-    /// shared [`Self::mmp_infer`]), rolls each policy's neg-G from its own smoothed
-    /// current-node belief, iterates the `β`/`γ` loop to obtain `q(π)`, and writes
-    /// the Bayesian-model-average state marginals `X_τ = Σ_π q(π)·s_{π,τ}` back to
+    /// Call site depends on learning: with no learning flag it runs at the tail of
+    /// the marginal-message-passing `belief_step` (replacing the shared
+    /// [`Self::mmp_infer`]); with any learning flag it runs at the tail of
+    /// [`Self::perceive_and_learn`], AFTER the Dirichlet updates, so the posterior it
+    /// caches reflects the post-update model. In the learning case `belief_step`
+    /// already ran the shared `mmp_infer`, so the Dirichlet updates consumed the
+    /// shared smoothed trajectory — not the Bayesian model average, which does not
+    /// exist until this loop produces `q(π)` (a documented deviation from SPM's
+    /// end-of-trial BMA-based learning, L930).
+    ///
+    /// Runs a per-policy extended smoother (one inference pass), rolls each policy's
+    /// neg-G from its own smoothed current-node belief, iterates the `β`/`γ` loop to
+    /// obtain `q(π)`, and writes the Bayesian-model-average state marginals
+    /// `X_τ = Σ_π q(π)·s_{π,τ}` back to
     /// `self.beliefs`/`mmp_traj`, the window free energy `Σ_π q(π)·F_π`, the live
     /// `γ`, and the cached posterior consumed by [`Self::policy_posterior`].
     fn precision_step(&mut self, iters: usize) {
@@ -1646,6 +1660,24 @@ impl POMDPAgent {
         {
             self.update_b(prev);
         }
+
+        // Precision dynamics + learning: the per-policy smoother + γ/β loop is
+        // deferred to here (belief_step ran the shared mmp_infer for the learning
+        // updates above) so the cached posterior, F_π, and BMA reflect the
+        // POST-update A/B/D — matching plain MMP, where policy inference likewise
+        // sees same-step learning. (Without learning the loop already ran in
+        // belief_step.)
+        if self.precision_dynamics.is_some()
+            && self.any_learn()
+            && let StateInference::MarginalMessagePassing { iters, .. } = self.state_inference
+        {
+            self.precision_step(iters);
+        }
+    }
+
+    /// Whether any Dirichlet learning flag is enabled.
+    fn any_learn(&self) -> bool {
+        self.learn_a || self.learn_b || self.learn_d || self.learn_e
     }
 
     /// Snapshot the current Dirichlet parameters as the trial-boundary reference
@@ -1778,13 +1810,15 @@ impl POMDPAgent {
     /// posterior to actions) and [`Self::expected_free_energy`] (which takes the
     /// posterior-weighted average of `G = −neg_g`).
     ///
-    /// This form also realizes Smith et al. (2022) Eq. 22
-    /// `π = σ(ln E − F_π + γ·neg_g_π)` under
-    /// [`StateInference::MarginalMessagePassing`]: the `−F_π` term is constant
-    /// across policies (F is accumulated over the shared observed window — see
-    /// [`Self::policy_free_energies`]), so it cancels in the softmax and no
-    /// separate MMP posterior is needed. Under [`StateInference::MeanField`] F is
-    /// likewise policy-independent, so `σ(γ·neg_g)×E` is exact.
+    /// This `σ(γ·neg_g)×E` form is exact **without** precision dynamics: it realizes
+    /// Smith et al. (2022) Eq. 22 `π = σ(ln E − F_π + γ·neg_g_π)` because the `−F_π`
+    /// term is then policy-independent (under
+    /// [`StateInference::MarginalMessagePassing`] F is accumulated over the shared
+    /// observed window; under [`StateInference::MeanField`] F is one-step), so it
+    /// cancels in the softmax and no separate MMP posterior is needed. Under
+    /// [`PrecisionDynamics`] `F_π` genuinely varies and `γ` is dynamic, so the full
+    /// Eq. 22 posterior is formed by the γ/β loop in [`Self::precision_step`] and
+    /// returned here from the cache (see below).
     fn policy_posterior(&self) -> PolicyPosterior {
         // Under precision dynamics the posterior is produced by the γ/β loop in
         // `precision_step` and cached; return it directly (the cache is `None`
@@ -1985,9 +2019,11 @@ impl POMDPAgent {
     ///   it is the one-step negative log evidence under the mean-field prior.
     ///   Returns `0.0` before the first observation.
     /// - **[`StateInference::MarginalMessagePassing`]** — the policy-posterior-
-    ///   weighted window free energy `Σ_π q(π) F_π`. `F_π` is computed over the
-    ///   shared observed window (recorded actions), hence identical across
-    ///   policies, so the weighted sum equals the single window value.
+    ///   weighted window free energy `Σ_π q(π) F_π`. Without [`PrecisionDynamics`]
+    ///   `F_π` is computed over the shared observed window (recorded actions), hence
+    ///   identical across policies, so the weighted sum equals the single window
+    ///   value. Under precision dynamics `F_π` genuinely varies across policies (the
+    ///   per-policy extended smoother) and this is the true `q(π)`-weighted sum.
     ///
     /// Surfaces Smith et al. (2022) Eq. 11/19. See the paper's free-energy
     /// extensivity discussion (Waade et al. §4.1, extension 11) for the intended
@@ -2029,10 +2065,13 @@ impl POMDPAgent {
     /// 1-based window position `tau` (MDP.X), or `None` under
     /// [`StateInference::MeanField`] or for an out-of-range `tau`.
     ///
-    /// Because the observed-window trajectory is shared across policies, the BMA
-    /// reduces to the smoothed trajectory belief at `tau`. Returns one
-    /// distribution per hidden-state factor. `tau` runs `1..=W` where `W` is the
-    /// current window length.
+    /// Without [`PrecisionDynamics`] the observed-window trajectory is shared across
+    /// policies, so the BMA reduces to that single smoothed trajectory belief at
+    /// `tau`. Under precision dynamics the per-policy extended smoother produces
+    /// distinct per-policy trajectories, and the genuine BMA `Σ_π q(π)·s_{π,τ}` is
+    /// precomputed into `mmp_traj` by the precision loop; this accessor returns that
+    /// precomputed weighted average. Returns one distribution per hidden-state
+    /// factor. `tau` runs `1..=W` where `W` is the current window length.
     #[must_use]
     pub fn bma_state_belief(&self, tau: usize) -> Option<Vec<DVector<f64>>> {
         match self.state_inference {
@@ -2064,6 +2103,12 @@ impl POMDPAgent {
     /// matching the paper's trial-indexed Eq. 34. The method then re-snapshots the
     /// Dirichlet trial-boundary references (so [`Self::parameter_free_energies`]
     /// reads zero right after a reset).
+    ///
+    /// Under [`PrecisionDynamics`] the precision state is also reset to its priors:
+    /// `β ← β₀` and `γ ← 1/β₀` (persisted `β` does not carry across the boundary),
+    /// and the `γ` trajectory and per-policy caches ([`Self::gamma_trajectory`],
+    /// `mmp_policy_f`, the cached posterior) are cleared. When dynamics are off `γ`
+    /// keeps its fixed configured value.
     pub fn reset_window(&mut self) {
         // Flush any pending MMP pD accumulation before the trajectory is cleared,
         // then write the learned D back at the trial boundary (deferred under MMP).
@@ -4741,6 +4786,124 @@ mod tests {
         assert_relative_eq!(agent.gamma(), 16.0, epsilon = 1e-15);
         assert!(agent.beta().is_none());
         assert!(agent.gamma_trajectory().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_precision_learning_sees_post_update_model() -> Result<(), AifError> {
+        // Precision dynamics + learn_a: the cached posterior must reflect the
+        // POST-update A (the review fix), so its per-policy neg-G equals a fresh
+        // enumerate_policies recompute under the current model — and differs from an
+        // entering-model (pre-update A) recompute. Deterministic B keeps the
+        // per-policy current nodes equal to the BMA, so enumerate_policies (rolled
+        // from self.beliefs) is the right comparison.
+        // Non-uniform preferences C = [0.9, 0.1] so pragmatic value (and hence neg-G)
+        // genuinely depends on the learned A. (A uniform C makes qo·C = const,
+        // A-independent, which would trivially pass the equality but not the
+        // differs-from-entering check.)
+        let model = GenerativeModel {
+            a: vec![DMatrix::from_element(2, 2, 0.5)],
+            b: vec![mab_transitions(2)],
+            c: vec![vec![0.9, 0.1]],
+            d: vec![vec![0.5, 0.5]],
+        };
+        let mut agent = POMDPAgent::from_model(
+            model,
+            AgentParams {
+                alpha: 1.0,
+                policy_depth: 2,
+                learn_a: true,
+                initial_precision: Some(vec![1.0, 1.0]),
+                state_inference: StateInference::MarginalMessagePassing { horizon: 3, iters: 500 },
+                precision_dynamics: Some(PrecisionDynamics::default()),
+                ..Default::default()
+            },
+        )?;
+        agent.rng = StdRng::seed_from_u64(29);
+        agent.act(1)?; // establish window + history
+
+        let a_pre = agent.a[0].clone();
+        agent.act(1)?; // learns (A changes) → precision_step runs under post-update A
+        let a_post = agent.a[0].clone();
+        let a_changed = (0..2).any(|r| (0..2).any(|c| (a_post[(r, c)] - a_pre[(r, c)]).abs() > 1e-9));
+        assert!(a_changed, "learn_a must have moved A this step");
+
+        let (policies, _q) = agent
+            .cached_policy_posterior
+            .clone()
+            .expect("invariant: cache set after a dynamics+learning step");
+        // Cached neg-G == fresh recompute under the current (post-update) model.
+        let fresh_post = agent.enumerate_policies();
+        assert_eq!(policies.len(), fresh_post.len());
+        for i in 0..policies.len() {
+            assert_relative_eq!(policies[i].1, fresh_post[i].1, epsilon = 1e-12);
+        }
+        // ...and differs from the entering-model computation (the pre-fix behavior).
+        agent.a[0] = a_pre;
+        let fresh_entering = agent.enumerate_policies();
+        agent.a[0] = a_post;
+        let differs = (0..policies.len()).any(|i| (policies[i].1 - fresh_entering[i].1).abs() > 1e-9);
+        assert!(differs, "post-update posterior must differ from the entering-model one");
+        Ok(())
+    }
+
+    #[test]
+    fn test_precision_learn_d_within_trial_d_immutable() -> Result<(), AifError> {
+        // Precision dynamics + learn_d: the e89613a invariant must still hold — D is
+        // immutable within the trial across multiple slides, pd accumulates exactly
+        // once (latched), and D syncs at reset_window.
+        let mut agent = POMDPAgent::from_model(
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.8, 0.3, 0.2, 0.7]),
+                vec![
+                    DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8]),
+                    DMatrix::from_row_slice(2, 2, &[0.55, 0.6, 0.45, 0.4]),
+                ],
+                vec![0.5, 0.5],
+            ),
+            AgentParams {
+                alpha: 1.0,
+                policy_depth: 2,
+                learn_d: true,
+                initial_precision_d: Some(1.0),
+                state_inference: StateInference::MarginalMessagePassing { horizon: 2, iters: 500 },
+                precision_dynamics: Some(PrecisionDynamics::default()),
+                ..Default::default()
+            },
+        )?;
+        // Horizon 2 ⇒ slides on obs 3..6 (four slides / three+ post-first).
+        let obs = [0usize, 1, 0, 1, 0, 1];
+        let acts = [0usize, 1, 0, 1, 0];
+        agent.action_probabilities(obs[0]);
+        assert_relative_eq!(agent.d[0][0], 0.5, epsilon = 1e-15);
+        let mut pd_after_first_slide: Option<DVector<f64>> = None;
+        for i in 1..obs.len() {
+            agent.record_action(acts[i - 1]);
+            agent.action_probabilities(obs[i]);
+            // D pinned at the [.5, .5] prior throughout the trial.
+            assert_relative_eq!(agent.d[0][0], 0.5, epsilon = 1e-15);
+            assert_relative_eq!(agent.d[0][1], 0.5, epsilon = 1e-15);
+            // pd accumulates exactly once (latch): capture it at the first slide and
+            // confirm it is unchanged thereafter.
+            let pd_now = agent.pd.as_ref().expect("learn_d ⇒ pd")[0].clone();
+            match &pd_after_first_slide {
+                None if (pd_now[0] - 0.5).abs() > 1e-9 => pd_after_first_slide = Some(pd_now),
+                Some(prev) => {
+                    assert_relative_eq!(pd_now[0], prev[0], epsilon = 1e-12);
+                    assert_relative_eq!(pd_now[1], prev[1], epsilon = 1e-12);
+                }
+                None => {}
+            }
+        }
+        assert!(pd_after_first_slide.is_some(), "pd must have accumulated at a slide");
+
+        // D syncs at the trial boundary.
+        agent.reset_window();
+        assert!(
+            (agent.d[0][0] - 0.5).abs() > 1e-6,
+            "learn_d must write D at reset, got {}",
+            agent.d[0][0]
+        );
         Ok(())
     }
 }
