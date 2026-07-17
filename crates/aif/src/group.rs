@@ -123,7 +123,8 @@ impl VotingAgent {
     /// `Deterministic`; direct callers may.
     ///
     /// Every distribution must have length equal to `n_actions`; otherwise an
-    /// [`AifError::InvalidAction`] carrying the offending length is returned.
+    /// [`AifError::InvalidLength`] carrying the expected and offending lengths is
+    /// returned.
     #[allow(clippy::missing_errors_doc)]
     pub fn aggregate_weighted(
         &mut self,
@@ -131,7 +132,10 @@ impl VotingAgent {
     ) -> Result<usize, AifError> {
         for dist in distributions {
             if dist.len() != self.n_actions {
-                return Err(AifError::InvalidAction(dist.len()));
+                return Err(AifError::InvalidLength {
+                    expected: self.n_actions,
+                    got: dist.len(),
+                });
             }
         }
 
@@ -232,13 +236,9 @@ impl GroupAgent {
     /// seeds — the group RNG is offset by a fixed constant — so their streams do not
     /// correlate.
     ///
-    /// Reproducibility of the *whole* pipeline holds only in `CertaintyWeighted` mode,
-    /// where the internal agents contribute deterministic
-    /// [`POMDPAgent::action_probabilities`] (no sampling) and every stochastic draw is
-    /// made by the two RNGs seeded here. In `Probabilistic` / `Deterministic` modes each
-    /// internal [`POMDPAgent`] samples its own action with an entropy-seeded RNG that
-    /// these constructors do **not** seed, so those modes remain stochastic through the
-    /// internal agents even with a fixed `seed`.
+    /// This constructor seeds the voter + group RNG only; the internal agents keep
+    /// their caller-constructed RNGs (the builder's [`GroupAgentBuilder::seed`]
+    /// reseeds them for full-mode determinism).
     ///
     /// # Panics
     /// Panics if `n_actions` is zero (delegated to the internal [`VotingAgent`]).
@@ -397,7 +397,7 @@ impl GroupAgentBuilder {
     ///
     /// Required whenever [`learn_a(true)`](Self::learn_a) is set: without it every
     /// `build_*` method fails at [`POMDPAgent::new`] with
-    /// [`AifError::InvalidAction`] (the same guard single agents use). This release
+    /// [`AifError::InvalidDistribution`] (the same guard single agents use). This release
     /// exposes only pA learning at the group level — the per-agent `η`/`ω`/`learn_b`
     /// /`learn_d`/`learn_e` knobs are not plumbed through the builder.
     #[must_use]
@@ -409,11 +409,14 @@ impl GroupAgentBuilder {
     /// Seed the group's RNGs for reproducible runs.
     ///
     /// When set, every `build_*` method constructs the [`GroupAgent`] via
-    /// [`GroupAgent::new_with_seed`], seeding the active [`VotingAgent`] and the
-    /// group-level RNG. When unset (the default), those RNGs are seeded from entropy.
+    /// [`GroupAgent::new_with_seed`] and reseeds every internal [`POMDPAgent`], so the
+    /// whole pipeline is deterministic in **all** voting modes. When unset (the
+    /// default), the RNGs are seeded from entropy.
     ///
-    /// See [`GroupAgent::new_with_seed`] for the per-mode determinism contract
-    /// (full-pipeline determinism holds only in `CertaintyWeighted` mode).
+    /// The derived streams for seed `s` are: voter = `s`, group RNG =
+    /// `s + 0x9E37_79B9` (wrapping), internal agent `i` = `s + 1 + i` (wrapping). The
+    /// `1 + i` offset keeps every internal agent's stream distinct from the voter's
+    /// (which uses `s` verbatim).
     #[must_use]
     pub fn seed(mut self, seed: u64) -> Self {
         self.seed = Some(seed);
@@ -421,9 +424,15 @@ impl GroupAgentBuilder {
     }
 
     /// Build the final [`GroupAgent`], honoring the optional seed.
-    fn finish(&self, internal: Vec<POMDPAgent>, mode: VotingMode) -> GroupAgent {
+    fn finish(&self, mut internal: Vec<POMDPAgent>, mode: VotingMode) -> GroupAgent {
         match self.seed {
-            Some(s) => GroupAgent::new_with_seed(internal, self.n_bandits, mode, s),
+            Some(s) => {
+                // Offset 1 + i: internal agent 0 must not share the voter's `s` stream.
+                for (i, agent) in internal.iter_mut().enumerate() {
+                    agent.reseed(s.wrapping_add(1 + i as u64));
+                }
+                GroupAgent::new_with_seed(internal, self.n_bandits, mode, s)
+            }
             None => GroupAgent::new(internal, self.n_bandits, mode),
         }
     }
@@ -450,7 +459,10 @@ impl GroupAgentBuilder {
     #[allow(clippy::missing_errors_doc)]
     pub fn build_varying_alpha(self, alphas: &[f64]) -> Result<GroupAgent, AifError> {
         if alphas.len() != self.n_internal {
-            return Err(AifError::InvalidAction(alphas.len()));
+            return Err(AifError::InvalidLength {
+                expected: self.n_internal,
+                got: alphas.len(),
+            });
         }
         let agents: Vec<POMDPAgent> = alphas
             .iter()
@@ -476,7 +488,10 @@ impl GroupAgentBuilder {
         preference_sets: &[Vec<f64>],
     ) -> Result<GroupAgent, AifError> {
         if preference_sets.len() != self.n_internal {
-            return Err(AifError::InvalidAction(preference_sets.len()));
+            return Err(AifError::InvalidLength {
+                expected: self.n_internal,
+                got: preference_sets.len(),
+            });
         }
         let agents: Vec<POMDPAgent> = preference_sets
             .iter()
@@ -615,7 +630,7 @@ mod tests {
         let wrong = vec![DVector::from_vec(vec![0.5, 0.5])];
         let err = voter.aggregate_weighted(&wrong);
         assert!(
-            matches!(err, Err(AifError::InvalidAction(2))),
+            matches!(err, Err(AifError::InvalidLength { expected: 3, got: 2 })),
             "Wrong-length distribution should be rejected: {err:?}"
         );
 
@@ -708,7 +723,7 @@ mod tests {
             .learn_a(true)
             .build_identical();
         assert!(
-            matches!(missing, Err(AifError::InvalidAction(_))),
+            matches!(missing, Err(AifError::InvalidDistribution(_))),
             "learn_a without precision must error"
         );
 
@@ -878,6 +893,116 @@ mod tests {
             "Different-seed CW groups should produce a different sequence"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_probabilistic_group_seed_determinism() -> Result<(), AifError> {
+        // Probabilistic mode samples in two places — each internal agent's own vote
+        // and the group's weighted tally. Seeding the builder reseeds every internal
+        // agent (offset 1 + i) plus the voter + group RNG, so the full pipeline is
+        // reproducible even though no branch is sampling-free.
+        let build = |seed: u64| {
+            GroupAgentBuilder::new(3)
+                .n_internal(4)
+                .observation_probs(vec![0.8, 0.2, 0.2])
+                .preferences(vec![0.7, 0.3])
+                .alpha(0.5)
+                .seed(seed)
+                .build_identical()
+        };
+
+        let mut group_a = build(42)?;
+        let mut group_b = build(42)?;
+
+        let mut seq_a = Vec::with_capacity(30);
+        let mut seq_b = Vec::with_capacity(30);
+        for t in 0..30 {
+            let obs = t % 2;
+            seq_a.push(group_a.act(obs)?);
+            seq_b.push(group_b.act(obs)?);
+        }
+        assert_eq!(
+            seq_a, seq_b,
+            "Identical-seed Probabilistic groups must produce identical action sequences"
+        );
+
+        // A different seed should (with overwhelming probability) diverge somewhere.
+        let mut group_c = build(43)?;
+        let mut seq_c = Vec::with_capacity(30);
+        for t in 0..30 {
+            seq_c.push(group_c.act(t % 2)?);
+        }
+        assert_ne!(
+            seq_a, seq_c,
+            "Different-seed Probabilistic groups should differ somewhere"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_deterministic_group_seed_determinism() -> Result<(), AifError> {
+        // Deterministic mode with identical agents + uniform preferences: internal
+        // votes routinely tie, so the group RNG breaks ties (and each internal agent
+        // still samples its own vote). Both draws are seeded, so two same-seed builds
+        // must agree.
+        let build = || {
+            GroupAgentBuilder::new(3)
+                .n_internal(4)
+                .observation_probs(vec![0.5, 0.5, 0.5])
+                .preferences(vec![0.5, 0.5])
+                .alpha(0.5)
+                .deterministic(true)
+                .seed(7)
+                .build_identical()
+        };
+
+        let mut group_a = build()?;
+        let mut group_b = build()?;
+
+        let mut seq_a = Vec::with_capacity(30);
+        let mut seq_b = Vec::with_capacity(30);
+        for t in 0..30 {
+            let obs = t % 2;
+            seq_a.push(group_a.act(obs)?);
+            seq_b.push(group_b.act(obs)?);
+        }
+        assert_eq!(
+            seq_a, seq_b,
+            "Identical-seed Deterministic groups must produce identical action sequences"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_invalid_length_payloads() -> Result<(), AifError> {
+        // Three representative InvalidLength sites report {expected, got} exactly.
+
+        // (1) POMDPAgent::new: preferences must have length 2 (n_obs).
+        let bad_prefs = POMDPAgent::new(2, None, None, vec![0.5, 0.3, 0.2], None, 1.0, false);
+        assert!(
+            matches!(bad_prefs, Err(AifError::InvalidLength { expected: 2, got: 3 })),
+            "wrong preferences length: {bad_prefs:?}"
+        );
+
+        // (2) act_multi: obs length must equal n_modalities (1 for a MAB agent).
+        let mut agent = POMDPAgent::new(2, None, None, vec![0.5, 0.5], None, 1.0, false)?;
+        let bad_obs = agent.act_multi(&[0, 0]);
+        assert!(
+            matches!(bad_obs, Err(AifError::InvalidLength { expected: 1, got: 2 })),
+            "wrong obs length: {bad_obs:?}"
+        );
+
+        // (3) build_varying_alpha: alphas length must equal n_internal.
+        let bad_alphas = GroupAgentBuilder::new(3)
+            .n_internal(4)
+            .observation_probs(vec![0.8, 0.2, 0.2])
+            .preferences(vec![0.7, 0.3])
+            .build_varying_alpha(&[0.2, 0.4]);
+        assert!(
+            matches!(bad_alphas, Err(AifError::InvalidLength { expected: 4, got: 2 })),
+            "wrong alphas length must report {{expected: 4, got: 2}}"
+        );
         Ok(())
     }
 }

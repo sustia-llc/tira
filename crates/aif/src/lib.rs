@@ -30,6 +30,8 @@ pub enum AifError {
     InvalidDistribution(String),
     #[error("Invalid action: {0}")]
     InvalidAction(usize),
+    #[error("Invalid length: expected {expected}, got {got}")]
+    InvalidLength { expected: usize, got: usize },
     #[error("Distribution error: {0}")]
     Distribution(#[from] BernoulliError),
     #[error("Weight error: {0}")]
