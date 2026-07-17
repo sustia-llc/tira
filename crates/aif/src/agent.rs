@@ -202,13 +202,44 @@ pub struct AgentParams {
     /// (Smith Eq. 39/40). Default `false` — unset changes no numerics.
     pub use_b_info_gain: bool,
     /// Initial pA concentration per joint-state column (replicated across
-    /// modalities). Required when `learn_a` is true.
+    /// outcome rows and modalities). Supplying both this and
+    /// [`initial_pa`](Self::initial_pa) is **always** rejected as ambiguous
+    /// (regardless of `learn_a`); when `learn_a` is true, **exactly one** of the two
+    /// is required. This scale path seeds a row-uniform pA, so it cannot carry row
+    /// structure — use `initial_pa` for that.
     pub initial_precision: Option<Vec<f64>>,
-    /// Dirichlet concentration scale for pB: `pb[f][u] = s_b · B[f][u]`. Required
-    /// when `learn_b` is true. Named "precision" for family consistency with
-    /// [`initial_precision`](Self::initial_precision) (pA), though it is a
-    /// Dirichlet concentration scale, not a precision.
+    /// Full pA Dirichlet counts, one matrix per modality, each shaped
+    /// `n_obs[m] × n_joint` (0.11.0). When `Some`, requires `learn_a` and is
+    /// mutually exclusive with [`initial_precision`](Self::initial_precision)
+    /// (both `Some` is a validation error — ambiguous). Every entry must be
+    /// finite and `≥ 0`, and every column sum `> 0` (per-entry zeros are allowed:
+    /// deterministic structural zeros are legitimate, handled by the 0.10.0
+    /// novelty mask).
+    ///
+    /// Unlike the scale path, injected counts carry arbitrary row structure. At
+    /// construction the observation model is synced `A ← column-normalize(pA)`,
+    /// so the injected counts are the model of record from step 0 — the
+    /// [`GenerativeModel`]'s `a` is **ignored** in this case and validated only
+    /// for shape. This is what makes a structured-A + `learn_a` agent
+    /// constructible: without injection the first `learn_a` write-back
+    /// `A = normalize(pA)` would flatten any structured `A` the model supplied.
+    pub initial_pa: Option<Vec<DMatrix<f64>>>,
+    /// Dirichlet concentration scale for pB: `pb[f][u] = s_b · B[f][u]`. Supplying
+    /// both this and [`initial_pb`](Self::initial_pb) is **always** rejected as
+    /// ambiguous (regardless of `learn_b`); when `learn_b` is true, **exactly one**
+    /// of the two is required. Named "precision" for family consistency with
+    /// [`initial_precision`](Self::initial_precision) (pA), though it is a Dirichlet
+    /// concentration scale, not a precision.
     pub initial_precision_b: Option<f64>,
+    /// Full pB Dirichlet counts, one matrix per factor per control, each shaped to
+    /// match `B[f][u]` (`n_states[f] × n_states[f]`) (0.11.0). When `Some`, requires
+    /// `learn_b` and is mutually exclusive with
+    /// [`initial_precision_b`](Self::initial_precision_b). Every entry must be finite
+    /// and `≥ 0`, and every column sum `> 0` (per-entry zeros allowed — deterministic
+    /// structural zeros are legitimate). At construction the transition model is
+    /// synced `B ← column-normalize(pB)`; the `GenerativeModel`'s `b` is ignored
+    /// (validated only for shape).
+    pub initial_pb: Option<Vec<Vec<DMatrix<f64>>>>,
     /// Dirichlet concentration scale for pD: `pd[f] = s_d · D[f]`. Required when
     /// `learn_d` is true. See [`initial_precision_b`](Self::initial_precision_b)
     /// on the "precision" naming.
@@ -248,7 +279,9 @@ impl Default for AgentParams {
             use_param_info_gain: false,
             use_b_info_gain: false,
             initial_precision: None,
+            initial_pa: None,
             initial_precision_b: None,
+            initial_pb: None,
             initial_precision_d: None,
             initial_precision_e: None,
             inference_iters: 10,
@@ -559,7 +592,7 @@ impl POMDPAgent {
     /// flattening convention and the mean-field state-inference caveat.
     #[allow(clippy::missing_errors_doc)]
     pub fn from_model(model: GenerativeModel, params: AgentParams) -> Result<Self, AifError> {
-        let GenerativeModel { a, b, c, d } = model;
+        let GenerativeModel { mut a, mut b, c, d } = model;
 
         validate_agent_params(&params)?;
         if a.is_empty() || b.is_empty() || c.is_empty() || d.is_empty() {
@@ -582,8 +615,15 @@ impl POMDPAgent {
             });
         }
 
-        // Per-factor state / control counts from B; B[f][u] must be a square,
-        // column-stochastic (n_states[f] × n_states[f]) matrix.
+        // When full pA/pB counts are injected, the model's `a`/`b` are ignored and
+        // resynced from the counts at construction; they are validated for shape
+        // only (not column-stochastic), since the counts are the model of record.
+        let a_from_counts = params.initial_pa.is_some();
+        let b_from_counts = params.initial_pb.is_some();
+
+        // Per-factor state / control counts from B; B[f][u] must be a square
+        // (n_states[f] × n_states[f]) matrix — column-stochastic unless pB counts
+        // are injected.
         let mut n_states = Vec::with_capacity(n_factors);
         let mut n_controls = Vec::with_capacity(n_factors);
         for bf in &b {
@@ -611,7 +651,9 @@ impl POMDPAgent {
                         got: bu.ncols(),
                     });
                 }
-                validate_column_stochastic(bu)?;
+                if !b_from_counts {
+                    validate_column_stochastic(bu)?;
+                }
             }
             n_states.push(ns);
             n_controls.push(bf.len());
@@ -632,7 +674,9 @@ impl POMDPAgent {
                     got: am.ncols(),
                 });
             }
-            validate_column_stochastic(am)?;
+            if !a_from_counts {
+                validate_column_stochastic(am)?;
+            }
             n_obs.push(am.nrows());
         }
 
@@ -661,9 +705,10 @@ impl POMDPAgent {
             validate_distribution(df)?;
         }
 
-        // The learn_a ⇒ initial_precision precondition is validated in
-        // validate_agent_params (called above); here we only length-check the
-        // supplied vector against n_joint, which validate_agent_params cannot see.
+        // The learn_a XOR precondition (scale vs counts) and count content
+        // (finiteness / positivity) are validated in validate_agent_params (called
+        // above); here we only shape-check against n_obs / n_joint, which
+        // validate_agent_params cannot see.
         if let Some(ref prec) = params.initial_precision
             && prec.len() != n_joint
         {
@@ -671,6 +716,52 @@ impl POMDPAgent {
                 expected: n_joint,
                 got: prec.len(),
             });
+        }
+        if let Some(ref counts) = params.initial_pa {
+            if counts.len() != n_modalities {
+                return Err(AifError::InvalidLength {
+                    expected: n_modalities,
+                    got: counts.len(),
+                });
+            }
+            for (m, cm) in counts.iter().enumerate() {
+                if cm.nrows() != n_obs[m] {
+                    return Err(AifError::InvalidLength {
+                        expected: n_obs[m],
+                        got: cm.nrows(),
+                    });
+                }
+                if cm.ncols() != n_joint {
+                    return Err(AifError::InvalidLength {
+                        expected: n_joint,
+                        got: cm.ncols(),
+                    });
+                }
+            }
+        }
+        if let Some(ref counts) = params.initial_pb {
+            if counts.len() != n_factors {
+                return Err(AifError::InvalidLength {
+                    expected: n_factors,
+                    got: counts.len(),
+                });
+            }
+            for (f, bf) in counts.iter().enumerate() {
+                if bf.len() != n_controls[f] {
+                    return Err(AifError::InvalidLength {
+                        expected: n_controls[f],
+                        got: bf.len(),
+                    });
+                }
+                for bu in bf {
+                    if bu.nrows() != n_states[f] || bu.ncols() != n_states[f] {
+                        return Err(AifError::InvalidLength {
+                            expected: n_states[f],
+                            got: bu.nrows(),
+                        });
+                    }
+                }
+            }
         }
         let n_actions: usize = n_controls.iter().product();
         let e_len = if params.policy_depth > 1 {
@@ -691,27 +782,47 @@ impl POMDPAgent {
         let d_vectors: Vec<DVector<f64>> =
             d.iter().map(|df| DVector::from_vec(df.clone())).collect();
 
-        // pA per modality: (n_obs[m] × n_joint), column value from initial_precision.
+        // pA per modality: (n_obs[m] × n_joint). Either full injected counts (A is
+        // resynced from them so A ≡ normalize(pA) from step 0) or, on the scale
+        // path, a row-uniform matrix with each column set to initial_precision[col].
         let pa: Option<Vec<DMatrix<f64>>> = if params.learn_a {
-            params.initial_precision.as_ref().map(|prec| {
-                a.iter()
-                    .map(|am| DMatrix::from_fn(am.nrows(), n_joint, |_row, col| prec[col]))
-                    .collect()
-            })
+            if let Some(counts) = params.initial_pa.as_ref() {
+                // Counts are the model of record: sync A ← column-normalize(pA).
+                for (m, cm) in counts.iter().enumerate() {
+                    a[m] = column_normalize(cm);
+                }
+                Some(counts.clone())
+            } else {
+                params.initial_precision.as_ref().map(|prec| {
+                    a.iter()
+                        .map(|am| DMatrix::from_fn(am.nrows(), n_joint, |_row, col| prec[col]))
+                        .collect()
+                })
+            }
         } else {
             None
         };
-        // pB per factor per control: s_b · B[f][u]. Scale presence is guaranteed by
-        // validate_agent_params when learn_b is set.
+        // pB per factor per control: either full injected counts (B is resynced so
+        // B ≡ normalize(pB) from step 0) or the scale path s_b · B[f][u]. Scale
+        // presence is guaranteed by validate_agent_params when learn_b is set.
         let pb: Option<Vec<Vec<DMatrix<f64>>>> = if params.learn_b {
-            let s_b = params
-                .initial_precision_b
-                .expect("invariant: learn_b requires initial_precision_b (validated)");
-            Some(
-                b.iter()
-                    .map(|bf| bf.iter().map(|bu| bu * s_b).collect())
-                    .collect(),
-            )
+            if let Some(counts) = params.initial_pb.as_ref() {
+                for (f, bf) in counts.iter().enumerate() {
+                    for (u, bu) in bf.iter().enumerate() {
+                        b[f][u] = column_normalize(bu);
+                    }
+                }
+                Some(counts.clone())
+            } else {
+                let s_b = params
+                    .initial_precision_b
+                    .expect("invariant: learn_b requires initial_precision_b (validated)");
+                Some(
+                    b.iter()
+                        .map(|bf| bf.iter().map(|bu| bu * s_b).collect())
+                        .collect(),
+                )
+            }
         } else {
             None
         };
@@ -860,7 +971,10 @@ impl POMDPAgent {
     ///
     /// Reflects learning write-back: with `learn_a` enabled these matrices are
     /// re-normalized from `pA` after each counted update, so the returned slice
-    /// tracks the learned model rather than the construction value.
+    /// tracks the learned model rather than the construction value. When built with
+    /// [`AgentParams::initial_pa`](AgentParams::initial_pa) the construction value
+    /// already *is* the column-normalized injected counts, so the two coincide from
+    /// step 0.
     #[must_use]
     pub fn observation_model(&self) -> &[DMatrix<f64>] {
         &self.a
@@ -871,7 +985,10 @@ impl POMDPAgent {
     ///
     /// Reflects learning write-back: with `learn_b` enabled the per-factor,
     /// per-control matrices are re-normalized from `pB` after each counted update,
-    /// so the returned slices track the learned dynamics.
+    /// so the returned slices track the learned dynamics. When built with
+    /// [`AgentParams::initial_pb`](AgentParams::initial_pb) the construction value
+    /// already *is* the column-normalized injected counts, so the two coincide from
+    /// step 0.
     #[must_use]
     pub fn transition_model(&self) -> &[Vec<DMatrix<f64>>] {
         &self.b
@@ -893,7 +1010,9 @@ impl POMDPAgent {
     /// modality.
     ///
     /// `Some` iff `learn_a` is enabled; the counts accumulate per counted update
-    /// (`pA ← ω·pA + η·increment`) and `None` otherwise.
+    /// (`pA ← ω·pA + η·increment`) and `None` otherwise. When built with
+    /// [`AgentParams::initial_pa`](AgentParams::initial_pa) these are exactly the
+    /// injected counts at step 0 (and `observation_model` is their normalization).
     #[must_use]
     pub fn pa(&self) -> Option<&[DMatrix<f64>]> {
         self.pa.as_deref()
@@ -903,7 +1022,9 @@ impl POMDPAgent {
     /// `[factor][control]`.
     ///
     /// `Some` iff `learn_b` is enabled; the counts accumulate per counted update
-    /// and `None` otherwise.
+    /// and `None` otherwise. When built with
+    /// [`AgentParams::initial_pb`](AgentParams::initial_pb) these are exactly the
+    /// injected counts at step 0 (and `transition_model` is their normalization).
     #[must_use]
     pub fn pb(&self) -> Option<&[Vec<DMatrix<f64>>]> {
         self.pb.as_deref()
@@ -1591,15 +1712,9 @@ impl POMDPAgent {
             for j in 0..n_joint {
                 pa[m][(o, j)] += eta * joint[j];
             }
-            // Recompute A[m] from pA: A[o,j] = pA[o,j] / Σ_o'(pA[o',j]).
-            for j in 0..n_joint {
-                let col_sum: f64 = (0..pa[m].nrows()).map(|r| pa[m][(r, j)]).sum();
-                if col_sum > 1e-10 {
-                    for r in 0..pa[m].nrows() {
-                        a[m][(r, j)] = pa[m][(r, j)] / col_sum;
-                    }
-                }
-            }
+            // Recompute A[m] from pA: A[o,j] = pA[o,j] / Σ_o'(pA[o',j]) — the same
+            // shared column normalization used by count injection at construction.
+            normalize_columns_into(&pa[m], &mut a[m]);
         }
     }
 
@@ -1653,16 +1768,10 @@ impl POMDPAgent {
                     pb[f][uf][(i, j)] += eta * st[f][i] * sprev[f][j];
                 }
             }
-            // Column-normalize every control of factor f back into B.
+            // Column-normalize every control of factor f back into B — the same
+            // shared normalization used by count injection at construction.
             for u in 0..pb[f].len() {
-                for j in 0..n {
-                    let col_sum: f64 = (0..n).map(|r| pb[f][u][(r, j)]).sum();
-                    if col_sum > 1e-10 {
-                        for r in 0..n {
-                            b[f][u][(r, j)] = pb[f][u][(r, j)] / col_sum;
-                        }
-                    }
-                }
+                normalize_columns_into(&pb[f][u], &mut b[f][u]);
             }
         }
     }
@@ -2549,6 +2658,68 @@ fn column_normalized_transpose(b: &DMatrix<f64>) -> DMatrix<f64> {
     bdag
 }
 
+/// Column-normalization floor shared by the learning write-back (`update_a` /
+/// `update_b`), the construction-time count-injection sync (`column_normalize`),
+/// and the injected-count validator (`validate_count_matrix`). A column whose
+/// concentration sum is at or below this floor is treated as having no usable mass:
+/// the write-back leaves the corresponding `A`/`B` column untouched, so injection
+/// must reject such columns up front (otherwise they would land un-normalized and
+/// break the column-stochastic invariant).
+const CONC_NORM_FLOOR: f64 = 1e-10;
+
+/// Column-normalize non-negative Dirichlet counts into a column-stochastic
+/// matrix: `out[i, j] = counts[i, j] / Σ_k counts[k, j]`. Columns whose sum is at
+/// or below [`CONC_NORM_FLOOR`] are left as-is — the identical floor the learning
+/// write-back uses; injected counts are validated (`validate_count_matrix`) to keep
+/// every column strictly above it, so this path always fully normalizes them.
+fn column_normalize(counts: &DMatrix<f64>) -> DMatrix<f64> {
+    let mut out = counts.clone();
+    normalize_columns_into(counts, &mut out);
+    out
+}
+
+/// Write column-normalized `src` counts into `dst` (same shape): for each column
+/// whose sum exceeds [`CONC_NORM_FLOOR`], `dst[(r, j)] = src[(r, j)] / col_sum`;
+/// columns at or below the floor are left untouched in `dst`. Shared by the
+/// `update_a` / `update_b` learning write-backs and the count-injection sync, so
+/// all three normalize identically (row-order summation, same floor).
+fn normalize_columns_into(src: &DMatrix<f64>, dst: &mut DMatrix<f64>) {
+    for j in 0..src.ncols() {
+        let col_sum: f64 = (0..src.nrows()).map(|r| src[(r, j)]).sum();
+        if col_sum > CONC_NORM_FLOOR {
+            for r in 0..src.nrows() {
+                dst[(r, j)] = src[(r, j)] / col_sum;
+            }
+        }
+    }
+}
+
+/// Validate injected Dirichlet count matrices: every entry finite and `≥ 0`, and
+/// every column sum strictly above [`CONC_NORM_FLOOR`] (per-entry zeros are allowed
+/// — deterministic structural zeros are legitimate — but a column at or below the
+/// normalization floor has no usable mass and would land un-normalized in `A`/`B`,
+/// silently breaking the column-stochastic invariant).
+fn validate_count_matrix(m: &DMatrix<f64>, field: &str) -> Result<(), AifError> {
+    for &x in m.iter() {
+        if !x.is_finite() || x < 0.0 {
+            return Err(AifError::InvalidDistribution(format!(
+                "AgentParams.{field} entries must be finite and >= 0"
+            )));
+        }
+    }
+    for j in 0..m.ncols() {
+        // Entries are already validated finite above, so col_sum is finite.
+        let col_sum: f64 = (0..m.nrows()).map(|r| m[(r, j)]).sum();
+        if col_sum <= CONC_NORM_FLOOR {
+            return Err(AifError::InvalidDistribution(format!(
+                "AgentParams.{field} column {j} sum must exceed the normalization \
+                 floor ({CONC_NORM_FLOOR:e})"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Validate that every column of `m` sums to 1 (± 1e-6) with entries in `[0, 1]`.
 fn validate_column_stochastic(m: &DMatrix<f64>) -> Result<(), AifError> {
     for col in 0..m.ncols() {
@@ -2614,15 +2785,76 @@ fn validate_agent_params(params: &AgentParams) -> Result<(), AifError> {
             params.omega
         )));
     }
-    // A-matrix learning needs its pA concentration vector (length checked against
-    // the joint-state count by the caller, which alone knows n_joint).
-    if params.learn_a && params.initial_precision.is_none() {
-        return Err(AifError::InvalidDistribution(
-            "AgentParams.initial_precision must be provided when learn_a is set".to_owned(),
-        ));
+    // A-matrix learning needs exactly one pA seed: the row-uniform concentration
+    // scale (initial_precision, length-checked against n_joint by the caller) XOR
+    // full injected counts (initial_pa). Both `Some` is ambiguous; injected counts
+    // without learning have no consumer.
+    match (
+        params.learn_a,
+        params.initial_precision.is_some(),
+        params.initial_pa.is_some(),
+    ) {
+        (true, false, false) => {
+            return Err(AifError::InvalidDistribution(
+                "exactly one of AgentParams.initial_precision or initial_pa must be provided \
+                 when learn_a is set"
+                    .to_owned(),
+            ));
+        }
+        (_, true, true) => {
+            return Err(AifError::InvalidDistribution(
+                "AgentParams.initial_precision and initial_pa are mutually exclusive".to_owned(),
+            ));
+        }
+        (false, _, true) => {
+            return Err(AifError::InvalidDistribution(
+                "AgentParams.initial_pa requires learn_a".to_owned(),
+            ));
+        }
+        _ => {}
     }
-    // Each Dirichlet learning flag needs its concentration scale (finite, > 0).
-    validate_precision_scale(params.learn_b, params.initial_precision_b, "initial_precision_b")?;
+    if let Some(counts) = &params.initial_pa {
+        for cm in counts {
+            validate_count_matrix(cm, "initial_pa")?;
+        }
+    }
+    // B-matrix learning: same "exactly one of scale XOR counts" precondition.
+    match (
+        params.learn_b,
+        params.initial_precision_b.is_some(),
+        params.initial_pb.is_some(),
+    ) {
+        (true, false, false) => {
+            return Err(AifError::InvalidDistribution(
+                "exactly one of AgentParams.initial_precision_b or initial_pb must be provided \
+                 when learn_b is set"
+                    .to_owned(),
+            ));
+        }
+        (_, true, true) => {
+            return Err(AifError::InvalidDistribution(
+                "AgentParams.initial_precision_b and initial_pb are mutually exclusive".to_owned(),
+            ));
+        }
+        (false, _, true) => {
+            return Err(AifError::InvalidDistribution(
+                "AgentParams.initial_pb requires learn_b".to_owned(),
+            ));
+        }
+        _ => {}
+    }
+    // On the scale path, the concentration scale must be finite / positive.
+    if params.initial_precision_b.is_some() {
+        validate_precision_scale(params.learn_b, params.initial_precision_b, "initial_precision_b")?;
+    }
+    if let Some(counts) = &params.initial_pb {
+        for bf in counts {
+            for bu in bf {
+                validate_count_matrix(bu, "initial_pb")?;
+            }
+        }
+    }
+    // D / E learning each need their concentration scale (finite, > 0).
     validate_precision_scale(params.learn_d, params.initial_precision_d, "initial_precision_d")?;
     validate_precision_scale(params.learn_e, params.initial_precision_e, "initial_precision_e")?;
     // The novelty term is built from the pA counts, so it requires A-matrix learning.
@@ -4135,6 +4367,360 @@ mod tests {
         assert_relative_eq!(agent.state_prior()[0][0], 0.5, epsilon = 1e-15);
         assert_relative_eq!(agent.state_prior()[0][1], 0.5, epsilon = 1e-15);
         Ok(())
+    }
+
+    // ----- 0.11.0: direct Dirichlet-count injection (initial_pa / initial_pb) -----
+
+    #[test]
+    fn test_initial_pa_roundtrip_matches_learned() -> Result<(), AifError> {
+        // A scale-seeded learner accumulates structured pA over a trajectory; a fresh
+        // agent injected with those counts is in the identical post-boundary state, so
+        // one further counted step evolves pa()/A/posteriors bit-for-bit identically.
+        let model = || {
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.9, 0.1, 0.1, 0.9]),
+                vec![DMatrix::identity(2, 2)],
+                vec![0.5, 0.5],
+            )
+        };
+        let mut learner = POMDPAgent::from_model(
+            model(),
+            AgentParams {
+                alpha: 1.0,
+                learn_a: true,
+                initial_precision: Some(vec![1.0, 1.0]),
+                ..Default::default()
+            },
+        )?;
+        // Drive a trajectory (t=0 gated, then counted steps) with a mixed obs stream so
+        // both outcome rows accumulate — the counts end up row-structured.
+        for &o in &[0usize, 0, 1, 0, 1] {
+            learner.action_probabilities(o);
+            learner.record_action(0);
+        }
+        learner.reset_window(); // fresh trial boundary: belief = D, counts retained.
+
+        let counts: Vec<DMatrix<f64>> = learner.pa().expect("learn_a ⇒ pa is Some").to_vec();
+        // Structured, not row-uniform (otherwise the test would be vacuous).
+        assert!(
+            (counts[0][(0, 0)] - counts[0][(1, 0)]).abs() > 1e-6,
+            "learned counts should be row-structured"
+        );
+
+        let mut injected = POMDPAgent::from_model(
+            model(),
+            AgentParams {
+                alpha: 1.0,
+                learn_a: true,
+                initial_pa: Some(counts.clone()),
+                ..Default::default()
+            },
+        )?;
+        // Round-trip: pa() returns the injected counts verbatim; observation_model is
+        // the column-normalization of those counts.
+        let norm = column_normalize(&counts[0]);
+        for r in 0..2 {
+            for c in 0..2 {
+                assert_relative_eq!(injected.pa().unwrap()[0][(r, c)], counts[0][(r, c)], epsilon = 1e-15);
+                assert_relative_eq!(injected.observation_model()[0][(r, c)], norm[(r, c)], epsilon = 1e-15);
+            }
+        }
+
+        // learner (post-reset) and injected are now in identical state: one further
+        // counted step (t=0 gated + recorded action + counted t=1) evolves identically.
+        for &o in &[1usize, 0] {
+            let pl = learner.action_probabilities(o);
+            let pi = injected.action_probabilities(o);
+            for k in 0..pl.len() {
+                assert_relative_eq!(pl[k], pi[k], epsilon = 1e-15);
+            }
+            learner.record_action(0);
+            injected.record_action(0);
+        }
+        let (la, ia) = (learner.pa().unwrap(), injected.pa().unwrap());
+        for r in 0..2 {
+            for c in 0..2 {
+                assert_relative_eq!(la[0][(r, c)], ia[0][(r, c)], epsilon = 1e-15);
+                assert_relative_eq!(
+                    learner.observation_model()[0][(r, c)],
+                    injected.observation_model()[0][(r, c)],
+                    epsilon = 1e-15
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_initial_pb_roundtrip_matches_learned() -> Result<(), AifError> {
+        // pB analog of the pA round-trip: a scale-seeded learn_b agent accumulates pB
+        // over a trajectory; injecting the learned counts reproduces its state exactly.
+        let b0 = DMatrix::from_row_slice(2, 2, &[0.7, 0.4, 0.3, 0.6]);
+        let b1 = DMatrix::from_row_slice(2, 2, &[0.6, 0.5, 0.4, 0.5]);
+        let model = || {
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8]),
+                vec![b0.clone(), b1.clone()],
+                vec![1.0, 0.0],
+            )
+        };
+        let mut learner = POMDPAgent::from_model(
+            model(),
+            AgentParams {
+                alpha: 1.0,
+                learn_b: true,
+                initial_precision_b: Some(1.0),
+                ..Default::default()
+            },
+        )?;
+        for (t, &o) in [0usize, 1, 0, 1].iter().enumerate() {
+            learner.action_probabilities(o);
+            learner.record_action(t % 2);
+        }
+        learner.reset_window();
+
+        let counts: Vec<Vec<DMatrix<f64>>> = learner
+            .pb()
+            .expect("learn_b ⇒ pb is Some")
+            .iter()
+            .map(|bf| bf.to_vec())
+            .collect();
+        let mut injected = POMDPAgent::from_model(
+            model(),
+            AgentParams {
+                alpha: 1.0,
+                learn_b: true,
+                initial_pb: Some(counts.clone()),
+                ..Default::default()
+            },
+        )?;
+        // Round-trip: pb() verbatim; transition_model == column-normalized counts.
+        for (f, bf) in counts.iter().enumerate() {
+            for (u, bu) in bf.iter().enumerate() {
+                let norm = column_normalize(bu);
+                for r in 0..2 {
+                    for c in 0..2 {
+                        assert_relative_eq!(injected.pb().unwrap()[f][u][(r, c)], bu[(r, c)], epsilon = 1e-15);
+                        assert_relative_eq!(injected.transition_model()[f][u][(r, c)], norm[(r, c)], epsilon = 1e-15);
+                    }
+                }
+            }
+        }
+        // One further identical counted step evolves pb/B/posteriors identically.
+        for (t, &o) in [0usize, 1].iter().enumerate() {
+            let pl = learner.action_probabilities(o);
+            let pi = injected.action_probabilities(o);
+            for k in 0..pl.len() {
+                assert_relative_eq!(pl[k], pi[k], epsilon = 1e-15);
+            }
+            learner.record_action(t % 2);
+            injected.record_action(t % 2);
+        }
+        let (lb, ib) = (learner.pb().unwrap(), injected.pb().unwrap());
+        for f in 0..lb.len() {
+            for u in 0..lb[f].len() {
+                for r in 0..2 {
+                    for c in 0..2 {
+                        assert_relative_eq!(lb[f][u][(r, c)], ib[f][u][(r, c)], epsilon = 1e-15);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_scale_seed_equals_injected_pa() {
+        // Bit-identity sentinel. The pA scale path seeds a ROW-UNIFORM matrix (every
+        // outcome row = prec[col]), whose column-normalization is uniform. So when the
+        // model's A is already uniform, scale-seeding and injecting that same
+        // row-uniform matrix are equivalent — reproduce each other bit-for-bit across a
+        // driven trajectory (pa, A, action posteriors). (For the pB scale path, s_b·B
+        // normalizes back to B for any column-stochastic B — the exact "scale·B" case.)
+        let model = || {
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.5, 0.5, 0.5, 0.5]),
+                vec![DMatrix::identity(2, 2)],
+                vec![0.5, 0.5],
+            )
+        };
+        let prec = vec![2.0, 3.0];
+        let mut scaled = POMDPAgent::from_model(
+            model(),
+            AgentParams {
+                alpha: 1.0,
+                learn_a: true,
+                initial_precision: Some(prec.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let equiv = DMatrix::from_fn(2, 2, |_row, col| prec[col]);
+        let mut injected = POMDPAgent::from_model(
+            model(),
+            AgentParams {
+                alpha: 1.0,
+                learn_a: true,
+                initial_pa: Some(vec![equiv]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for &o in &[0usize, 1, 0, 1, 1] {
+            let ps = scaled.action_probabilities(o);
+            let pi = injected.action_probabilities(o);
+            for k in 0..ps.len() {
+                assert_relative_eq!(ps[k], pi[k], epsilon = 1e-15);
+            }
+            scaled.record_action(0);
+            injected.record_action(0);
+        }
+        for r in 0..2 {
+            for c in 0..2 {
+                assert_relative_eq!(scaled.pa().unwrap()[0][(r, c)], injected.pa().unwrap()[0][(r, c)], epsilon = 1e-15);
+                assert_relative_eq!(
+                    scaled.observation_model()[0][(r, c)],
+                    injected.observation_model()[0][(r, c)],
+                    epsilon = 1e-15
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_structured_pa_learn_a_not_flattened() -> Result<(), AifError> {
+        // The downstream-motivating property (koalisi #44): with injected structured
+        // counts, A ≡ normalize(counts) from step 0 and the first learn_a write-back
+        // does NOT flatten it — unlike the row-uniform scale seed, whose first update
+        // pulls A toward uniform. The model's supplied A (here uniform) is ignored.
+        let counts = DMatrix::from_row_slice(2, 2, &[90.0, 10.0, 10.0, 90.0]);
+        let expected_a = column_normalize(&counts); // [[.9,.1],[.1,.9]]
+        let mut agent = POMDPAgent::from_model(
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.5, 0.5, 0.5, 0.5]),
+                vec![DMatrix::identity(2, 2)],
+                vec![0.5, 0.5],
+            ),
+            AgentParams {
+                alpha: 1.0,
+                learn_a: true,
+                initial_pa: Some(vec![counts.clone()]),
+                ..Default::default()
+            },
+        )?;
+        // At construction A ≡ normalize(counts), despite the model supplying a uniform A.
+        for r in 0..2 {
+            for c in 0..2 {
+                assert_relative_eq!(agent.observation_model()[0][(r, c)], expected_a[(r, c)], epsilon = 1e-15);
+            }
+        }
+        // First counted action_probabilities must NOT flatten A: it stays strongly
+        // discriminative because the injected column-0 count (90 vs 10) dwarfs the +1
+        // increment. (Contrast the scale path, where A[(0,0)] would drop to 1.9/2.9.)
+        agent.action_probabilities(0); // t=0 gated under MeanField.
+        agent.record_action(0);
+        agent.action_probabilities(0); // counted.
+        assert!(
+            agent.observation_model()[0][(0, 0)] > 0.85,
+            "structured A must not flatten, got {}",
+            agent.observation_model()[0][(0, 0)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_initial_pa_pb_validation() {
+        let model = || {
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.9, 0.1, 0.1, 0.9]),
+                vec![
+                    DMatrix::from_row_slice(2, 2, &[0.7, 0.4, 0.3, 0.6]),
+                    DMatrix::from_row_slice(2, 2, &[0.6, 0.5, 0.4, 0.5]),
+                ],
+                vec![0.5, 0.5],
+            )
+        };
+        let reject = |p: AgentParams| {
+            assert!(
+                matches!(
+                    POMDPAgent::from_model(model(), p),
+                    Err(AifError::InvalidDistribution(_) | AifError::InvalidLength { .. })
+                ),
+                "expected rejection"
+            );
+        };
+        let ok_counts = || vec![DMatrix::from_row_slice(2, 2, &[2.0, 1.0, 1.0, 3.0])];
+        let ok_pb = || {
+            vec![vec![
+                DMatrix::from_row_slice(2, 2, &[3.0, 1.0, 1.0, 2.0]),
+                DMatrix::from_row_slice(2, 2, &[2.0, 1.0, 1.0, 2.0]),
+            ]]
+        };
+
+        // pA: scale and counts both Some → ambiguous.
+        reject(AgentParams { alpha: 1.0, learn_a: true, initial_precision: Some(vec![1.0, 1.0]), initial_pa: Some(ok_counts()), ..Default::default() });
+        // pA counts without learn_a.
+        reject(AgentParams { alpha: 1.0, initial_pa: Some(ok_counts()), ..Default::default() });
+        // learn_a with neither seed.
+        reject(AgentParams { alpha: 1.0, learn_a: true, ..Default::default() });
+        // Bad shape: wrong modality count.
+        reject(AgentParams { alpha: 1.0, learn_a: true, initial_pa: Some(vec![]), ..Default::default() });
+        // Bad shape: wrong ncols (n_joint = 2).
+        reject(AgentParams { alpha: 1.0, learn_a: true, initial_pa: Some(vec![DMatrix::from_element(2, 3, 1.0)]), ..Default::default() });
+        // Zero-column pA (both entries of column 1 are zero).
+        reject(AgentParams { alpha: 1.0, learn_a: true, initial_pa: Some(vec![DMatrix::from_row_slice(2, 2, &[1.0, 0.0, 3.0, 0.0])]), ..Default::default() });
+        // Negative entry.
+        reject(AgentParams { alpha: 1.0, learn_a: true, initial_pa: Some(vec![DMatrix::from_row_slice(2, 2, &[-1.0, 1.0, 2.0, 1.0])]), ..Default::default() });
+
+        // pB: scale and counts both Some.
+        reject(AgentParams { alpha: 1.0, learn_b: true, initial_precision_b: Some(1.0), initial_pb: Some(ok_pb()), ..Default::default() });
+        // pB counts without learn_b.
+        reject(AgentParams { alpha: 1.0, initial_pb: Some(ok_pb()), ..Default::default() });
+        // Bad shape: wrong control count (factor has 2 controls).
+        reject(AgentParams { alpha: 1.0, learn_b: true, initial_pb: Some(vec![vec![DMatrix::from_element(2, 2, 1.0)]]), ..Default::default() });
+        // Zero-column pB in control 0.
+        reject(AgentParams { alpha: 1.0, learn_b: true, initial_pb: Some(vec![vec![DMatrix::from_row_slice(2, 2, &[0.0, 1.0, 0.0, 2.0]), DMatrix::from_element(2, 2, 1.0)]]), ..Default::default() });
+
+        // Positive controls: valid injected pA / pB construct.
+        assert!(POMDPAgent::from_model(model(), AgentParams { alpha: 1.0, learn_a: true, initial_pa: Some(ok_counts()), ..Default::default() }).is_ok());
+        assert!(POMDPAgent::from_model(model(), AgentParams { alpha: 1.0, learn_b: true, initial_pb: Some(ok_pb()), ..Default::default() }).is_ok());
+    }
+
+    #[test]
+    fn test_injected_count_subfloor_column_rejected() {
+        // Regression for the validate/normalize threshold mismatch: a column summing
+        // into (0, CONC_NORM_FLOOR] is positive yet would land un-normalized in A/B
+        // (the write-back only normalizes columns whose sum exceeds the floor). Such a
+        // column must be rejected at construction, so validation and normalization share
+        // CONC_NORM_FLOOR. Column 1 here sums to 5e-11 ∈ (0, 1e-10].
+        let model = |b: Vec<DMatrix<f64>>| {
+            single_factor_model(DMatrix::from_row_slice(2, 2, &[0.9, 0.1, 0.1, 0.9]), b, vec![0.5, 0.5])
+        };
+        let pa_subfloor = POMDPAgent::from_model(
+            model(vec![DMatrix::identity(2, 2)]),
+            AgentParams {
+                alpha: 1.0,
+                learn_a: true,
+                initial_pa: Some(vec![DMatrix::from_row_slice(2, 2, &[1.0, 2e-11, 3.0, 3e-11])]),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(pa_subfloor, Err(AifError::InvalidDistribution(_))), "sub-floor pA column must be rejected");
+
+        // Same guard on pB (control 0, column 0 sums to 5e-11).
+        let pb_subfloor = POMDPAgent::from_model(
+            model(vec![DMatrix::identity(2, 2), DMatrix::identity(2, 2)]),
+            AgentParams {
+                alpha: 1.0,
+                learn_b: true,
+                initial_pb: Some(vec![vec![
+                    DMatrix::from_row_slice(2, 2, &[2e-11, 1.0, 3e-11, 2.0]),
+                    DMatrix::from_element(2, 2, 1.0),
+                ]]),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(pb_subfloor, Err(AifError::InvalidDistribution(_))), "sub-floor pB column must be rejected");
     }
 
     #[test]

@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-17
+
+Direct Dirichlet-count injection for `pA` and `pB` at construction, motivated by the
+[koalisi #44](https://github.com/sustia-llc/koalisi/issues/44) persistent→query
+handoff: fresh "query" agents are built from a persistent agent's learned counts. The
+existing scale-based seeding (`initial_precision` — one scalar per joint column
+replicated across outcome rows; `initial_precision_b` — scalar × `B`) cannot carry
+row-structured counts, and under `learn_a` the first update's `A = normalize(pA)`
+write-back erases any structured `A` the model supplied — making
+structured-`A` + `learn_a` agents impossible. Count injection fixes both. Fully
+additive; defaults (`None`) are bit-identical to 0.10.1. This release is tracked
+downstream by [koalisi #44](https://github.com/sustia-llc/koalisi/issues/44), not by
+a tira issue.
+
+### Added
+- **`AgentParams::initial_pa: Option<Vec<DMatrix<f64>>>`** — full `pA` Dirichlet
+  counts, one matrix per modality (`n_obs[m] × n_joint`). When `Some`, requires
+  `learn_a` and is mutually exclusive with `initial_precision` (both `Some` is a
+  validation error). Every entry must be finite and `≥ 0`, every column sum `> 0`
+  (per-entry zeros allowed).
+- **`AgentParams::initial_pb: Option<Vec<Vec<DMatrix<f64>>>>`** — full `pB`
+  Dirichlet counts, one matrix per factor per control (matching `B`'s shapes). When
+  `Some`, requires `learn_b` and is mutually exclusive with `initial_precision_b`;
+  same finiteness/positivity validation.
+
+### Changed
+- The `learn_a` / `learn_b` precondition is now "**exactly one** of the concentration
+  scale or the injected counts" (previously "the scale is required"). `learn_d` /
+  `learn_e` are unchanged.
+- **Construction-time sync convention**: when `initial_pa` (resp. `initial_pb`) is
+  supplied, the injected counts are the model of record — `A ← column-normalize(pA)`
+  (resp. `B ← column-normalize(pB)`) at construction, so `A ≡ normalize(pA)` from step
+  0. The `GenerativeModel`'s `a` (resp. `b`) is **ignored** in this case and validated
+  for shape only (not column-stochastic).
+
 ## [0.10.1] - 2026-07-17
 
 Read-only generative-model accessors on `POMDPAgent`, motivated by the
