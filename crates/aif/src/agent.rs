@@ -190,6 +190,17 @@ pub struct AgentParams {
     /// pymdp's flag name and default (`false`); SPM auto-enables it whenever A is
     /// learned — we do not, to keep the default numerics bit-identical.
     pub use_param_info_gain: bool,
+    /// Enable the B-novelty (transition-model parameter information gain) term in
+    /// expected free energy. Convention-pinned to pymdp's `calc_pB_info_gain`: the
+    /// paper gives no explicit B form (Smith et al. 2022, L1057, only notes "similar
+    /// terms can be added" for B). Built from `pB`, so it requires `learn_b`.
+    ///
+    /// Deliberately a **separate** flag from
+    /// [`use_param_info_gain`](Self::use_param_info_gain): pymdp gates A- and
+    /// B-novelty under a single flag, but we split them so the two novelty terms can
+    /// be toggled independently. The ½ factor matches this crate's A-novelty term
+    /// (Smith Eq. 39/40). Default `false` — unset changes no numerics.
+    pub use_b_info_gain: bool,
     /// Initial pA concentration per joint-state column (replicated across
     /// modalities). Required when `learn_a` is true.
     pub initial_precision: Option<Vec<f64>>,
@@ -235,6 +246,7 @@ impl Default for AgentParams {
             eta: 1.0,
             omega: 1.0,
             use_param_info_gain: false,
+            use_b_info_gain: false,
             initial_precision: None,
             initial_precision_b: None,
             initial_precision_d: None,
@@ -313,6 +325,7 @@ pub struct POMDPAgent {
     eta: f64,
     omega: f64,
     use_param_info_gain: bool,
+    use_b_info_gain: bool,
     /// Latches the once-per-trial pD commit (reset by [`Self::reset_window`]).
     d_committed_this_trial: bool,
     policy_depth: usize,
@@ -710,6 +723,7 @@ impl POMDPAgent {
             eta: params.eta,
             omega: params.omega,
             use_param_info_gain: params.use_param_info_gain,
+            use_b_info_gain: params.use_b_info_gain,
             d_committed_this_trial: false,
             policy_depth: params.policy_depth,
             n_states,
@@ -1718,10 +1732,13 @@ impl POMDPAgent {
     /// state is a delta and the information-gain term is exactly zero; it becomes
     /// live once a stochastic B is injected via [`Self::from_model`].
     ///
-    /// When `use_param_info_gain` is set (and pA is present), the novelty term
+    /// When `use_param_info_gain` is set (and pA is present), the A-novelty term
     /// (Smith Eq. 39/40) `qo_m · (W_m·joint)` is added to neg-G per modality — the
     /// paper subtracts it from G, so it *raises* neg-G, favoring policies expected
-    /// to sharpen the observation model.
+    /// to sharpen the observation model. When `use_b_info_gain` is set (and pB is
+    /// present), the analogous B-novelty term (pymdp `calc_pB_info_gain`) is added
+    /// per factor, favoring policies expected to sharpen the transition model; it is
+    /// exactly zero for a deterministic B.
     fn efe_step(&self, beliefs: &[DVector<f64>], action_flat: usize) -> (f64, Vec<DVector<f64>>) {
         let controls = flat_to_multi(action_flat, &self.n_controls);
         let next: Vec<DVector<f64>> = (0..beliefs.len())
@@ -1765,6 +1782,16 @@ impl POMDPAgent {
             if novelty_on {
                 let pa = self.pa.as_ref().expect("invariant: pa is Some (novelty_on)");
                 info_gain += a_novelty(&pa[m], &qo, &joint);
+            }
+        }
+
+        // B-novelty (transition-model parameter information gain, pymdp
+        // `calc_pB_info_gain`) — per factor, contracting W_B against next ⊗ prev.
+        if self.use_b_info_gain
+            && let Some(pb) = &self.pb
+        {
+            for f in 0..next.len() {
+                info_gain += b_novelty(&pb[f][controls[f]], &next[f], &beliefs[f]);
             }
         }
 
@@ -2286,13 +2313,49 @@ fn a_novelty(pa_m: &DMatrix<f64>, qo: &DVector<f64>, joint: &DVector<f64>) -> f6
     let mut novelty = 0.0;
     for o in 0..nrows {
         // (W·joint)[o] = Σ_j ½(1/pa[(o,j)] − 1/col_sum[j]) · joint[j].
+        // pymdp masks the term to `pA > 0`: a structural zero contributes nothing
+        // (a positive entry implies a positive column sum, so one mask suffices — no
+        // floors, which would otherwise inject a spurious 1/1e-10 term at zeros).
         let mut wj = 0.0;
         for j in 0..ncols {
-            let inv_pa = 1.0 / pa_m[(o, j)].max(1e-10);
-            let inv_sum = 1.0 / col_sums[j].max(1e-10);
-            wj += 0.5 * (inv_pa - inv_sum) * joint[j];
+            let pa = pa_m[(o, j)];
+            if pa > 0.0 {
+                wj += 0.5 * (1.0 / pa - 1.0 / col_sums[j]) * joint[j];
+            }
         }
         novelty += qo[o] * wj;
+    }
+    novelty
+}
+
+/// B-novelty (transition-model parameter information gain), pymdp `calc_pB_info_gain`
+/// form, for one control's `pB` slice.
+///
+/// `W_B = ½(pb^{⊙−1} − colsum^{⊙−1})` (elementwise), where `colsum[s] = Σ_{s'}
+/// pb[(s', s)]`, contracted against the predicted transition coincidence
+/// `s_{t+1} ⊗ s_t` (`next_f ⊗ prev_f`):
+///   `Σ_{s',s} next_f[s'] · ½(1/pb[(s',s)] − 1/colsum[s]) · prev_f[s]`.
+/// The ½ factor matches [`a_novelty`] (Smith Eq. 39/40 convention; the paper gives
+/// no explicit B form — pymdp is the pin).
+///
+/// Masked to `pb > 0` exactly as pymdp masks `pB`: a structural zero contributes
+/// nothing (and a positive entry implies a positive column sum, so the single mask
+/// suffices). A **deterministic** B is exactly 0 — each nonzero entry equals its own
+/// column sum, so `1/pb − 1/colsum = 0`.
+fn b_novelty(pb_u: &DMatrix<f64>, next_f: &DVector<f64>, prev_f: &DVector<f64>) -> f64 {
+    let n_next = pb_u.nrows();
+    let n_prev = pb_u.ncols();
+    let col_sums: Vec<f64> = (0..n_prev)
+        .map(|s| (0..n_next).map(|sp| pb_u[(sp, s)]).sum())
+        .collect();
+    let mut novelty = 0.0;
+    for s in 0..n_prev {
+        for sp in 0..n_next {
+            let p = pb_u[(sp, s)];
+            if p > 0.0 {
+                novelty += next_f[sp] * 0.5 * (1.0 / p - 1.0 / col_sums[s]) * prev_f[s];
+            }
+        }
     }
     novelty
 }
@@ -2439,6 +2502,13 @@ fn validate_agent_params(params: &AgentParams) -> Result<(), AifError> {
     if params.use_param_info_gain && !params.learn_a {
         return Err(AifError::InvalidDistribution(
             "AgentParams.use_param_info_gain (novelty term) is built from pA; requires learn_a"
+                .to_owned(),
+        ));
+    }
+    // The B-novelty term is built from the pB counts, so it requires B learning.
+    if params.use_b_info_gain && !params.learn_b {
+        return Err(AifError::InvalidDistribution(
+            "AgentParams.use_b_info_gain (B-novelty term) is built from pB; requires learn_b"
                 .to_owned(),
         ));
     }
@@ -3954,6 +4024,145 @@ mod tests {
             AgentParams {
                 alpha: 1.0,
                 use_param_info_gain: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(res, Err(AifError::InvalidDistribution(_))));
+    }
+
+    // ----- B-novelty / transition-model parameter info gain (tira #21) -----
+
+    #[test]
+    fn test_b_novelty_pymdp_anchor() {
+        // pymdp `calc_pB_info_gain` anchor. pb_u = [[.25, 1], [.75, 1]] (rows = next
+        // state), colsums = [1, 2], so
+        //   W_B = ½(pb^{⊙−1} − colsum^{⊙−1}) = [[1.5, .25], [1/6, .25]].
+        // With next = [.275, .725] and prev = [.9, .1]:
+        //   Σ_{s',s} next[s']·W_B[(s',s)]·prev[s]
+        //   = .275·1.5·.9 + .725·(1/6)·.9 + .275·.25·.1 + .725·.25·.1 = 0.505.
+        let pb_u = DMatrix::from_row_slice(2, 2, &[0.25, 1.0, 0.75, 1.0]);
+        let next = DVector::from_vec(vec![0.275, 0.725]);
+        let prev = DVector::from_vec(vec![0.9, 0.1]);
+        assert_relative_eq!(b_novelty(&pb_u, &next, &prev), 0.505, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn test_b_novelty_zero_for_deterministic_b() {
+        // Deterministic (0/1) pB columns: colsum equals the single nonzero entry, so
+        // each surviving term is exactly ½(1/1 − 1/1) = 0 (and zeros are masked).
+        let pb_u = DMatrix::from_row_slice(2, 2, &[1.0, 0.0, 0.0, 1.0]);
+        let next = DVector::from_vec(vec![0.6, 0.4]);
+        let prev = DVector::from_vec(vec![0.7, 0.3]);
+        assert_eq!(b_novelty(&pb_u, &next, &prev), 0.0);
+    }
+
+    #[test]
+    fn test_a_novelty_masks_zero_entries() {
+        // An exact-zero pA entry must contribute 0 (pymdp mask), not the spurious
+        // 1/1e-10 ≈ 1e10 term the old floor would have injected.
+        let pa = DMatrix::from_row_slice(2, 2, &[0.0, 1.0, 1.0, 1.0]);
+        let joint = DVector::from_vec(vec![1.0, 0.0]);
+        let qo = DVector::from_vec(vec![0.5, 0.5]);
+        let n = a_novelty(&pa, &qo, &joint);
+        assert!(n.is_finite(), "masked zero must not blow up: {n}");
+        assert_eq!(n, 0.0);
+    }
+
+    #[test]
+    fn test_b_novelty_flag_off_bit_identical() -> Result<(), AifError> {
+        // A learn_b agent with the flag off consults pB nowhere in efe_step, so its
+        // neg-G matches the same model built without learn_b (no pB at all).
+        let model = || {
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.8, 0.2, 0.2, 0.8]),
+                vec![
+                    DMatrix::from_row_slice(2, 2, &[0.7, 0.3, 0.3, 0.7]),
+                    DMatrix::from_row_slice(2, 2, &[0.6, 0.4, 0.4, 0.6]),
+                ],
+                vec![0.5, 0.5],
+            )
+        };
+        let with_pb = POMDPAgent::from_model(
+            model(),
+            AgentParams {
+                alpha: 1.0,
+                learn_b: true,
+                initial_precision_b: Some(1.0),
+                use_b_info_gain: false,
+                ..Default::default()
+            },
+        )?;
+        let no_pb = POMDPAgent::from_model(model(), AgentParams { alpha: 1.0, ..Default::default() })?;
+        assert_eq!(with_pb.expected_free_energy(), no_pb.expected_free_energy());
+        Ok(())
+    }
+
+    #[test]
+    fn test_b_novelty_added_to_neg_g_directional() -> Result<(), AifError> {
+        // 2-state / 2-control, symmetric stochastic B (B0 == B1) ⇒ without B-novelty
+        // the two controls are decision-symmetric. Driving control 0 grows its pB
+        // counts (better-known transitions ⇒ lower novelty), so with the flag on the
+        // action mass shifts toward the LESS-practiced control 1.
+        let b_sym = DMatrix::from_row_slice(2, 2, &[0.7, 0.3, 0.3, 0.7]);
+        let build = |flag: bool| {
+            POMDPAgent::from_model(
+                single_factor_model(
+                    DMatrix::from_row_slice(2, 2, &[0.8, 0.2, 0.2, 0.8]),
+                    vec![b_sym.clone(), b_sym.clone()],
+                    vec![0.5, 0.5],
+                ),
+                AgentParams {
+                    alpha: 1.0,
+                    learn_b: true,
+                    initial_precision_b: Some(1.0),
+                    use_b_info_gain: flag,
+                    ..Default::default()
+                },
+            )
+        };
+        let mut off = build(false)?;
+        let mut on = build(true)?;
+
+        // Drive both identically: alternate observations, always take control 0. The
+        // belief/learning path is novelty-flag-independent, so pB grows identically
+        // for both agents; each post-action_probabilities call flushes one pb update.
+        let obs = [0usize, 1, 0, 1, 0, 1];
+        for (i, &o) in obs.iter().enumerate() {
+            off.action_probabilities(o);
+            on.action_probabilities(o);
+            if i + 1 < obs.len() {
+                off.record_action(0);
+                on.record_action(0);
+            }
+        }
+
+        // Both agents share the identical belief/learning path (including the B
+        // write-back that mutates control 0's transitions), so any difference in the
+        // policy posterior is attributable solely to the B-novelty term.
+        let p_off = off.infer_policies();
+        let p_on = on.infer_policies();
+        // Flag on: mass shifts toward the less-practiced (higher-novelty) control 1.
+        assert!(
+            p_on[1] > p_off[1],
+            "B-novelty must shift mass toward the less-practiced control 1: {} vs {}",
+            p_on[1],
+            p_off[1]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_b_novelty_requires_learn_b() {
+        // use_b_info_gain without learn_b is a construction error.
+        let res = POMDPAgent::from_model(
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.8, 0.2, 0.2, 0.8]),
+                vec![DMatrix::from_row_slice(2, 2, &[0.7, 0.3, 0.3, 0.7])],
+                vec![0.5, 0.5],
+            ),
+            AgentParams {
+                alpha: 1.0,
+                use_b_info_gain: true,
                 ..Default::default()
             },
         );
