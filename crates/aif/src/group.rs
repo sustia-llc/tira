@@ -123,7 +123,8 @@ impl VotingAgent {
     /// `Deterministic`; direct callers may.
     ///
     /// Every distribution must have length equal to `n_actions`; otherwise an
-    /// [`AifError::InvalidAction`] carrying the offending length is returned.
+    /// [`AifError::InvalidLength`] carrying the expected and offending lengths is
+    /// returned.
     #[allow(clippy::missing_errors_doc)]
     pub fn aggregate_weighted(
         &mut self,
@@ -131,7 +132,10 @@ impl VotingAgent {
     ) -> Result<usize, AifError> {
         for dist in distributions {
             if dist.len() != self.n_actions {
-                return Err(AifError::InvalidAction(dist.len()));
+                return Err(AifError::InvalidLength {
+                    expected: self.n_actions,
+                    got: dist.len(),
+                });
             }
         }
 
@@ -393,7 +397,7 @@ impl GroupAgentBuilder {
     ///
     /// Required whenever [`learn_a(true)`](Self::learn_a) is set: without it every
     /// `build_*` method fails at [`POMDPAgent::new`] with
-    /// [`AifError::InvalidAction`] (the same guard single agents use). This release
+    /// [`AifError::InvalidDistribution`] (the same guard single agents use). This release
     /// exposes only pA learning at the group level — the per-agent `η`/`ω`/`learn_b`
     /// /`learn_d`/`learn_e` knobs are not plumbed through the builder.
     #[must_use]
@@ -455,7 +459,10 @@ impl GroupAgentBuilder {
     #[allow(clippy::missing_errors_doc)]
     pub fn build_varying_alpha(self, alphas: &[f64]) -> Result<GroupAgent, AifError> {
         if alphas.len() != self.n_internal {
-            return Err(AifError::InvalidAction(alphas.len()));
+            return Err(AifError::InvalidLength {
+                expected: self.n_internal,
+                got: alphas.len(),
+            });
         }
         let agents: Vec<POMDPAgent> = alphas
             .iter()
@@ -481,7 +488,10 @@ impl GroupAgentBuilder {
         preference_sets: &[Vec<f64>],
     ) -> Result<GroupAgent, AifError> {
         if preference_sets.len() != self.n_internal {
-            return Err(AifError::InvalidAction(preference_sets.len()));
+            return Err(AifError::InvalidLength {
+                expected: self.n_internal,
+                got: preference_sets.len(),
+            });
         }
         let agents: Vec<POMDPAgent> = preference_sets
             .iter()
@@ -620,7 +630,7 @@ mod tests {
         let wrong = vec![DVector::from_vec(vec![0.5, 0.5])];
         let err = voter.aggregate_weighted(&wrong);
         assert!(
-            matches!(err, Err(AifError::InvalidAction(2))),
+            matches!(err, Err(AifError::InvalidLength { expected: 3, got: 2 })),
             "Wrong-length distribution should be rejected: {err:?}"
         );
 
@@ -713,7 +723,7 @@ mod tests {
             .learn_a(true)
             .build_identical();
         assert!(
-            matches!(missing, Err(AifError::InvalidAction(_))),
+            matches!(missing, Err(AifError::InvalidDistribution(_))),
             "learn_a without precision must error"
         );
 
@@ -960,6 +970,38 @@ mod tests {
         assert_eq!(
             seq_a, seq_b,
             "Identical-seed Deterministic groups must produce identical action sequences"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_invalid_length_payloads() -> Result<(), AifError> {
+        // Three representative InvalidLength sites report {expected, got} exactly.
+
+        // (1) POMDPAgent::new: preferences must have length 2 (n_obs).
+        let bad_prefs = POMDPAgent::new(2, None, None, vec![0.5, 0.3, 0.2], None, 1.0, false);
+        assert!(
+            matches!(bad_prefs, Err(AifError::InvalidLength { expected: 2, got: 3 })),
+            "wrong preferences length: {bad_prefs:?}"
+        );
+
+        // (2) act_multi: obs length must equal n_modalities (1 for a MAB agent).
+        let mut agent = POMDPAgent::new(2, None, None, vec![0.5, 0.5], None, 1.0, false)?;
+        let bad_obs = agent.act_multi(&[0, 0]);
+        assert!(
+            matches!(bad_obs, Err(AifError::InvalidLength { expected: 1, got: 2 })),
+            "wrong obs length: {bad_obs:?}"
+        );
+
+        // (3) build_varying_alpha: alphas length must equal n_internal.
+        let bad_alphas = GroupAgentBuilder::new(3)
+            .n_internal(4)
+            .observation_probs(vec![0.8, 0.2, 0.2])
+            .preferences(vec![0.7, 0.3])
+            .build_varying_alpha(&[0.2, 0.4]);
+        assert!(
+            matches!(bad_alphas, Err(AifError::InvalidLength { expected: 4, got: 2 })),
+            "wrong alphas length must report {{expected: 4, got: 2}}"
         );
         Ok(())
     }
