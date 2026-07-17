@@ -2,6 +2,58 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-17
+
+Full-mode seeded determinism ([#10](https://github.com/sustia-llc/tira/issues/10)),
+the B-novelty EFE term ([#21](https://github.com/sustia-llc/tira/issues/21)), and the
+deferred error/learning hardening ([#3](https://github.com/sustia-llc/tira/issues/3),
+[#6](https://github.com/sustia-llc/tira/issues/6)). Unblocks the koalisi #44
+persistent stochastic-B arm (a sampling `POMDPAgent` is now seedable).
+
+### Added
+- **`AgentParams::seed: Option<u64>`** and **`POMDPAgent::reseed(u64)`** — seed the
+  action-sampling RNG at construction or after. `None`/unseeded stays entropy-seeded
+  (bit-identical to 0.9.0). `GroupAgentBuilder::seed` now also reseeds every internal
+  agent (voter = `s`, group RNG = `s + 0x9E37_79B9`, internal agent i = `s + 1 + i`,
+  wrapping), so seeded groups are deterministic in **all** voting modes, not just
+  `CertaintyWeighted`.
+- **`AgentParams::use_b_info_gain`** — opt-in B-novelty (transition-model parameter
+  info gain) EFE term, convention-pinned to pymdp `calc_pB_info_gain` (the paper gives
+  no B form, Smith L1057): `W_B = ½(pb^{⊙−1} − colsum^{⊙−1})` masked to `pb > 0`,
+  contracted against the predicted coincidence `s_{t+1} ⊗ s_t` per factor for the
+  policy's control, added to neg-G. Requires `learn_b`. Deliberately a separate flag
+  from `use_param_info_gain` (pymdp gates both under one flag). Deterministic-B
+  agents get exactly 0.
+- **`AifError::InvalidLength { expected, got }`** — length/dimension mismatches no
+  longer overload `InvalidAction(len)`; `InvalidAction` is retained for genuine
+  out-of-range action/vote values. Emptiness/missing-prior preconditions became
+  descriptive `InvalidDistribution` messages; compound A/B dimension checks report
+  the actually-offending dimension.
+
+### Changed
+- **`a_novelty` zero handling: 1e-10 floor → pymdp `pa > 0` mask.** The paper anchors
+  (0.505 / 0.00505) are bit-identical (their pA entries are ≥ 0.25); behavior differs
+  only for pA entries in `[0, 1e-10)`, where the floor injected spurious ~1e10 terms.
+- **`update_a` skips the t=0 observation under MeanField** — MeanField inference
+  discards the t=0 observation (beliefs reset to D), so learning no longer counts it.
+  Under MMP the t=0 observation is smoothed into the window and learning from it is
+  retained (deliberate refinement of #6, which predates 0.8.0 MMP learning). Five
+  MeanField learning tests re-anchored; `test_defaults_bit_identical_with_new_params`
+  now pins the derived discriminative-A anchor `pa[0] = [[1.9, 1.1], [1.0, 1.0]]`
+  (the old 2.0/2.0 was an artifact of the spurious t=0 A-flattening).
+- `policy_posterior`/`precision_loop` E-vector index-overflow fallbacks (`e_i = 1.0`)
+  replaced with direct indexing + `debug_assert` (invariant: `e_vector` is always
+  `n_actions^policy_depth`).
+- The `learn_a`/`initial_precision` precondition moved into `validate_agent_params`
+  (deferred by PRs #17/#19 to this cleanup); message unchanged.
+
+### Migration (koalisi)
+- Two new `AgentParams` fields (`seed`, `use_b_info_gain`) — construction via
+  `..Default::default()` compiles unchanged.
+- Any `match` on `AifError::InvalidAction` for length errors must move to
+  `InvalidLength { expected, got }`.
+- `competence_efe` anchors unchanged: `G(0)=1.204, G(0.5)=0.710, G(1)=0.215`.
+
 ## [0.9.0] - 2026-07-16
 
 Policy precision dynamics (parity roadmap item 3, the final item —
