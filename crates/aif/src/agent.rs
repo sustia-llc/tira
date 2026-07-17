@@ -399,11 +399,8 @@ impl POMDPAgent {
                 got: preferences.len(),
             });
         }
-        if learn_a && initial_precision.is_none() {
-            return Err(AifError::InvalidDistribution(
-                "AgentParams.initial_precision must be provided when learn_a is set".to_owned(),
-            ));
-        }
+        // The learn_a ⇒ initial_precision precondition is enforced centrally in
+        // validate_agent_params (via from_model below).
 
         if let Some(ref probs) = observation_probs
             && probs.len() != n_states
@@ -528,11 +525,13 @@ impl POMDPAgent {
         )?;
         // gamma/policy_depth are set after construction here, bypassing from_model's
         // params check — re-validate the overridden values before applying them.
+        // learn_a is set false: its pA precondition was already enforced by the
+        // `Self::new` → `from_model` call above, and this struct carries no pA vector.
         validate_agent_params(&AgentParams {
             alpha,
             gamma,
             policy_depth,
-            learn_a,
+            learn_a: false,
             initial_precision: None,
             inference_iters: agent.inference_iters,
             state_inference: StateInference::MeanField,
@@ -662,11 +661,9 @@ impl POMDPAgent {
             validate_distribution(df)?;
         }
 
-        if params.learn_a && params.initial_precision.is_none() {
-            return Err(AifError::InvalidDistribution(
-                "AgentParams.initial_precision must be provided when learn_a is set".to_owned(),
-            ));
-        }
+        // The learn_a ⇒ initial_precision precondition is validated in
+        // validate_agent_params (called above); here we only length-check the
+        // supplied vector against n_joint, which validate_agent_params cannot see.
         if let Some(ref prec) = params.initial_precision
             && prec.len() != n_joint
         {
@@ -1380,17 +1377,17 @@ impl POMDPAgent {
         params: PrecisionDynamics,
     ) -> (Vec<f64>, f64, Vec<f64>) {
         let n = f_pi.len();
+        // f_pi carries one entry per enumerated policy, and e_vector is sized to the
+        // same policy count (n_actions^policy_depth), so they index 1:1.
+        debug_assert_eq!(
+            n,
+            self.e_vector.len(),
+            "e_vector length must equal the policy count (n_actions^policy_depth)"
+        );
         let beta0 = params.beta_prior;
         let psi = params.psi;
         let ln_e: Vec<f64> = (0..n)
-            .map(|i| {
-                let e = if i < self.e_vector.len() {
-                    self.e_vector[i]
-                } else {
-                    1.0
-                };
-                e.max(LN_FLOOR).ln()
-            })
+            .map(|i| self.e_vector[i].max(LN_FLOOR).ln())
             .collect();
 
         let mut beta = self.beta;
@@ -2565,6 +2562,13 @@ fn validate_agent_params(params: &AgentParams) -> Result<(), AifError> {
             "AgentParams.omega must be finite and in (0, 1], got {}",
             params.omega
         )));
+    }
+    // A-matrix learning needs its pA concentration vector (length checked against
+    // the joint-state count by the caller, which alone knows n_joint).
+    if params.learn_a && params.initial_precision.is_none() {
+        return Err(AifError::InvalidDistribution(
+            "AgentParams.initial_precision must be provided when learn_a is set".to_owned(),
+        ));
     }
     // Each Dirichlet learning flag needs its concentration scale (finite, > 0).
     validate_precision_scale(params.learn_b, params.initial_precision_b, "initial_precision_b")?;

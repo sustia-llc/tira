@@ -93,8 +93,10 @@ organoids/"dishbrains"); these are noted for completeness but not tracked as num
 extensions.
 
 **Beyond the paper (tira additions):** coalition value layer (`coalition.rs`, Axis 2 below),
-certainty-weighted voting evaluation (extension 5), seeded/reproducible CW group path
-(`GroupAgentBuilder::seed`), input validation with typed errors (`AifError`).
+certainty-weighted voting evaluation (extension 5), seeded/reproducible group path across
+**all** voting modes (`GroupAgentBuilder::seed` reseeds every internal `POMDPAgent`, so
+Probabilistic, Deterministic, and CertaintyWeighted groups are all deterministic under a
+builder seed), input validation with typed errors (`AifError`).
 
 ---
 
@@ -128,7 +130,7 @@ Inference* (MIT Press; ref [1]), `pymdp` (Heins et al. 2022, JOSS), and `ActiveI
 | Learning rate η / forgetting ω | ✅ | 0.8.0 (#13): `eta`/`omega` on `AgentParams` (defaults 1.0 = pre-0.8.0 bit-identical). ω applies **per step** (pymdp convention) — recovers the paper's trial-indexed Eq. 34 exactly for pD (one update/trial); pA/pB decay within-trial when ω < 1 (documented deviation from the trial-indexed form) |
 | Learning B (pB), D (pD), E (pE) | ✅ | 0.8.0 (#13): Smith Eq. 32–36 family; B/E forms are pymdp/SPM conventions (paper says "analogous", L1035): pB from `s_t ⊗ s_{t−1}` on the taken control, pD once per trial (MeanField: exact o₁-conditioned posterior; MMP: smoothed X₁), pE from q(π). Counts write back into A/B/D/E. MMP+learn_a construction error lifted |
 | Temporal / policy depth | ✅ | configurable via `with_params` — full multi-step policy enumeration (Smith's deep-V planning), not single-step U (experiments run depth 1 — see Axis 1) |
-| Input validation | ✅ | `AifError::{InvalidProbability, InvalidDistribution, InvalidAction}` |
+| Input validation | ✅ | `AifError::{InvalidProbability, InvalidDistribution, InvalidLength, InvalidAction}` (`InvalidLength` carries `{expected, got}` for length/dimension mismatches; `InvalidAction` retained for genuine out-of-range action/vote values) |
 | Variational free energy F accessor | ✅ | `variational_free_energy()` (0.7.0, #16): MeanField = one-step `−ln p(o_t)` (exact single-factor; mean-field-prior approximation multi-factor); MMP = window F (Eq. 11/19). `policy_free_energies()`: **genuinely per-policy since 0.9.0 under precision dynamics** (per-policy windows spanning observed + future τ; F sums observed τ only per Eq. 19/20, policy-dependent via backward messages from policy-specific futures — varies only with stochastic B); identical across policies under plain MMP (shared observed-only window, the 0.7.0 behavior, unchanged) |
 | Free energy of parameters (Fa/Fb/Fd) | ✅ | 0.8.0 (#13): `parameter_free_energies()` → `ParameterFreeEnergies` — per-column Dirichlet KL(current ‖ trial-start) per Smith Table 3 (MDP.Fa/Fb/Fd/Fe); positive KL surfaced (SPM stores the negation — documented). Live mid-trial; trial boundary = `reset_window()` |
 
