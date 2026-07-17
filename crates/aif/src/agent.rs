@@ -216,6 +216,10 @@ pub struct AgentParams {
     /// `gamma` is **ignored** (`γ` is initialized to `1/β₀` and updated live), and
     /// [`StateInference::MarginalMessagePassing`] is required.
     pub precision_dynamics: Option<PrecisionDynamics>,
+    /// Action-sampling RNG seed. `None` (the default) keeps the current entropy
+    /// seeding (bit-identical to 0.9.0 behavior); `Some(s)` seeds the RNG via
+    /// `StdRng::seed_from_u64(s)` for reproducible runs.
+    pub seed: Option<u64>,
 }
 
 impl Default for AgentParams {
@@ -238,6 +242,7 @@ impl Default for AgentParams {
             inference_iters: 10,
             state_inference: StateInference::MeanField,
             precision_dynamics: None,
+            seed: None,
         }
     }
 }
@@ -726,8 +731,20 @@ impl POMDPAgent {
             cached_policy_posterior: None,
             last_predictive_prior: None,
             last_obs: None,
-            rng: StdRng::from_rng(&mut rand::rng()),
+            rng: match params.seed {
+                Some(s) => StdRng::seed_from_u64(s),
+                None => StdRng::from_rng(&mut rand::rng()),
+            },
         })
+    }
+
+    /// Reset the action-sampling RNG to a deterministic stream.
+    ///
+    /// Equivalent to constructing with [`AgentParams::seed`] `= Some(seed)`:
+    /// subsequent [`act`](Self::act) / [`act_multi`](Self::act_multi) calls sample
+    /// from `StdRng::seed_from_u64(seed)`.
+    pub fn reseed(&mut self, seed: u64) {
+        self.rng = StdRng::seed_from_u64(seed);
     }
 
     #[must_use]
@@ -2510,8 +2527,6 @@ fn validate_distribution(v: &[f64]) -> Result<(), AifError> {
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
-    use rand::rngs::StdRng;
-    use rand::SeedableRng;
 
     #[test]
     fn test_copy_agent() {
@@ -2702,7 +2717,7 @@ mod tests {
             1000.0,
             true,
         )?;
-        agent.rng = StdRng::seed_from_u64(42);
+        agent.reseed(42);
 
         let a_before = agent.a[0].clone();
         for _ in 0..10 {
@@ -2757,7 +2772,7 @@ mod tests {
             8.0,
             false,
         )?;
-        agent.rng = StdRng::seed_from_u64(123);
+        agent.reseed(123);
         let mut action_counts = [0usize; 2];
         for _ in 0..1000 {
             let action = agent.act(1)?;
@@ -3154,7 +3169,7 @@ mod tests {
         // Policy space = n_actions^depth = 2^2 = 4.
         assert_eq!(agent.e_vector.len(), 4);
 
-        agent.rng = StdRng::seed_from_u64(7);
+        agent.reseed(7);
         for _ in 0..5 {
             let action = agent.act(1)?;
             assert!(action < 2, "action must be a control index in 0..2: {action}");
@@ -3205,6 +3220,86 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_params_seed_determinism() -> Result<(), AifError> {
+        // Two `from_model` agents seeded identically via `AgentParams::seed` must
+        // produce identical sampled-action streams; a `None` seed still constructs
+        // and runs (entropy path, smoke only).
+        let probs = [0.8, 0.4, 0.4];
+        let a = DMatrix::from_row_slice(2, 3, &[
+            probs[0], probs[1], probs[2], //
+            1.0 - probs[0], 1.0 - probs[1], 1.0 - probs[2],
+        ]);
+        let model = || GenerativeModel {
+            a: vec![a.clone()],
+            b: vec![mab_transitions(3)],
+            c: vec![vec![0.7, 0.3]],
+            d: vec![vec![1.0 / 3.0; 3]],
+        };
+        let params = || AgentParams {
+            alpha: 0.5,
+            seed: Some(7),
+            ..Default::default()
+        };
+
+        let mut agent_a = POMDPAgent::from_model(model(), params())?;
+        let mut agent_b = POMDPAgent::from_model(model(), params())?;
+
+        let mut seq_a = Vec::with_capacity(20);
+        let mut seq_b = Vec::with_capacity(20);
+        for t in 0..20 {
+            let obs = t % 2;
+            seq_a.push(agent_a.act(obs)?);
+            seq_b.push(agent_b.act(obs)?);
+        }
+        assert_eq!(seq_a, seq_b, "seed: Some(7) must give identical action streams");
+
+        // Unseeded construction still runs (entropy path).
+        let mut agent_none = POMDPAgent::from_model(
+            model(),
+            AgentParams { alpha: 0.5, seed: None, ..Default::default() },
+        )?;
+        let _ = agent_none.act(0)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_reseed_matches_seeded_construction() -> Result<(), AifError> {
+        // Constructing with `seed: Some(5)` and constructing unseeded then calling
+        // `reseed(5)` must share the same RNG stream, hence identical actions.
+        let probs = [0.8, 0.4, 0.4];
+        let a = DMatrix::from_row_slice(2, 3, &[
+            probs[0], probs[1], probs[2], //
+            1.0 - probs[0], 1.0 - probs[1], 1.0 - probs[2],
+        ]);
+        let model = || GenerativeModel {
+            a: vec![a.clone()],
+            b: vec![mab_transitions(3)],
+            c: vec![vec![0.7, 0.3]],
+            d: vec![vec![1.0 / 3.0; 3]],
+        };
+
+        let mut agent_a = POMDPAgent::from_model(
+            model(),
+            AgentParams { alpha: 0.5, seed: Some(5), ..Default::default() },
+        )?;
+        let mut agent_b = POMDPAgent::from_model(
+            model(),
+            AgentParams { alpha: 0.5, seed: None, ..Default::default() },
+        )?;
+        agent_b.reseed(5);
+
+        let mut seq_a = Vec::with_capacity(20);
+        let mut seq_b = Vec::with_capacity(20);
+        for t in 0..20 {
+            let obs = t % 2;
+            seq_a.push(agent_a.act(obs)?);
+            seq_b.push(agent_b.act(obs)?);
+        }
+        assert_eq!(seq_a, seq_b, "reseed(5) must match seed: Some(5) construction");
+        Ok(())
+    }
+
+    #[test]
     fn test_learning_multimodality_updates_a_per_modality() -> Result<(), AifError> {
         // 1 factor (2 states), 2 modalities (2 obs each), learning on. Feeding
         // observation 1 to both modalities must raise A[m] row 1 for every column
@@ -3226,7 +3321,7 @@ mod tests {
             },
         )?;
         assert_eq!(agent.n_modalities(), 2);
-        agent.rng = StdRng::seed_from_u64(11);
+        agent.reseed(11);
 
         for _ in 0..10 {
             agent.act_multi(&[1, 1])?;
@@ -4304,7 +4399,7 @@ mod tests {
                 ..Default::default()
             },
         )?;
-        agent.rng = StdRng::seed_from_u64(19);
+        agent.reseed(19);
         let obs = [0usize, 1, 0, 1, 0];
         for &o in &obs {
             let act = agent.act(o)?;
@@ -4418,7 +4513,7 @@ mod tests {
                 ..Default::default()
             },
         )?;
-        b_agent.rng = StdRng::seed_from_u64(5);
+        b_agent.reseed(5);
         for _ in 0..6 {
             b_agent.act(1)?;
         }
@@ -4779,7 +4874,7 @@ mod tests {
         )?;
         assert!(agent.beta().is_none());
         assert!(agent.gamma_trajectory().is_empty());
-        agent.rng = StdRng::seed_from_u64(3);
+        agent.reseed(3);
         for _ in 0..5 {
             agent.act(1)?;
         }
@@ -4819,7 +4914,7 @@ mod tests {
                 ..Default::default()
             },
         )?;
-        agent.rng = StdRng::seed_from_u64(29);
+        agent.reseed(29);
         agent.act(1)?; // establish window + history
 
         let a_pre = agent.a[0].clone();
