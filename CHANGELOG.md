@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-07-17
+
+Read-only generative-model accessors on `POMDPAgent`, motivated by the
+[koalisi #44](https://github.com/sustia-llc/koalisi/issues/44) persistent→query
+handoff (a persistent agent's learned model must be readable to build fresh query
+agents). No behavior changes; fully additive. This patch is tracked downstream by
+[koalisi #44](https://github.com/sustia-llc/koalisi/issues/44), not by a tira issue.
+
+### Added
+- **`POMDPAgent::observation_model() -> &[DMatrix<f64>]`** — current `A` per
+  modality (reflects `learn_a` write-back).
+- **`POMDPAgent::transition_model() -> &[Vec<DMatrix<f64>>]`** — current `B` per
+  factor, per control (reflects `learn_b` write-back).
+- **`POMDPAgent::state_prior() -> &[DVector<f64>]`** — current `D` per factor
+  (reflects `learn_d` write-back at the trial boundary).
+- **`POMDPAgent::pa() -> Option<&[DMatrix<f64>]>`**,
+  **`pb() -> Option<&[Vec<DMatrix<f64>>]>`**,
+  **`pd() -> Option<&[DVector<f64>]>`** — Dirichlet concentration counts, `Some`
+  iff the matching `learn_*` flag is enabled.
+
 ## [0.10.0] - 2026-07-17
 
 Full-mode seeded determinism ([#10](https://github.com/sustia-llc/tira/issues/10)),

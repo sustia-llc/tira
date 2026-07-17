@@ -837,19 +837,6 @@ impl POMDPAgent {
         &self.beliefs
     }
 
-    /// Test-only view of the per-modality observation model `A` (for asserting
-    /// learning drift from sibling modules' tests).
-    #[cfg(test)]
-    pub(crate) fn a_matrices(&self) -> &[DMatrix<f64>] {
-        &self.a
-    }
-
-    /// Test-only view of the pA concentration counts (`None` when not learning).
-    #[cfg(test)]
-    pub(crate) fn pa_counts(&self) -> Option<&Vec<DMatrix<f64>>> {
-        self.pa.as_ref()
-    }
-
     /// Number of (joint) actions: `Π_f n_controls[f]`.
     #[must_use]
     pub fn n_actions(&self) -> usize {
@@ -866,6 +853,70 @@ impl POMDPAgent {
     #[must_use]
     pub fn n_factors(&self) -> usize {
         self.n_states.len()
+    }
+
+    /// Current observation model `A`, one column-stochastic matrix per modality
+    /// (`n_obs[m] × n_joint`).
+    ///
+    /// Reflects learning write-back: with `learn_a` enabled these matrices are
+    /// re-normalized from `pA` after each counted update, so the returned slice
+    /// tracks the learned model rather than the construction value.
+    #[must_use]
+    pub fn observation_model(&self) -> &[DMatrix<f64>] {
+        &self.a
+    }
+
+    /// Current transition model `B`, indexed `[factor][control]` (each a
+    /// column-stochastic `n_states[f] × n_states[f]` matrix).
+    ///
+    /// Reflects learning write-back: with `learn_b` enabled the per-factor,
+    /// per-control matrices are re-normalized from `pB` after each counted update,
+    /// so the returned slices track the learned dynamics.
+    #[must_use]
+    pub fn transition_model(&self) -> &[Vec<DMatrix<f64>>] {
+        &self.b
+    }
+
+    /// Current initial-state prior `D`, one distribution per factor.
+    ///
+    /// Reflects `learn_d` write-back, mode-dependent: under [`StateInference::MeanField`]
+    /// (default) `D` re-syncs from `pD` at the trial's first observation; under
+    /// [`StateInference::MarginalMessagePassing`] the write-back lands only at
+    /// [`reset_window`](Self::reset_window), so mid-trial the returned slice shows
+    /// the entering-trial prior.
+    #[must_use]
+    pub fn state_prior(&self) -> &[DVector<f64>] {
+        &self.d
+    }
+
+    /// Dirichlet concentration counts `pA` backing the observation model, one per
+    /// modality.
+    ///
+    /// `Some` iff `learn_a` is enabled; the counts accumulate per counted update
+    /// (`pA ← ω·pA + η·increment`) and `None` otherwise.
+    #[must_use]
+    pub fn pa(&self) -> Option<&[DMatrix<f64>]> {
+        self.pa.as_deref()
+    }
+
+    /// Dirichlet concentration counts `pB` backing the transition model, indexed
+    /// `[factor][control]`.
+    ///
+    /// `Some` iff `learn_b` is enabled; the counts accumulate per counted update
+    /// and `None` otherwise.
+    #[must_use]
+    pub fn pb(&self) -> Option<&[Vec<DMatrix<f64>>]> {
+        self.pb.as_deref()
+    }
+
+    /// Dirichlet concentration counts `pD` backing the initial-state prior, one
+    /// per factor.
+    ///
+    /// `Some` iff `learn_d` is enabled; the counts commit once per trial and
+    /// `None` otherwise.
+    #[must_use]
+    pub fn pd(&self) -> Option<&[DVector<f64>]> {
+        self.pd.as_deref()
     }
 
     /// Update beliefs for one observation step. `obs` is one index per modality.
@@ -4020,6 +4071,70 @@ mod tests {
             c: vec![vec![0.5; n_obs]],
             d: vec![d],
         }
+    }
+
+    #[test]
+    fn test_read_accessors_reflect_learning() -> Result<(), AifError> {
+        // A learn_a agent: after one counted update the read accessors expose the
+        // learned model, not the construction value. Same drive as
+        // test_defaults_bit_identical_with_new_params: pA row 0 gains η·[.9,.1] so
+        // pa()[0] = [[1.9, 1.1], [1.0, 1.0]], and A is re-normalized column-wise
+        // from pA on write-back, so observation_model()[0][(0,0)] = 1.9/2.9 ≠ 0.9.
+        let mut agent = POMDPAgent::from_model(
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.9, 0.1, 0.1, 0.9]),
+                vec![DMatrix::identity(2, 2)],
+                vec![0.5, 0.5],
+            ),
+            AgentParams {
+                alpha: 1.0,
+                learn_a: true,
+                initial_precision: Some(vec![1.0, 1.0]),
+                ..Default::default()
+            },
+        )?;
+        agent.action_probabilities(0); // t=0: gated under MeanField, no pA update.
+        agent.record_action(0);
+        agent.action_probabilities(0); // counted: row 0 += [.9, .1], A rewritten.
+
+        let pa = agent.pa().expect("learn_a ⇒ pa is Some");
+        assert_relative_eq!(pa[0][(0, 0)], 1.9, epsilon = 1e-15);
+        // observation_model tracks the write-back, not the construction A.
+        assert_relative_eq!(
+            agent.observation_model()[0][(0, 0)],
+            1.9 / 2.9,
+            epsilon = 1e-15
+        );
+        // learn_b/learn_d off ⇒ those count accessors stay None.
+        assert!(agent.pb().is_none());
+        assert!(agent.pd().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_accessors_non_learning_return_construction() -> Result<(), AifError> {
+        // A non-learning agent exposes construction values verbatim and no counts.
+        let agent = POMDPAgent::from_model(
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.8, 0.2, 0.2, 0.8]),
+                vec![DMatrix::identity(2, 2)],
+                vec![0.5, 0.5],
+            ),
+            AgentParams {
+                alpha: 1.0,
+                ..Default::default()
+            },
+        )?;
+        assert!(agent.pa().is_none());
+        assert!(agent.pb().is_none());
+        assert!(agent.pd().is_none());
+        assert_relative_eq!(agent.observation_model()[0][(0, 0)], 0.8, epsilon = 1e-15);
+        assert_relative_eq!(agent.observation_model()[0][(0, 1)], 0.2, epsilon = 1e-15);
+        assert_relative_eq!(agent.transition_model()[0][0][(0, 0)], 1.0, epsilon = 1e-15);
+        assert_relative_eq!(agent.transition_model()[0][0][(1, 0)], 0.0, epsilon = 1e-15);
+        assert_relative_eq!(agent.state_prior()[0][0], 0.5, epsilon = 1e-15);
+        assert_relative_eq!(agent.state_prior()[0][1], 0.5, epsilon = 1e-15);
+        Ok(())
     }
 
     #[test]
