@@ -202,10 +202,11 @@ pub struct AgentParams {
     /// (Smith Eq. 39/40). Default `false` — unset changes no numerics.
     pub use_b_info_gain: bool,
     /// Initial pA concentration per joint-state column (replicated across
-    /// outcome rows and modalities). When `learn_a` is true, **exactly one** of
-    /// this or [`initial_pa`](Self::initial_pa) must be supplied (both `Some` is a
-    /// validation error). This scale path seeds a row-uniform pA, so it cannot
-    /// carry row structure — use `initial_pa` for that.
+    /// outcome rows and modalities). Supplying both this and
+    /// [`initial_pa`](Self::initial_pa) is **always** rejected as ambiguous
+    /// (regardless of `learn_a`); when `learn_a` is true, **exactly one** of the two
+    /// is required. This scale path seeds a row-uniform pA, so it cannot carry row
+    /// structure — use `initial_pa` for that.
     pub initial_precision: Option<Vec<f64>>,
     /// Full pA Dirichlet counts, one matrix per modality, each shaped
     /// `n_obs[m] × n_joint` (0.11.0). When `Some`, requires `learn_a` and is
@@ -223,11 +224,12 @@ pub struct AgentParams {
     /// constructible: without injection the first `learn_a` write-back
     /// `A = normalize(pA)` would flatten any structured `A` the model supplied.
     pub initial_pa: Option<Vec<DMatrix<f64>>>,
-    /// Dirichlet concentration scale for pB: `pb[f][u] = s_b · B[f][u]`. When
-    /// `learn_b` is true, **exactly one** of this or [`initial_pb`](Self::initial_pb)
-    /// must be supplied (both `Some` is a validation error). Named "precision" for
-    /// family consistency with [`initial_precision`](Self::initial_precision) (pA),
-    /// though it is a Dirichlet concentration scale, not a precision.
+    /// Dirichlet concentration scale for pB: `pb[f][u] = s_b · B[f][u]`. Supplying
+    /// both this and [`initial_pb`](Self::initial_pb) is **always** rejected as
+    /// ambiguous (regardless of `learn_b`); when `learn_b` is true, **exactly one**
+    /// of the two is required. Named "precision" for family consistency with
+    /// [`initial_precision`](Self::initial_precision) (pA), though it is a Dirichlet
+    /// concentration scale, not a precision.
     pub initial_precision_b: Option<f64>,
     /// Full pB Dirichlet counts, one matrix per factor per control, each shaped to
     /// match `B[f][u]` (`n_states[f] × n_states[f]`) (0.11.0). When `Some`, requires
@@ -969,7 +971,10 @@ impl POMDPAgent {
     ///
     /// Reflects learning write-back: with `learn_a` enabled these matrices are
     /// re-normalized from `pA` after each counted update, so the returned slice
-    /// tracks the learned model rather than the construction value.
+    /// tracks the learned model rather than the construction value. When built with
+    /// [`AgentParams::initial_pa`](AgentParams::initial_pa) the construction value
+    /// already *is* the column-normalized injected counts, so the two coincide from
+    /// step 0.
     #[must_use]
     pub fn observation_model(&self) -> &[DMatrix<f64>] {
         &self.a
@@ -980,7 +985,10 @@ impl POMDPAgent {
     ///
     /// Reflects learning write-back: with `learn_b` enabled the per-factor,
     /// per-control matrices are re-normalized from `pB` after each counted update,
-    /// so the returned slices track the learned dynamics.
+    /// so the returned slices track the learned dynamics. When built with
+    /// [`AgentParams::initial_pb`](AgentParams::initial_pb) the construction value
+    /// already *is* the column-normalized injected counts, so the two coincide from
+    /// step 0.
     #[must_use]
     pub fn transition_model(&self) -> &[Vec<DMatrix<f64>>] {
         &self.b
@@ -1002,7 +1010,9 @@ impl POMDPAgent {
     /// modality.
     ///
     /// `Some` iff `learn_a` is enabled; the counts accumulate per counted update
-    /// (`pA ← ω·pA + η·increment`) and `None` otherwise.
+    /// (`pA ← ω·pA + η·increment`) and `None` otherwise. When built with
+    /// [`AgentParams::initial_pa`](AgentParams::initial_pa) these are exactly the
+    /// injected counts at step 0 (and `observation_model` is their normalization).
     #[must_use]
     pub fn pa(&self) -> Option<&[DMatrix<f64>]> {
         self.pa.as_deref()
@@ -1012,7 +1022,9 @@ impl POMDPAgent {
     /// `[factor][control]`.
     ///
     /// `Some` iff `learn_b` is enabled; the counts accumulate per counted update
-    /// and `None` otherwise.
+    /// and `None` otherwise. When built with
+    /// [`AgentParams::initial_pb`](AgentParams::initial_pb) these are exactly the
+    /// injected counts at step 0 (and `transition_model` is their normalization).
     #[must_use]
     pub fn pb(&self) -> Option<&[Vec<DMatrix<f64>>]> {
         self.pb.as_deref()
@@ -1700,15 +1712,9 @@ impl POMDPAgent {
             for j in 0..n_joint {
                 pa[m][(o, j)] += eta * joint[j];
             }
-            // Recompute A[m] from pA: A[o,j] = pA[o,j] / Σ_o'(pA[o',j]).
-            for j in 0..n_joint {
-                let col_sum: f64 = (0..pa[m].nrows()).map(|r| pa[m][(r, j)]).sum();
-                if col_sum > 1e-10 {
-                    for r in 0..pa[m].nrows() {
-                        a[m][(r, j)] = pa[m][(r, j)] / col_sum;
-                    }
-                }
-            }
+            // Recompute A[m] from pA: A[o,j] = pA[o,j] / Σ_o'(pA[o',j]) — the same
+            // shared column normalization used by count injection at construction.
+            normalize_columns_into(&pa[m], &mut a[m]);
         }
     }
 
@@ -1762,16 +1768,10 @@ impl POMDPAgent {
                     pb[f][uf][(i, j)] += eta * st[f][i] * sprev[f][j];
                 }
             }
-            // Column-normalize every control of factor f back into B.
+            // Column-normalize every control of factor f back into B — the same
+            // shared normalization used by count injection at construction.
             for u in 0..pb[f].len() {
-                for j in 0..n {
-                    let col_sum: f64 = (0..n).map(|r| pb[f][u][(r, j)]).sum();
-                    if col_sum > 1e-10 {
-                        for r in 0..n {
-                            b[f][u][(r, j)] = pb[f][u][(r, j)] / col_sum;
-                        }
-                    }
-                }
+                normalize_columns_into(&pb[f][u], &mut b[f][u]);
             }
         }
     }
@@ -2658,27 +2658,47 @@ fn column_normalized_transpose(b: &DMatrix<f64>) -> DMatrix<f64> {
     bdag
 }
 
+/// Column-normalization floor shared by the learning write-back (`update_a` /
+/// `update_b`), the construction-time count-injection sync (`column_normalize`),
+/// and the injected-count validator (`validate_count_matrix`). A column whose
+/// concentration sum is at or below this floor is treated as having no usable mass:
+/// the write-back leaves the corresponding `A`/`B` column untouched, so injection
+/// must reject such columns up front (otherwise they would land un-normalized and
+/// break the column-stochastic invariant).
+const CONC_NORM_FLOOR: f64 = 1e-10;
+
 /// Column-normalize non-negative Dirichlet counts into a column-stochastic
-/// matrix: `out[i, j] = counts[i, j] / Σ_k counts[k, j]`. Columns whose sum is
-/// non-positive are left as-is (guarded by the same `1e-10` floor as the learning
-/// write-back); callers inject only counts whose columns sum `> 0` (validated in
-/// `validate_agent_params`), matching the `A ← normalize(pA)` learning path.
+/// matrix: `out[i, j] = counts[i, j] / Σ_k counts[k, j]`. Columns whose sum is at
+/// or below [`CONC_NORM_FLOOR`] are left as-is — the identical floor the learning
+/// write-back uses; injected counts are validated (`validate_count_matrix`) to keep
+/// every column strictly above it, so this path always fully normalizes them.
 fn column_normalize(counts: &DMatrix<f64>) -> DMatrix<f64> {
     let mut out = counts.clone();
-    for j in 0..out.ncols() {
-        let col_sum: f64 = (0..out.nrows()).map(|r| out[(r, j)]).sum();
-        if col_sum > 1e-10 {
-            for r in 0..out.nrows() {
-                out[(r, j)] /= col_sum;
-            }
-        }
-    }
+    normalize_columns_into(counts, &mut out);
     out
 }
 
+/// Write column-normalized `src` counts into `dst` (same shape): for each column
+/// whose sum exceeds [`CONC_NORM_FLOOR`], `dst[(r, j)] = src[(r, j)] / col_sum`;
+/// columns at or below the floor are left untouched in `dst`. Shared by the
+/// `update_a` / `update_b` learning write-backs and the count-injection sync, so
+/// all three normalize identically (row-order summation, same floor).
+fn normalize_columns_into(src: &DMatrix<f64>, dst: &mut DMatrix<f64>) {
+    for j in 0..src.ncols() {
+        let col_sum: f64 = (0..src.nrows()).map(|r| src[(r, j)]).sum();
+        if col_sum > CONC_NORM_FLOOR {
+            for r in 0..src.nrows() {
+                dst[(r, j)] = src[(r, j)] / col_sum;
+            }
+        }
+    }
+}
+
 /// Validate injected Dirichlet count matrices: every entry finite and `≥ 0`, and
-/// every column sum strictly `> 0` (per-entry zeros are allowed — deterministic
-/// structural zeros are legitimate — but an all-zero column has no mass).
+/// every column sum strictly above [`CONC_NORM_FLOOR`] (per-entry zeros are allowed
+/// — deterministic structural zeros are legitimate — but a column at or below the
+/// normalization floor has no usable mass and would land un-normalized in `A`/`B`,
+/// silently breaking the column-stochastic invariant).
 fn validate_count_matrix(m: &DMatrix<f64>, field: &str) -> Result<(), AifError> {
     for &x in m.iter() {
         if !x.is_finite() || x < 0.0 {
@@ -2690,9 +2710,10 @@ fn validate_count_matrix(m: &DMatrix<f64>, field: &str) -> Result<(), AifError> 
     for j in 0..m.ncols() {
         // Entries are already validated finite above, so col_sum is finite.
         let col_sum: f64 = (0..m.nrows()).map(|r| m[(r, j)]).sum();
-        if col_sum <= 0.0 {
+        if col_sum <= CONC_NORM_FLOOR {
             return Err(AifError::InvalidDistribution(format!(
-                "AgentParams.{field} column {j} must have a positive sum"
+                "AgentParams.{field} column {j} sum must exceed the normalization \
+                 floor ({CONC_NORM_FLOOR:e})"
             )));
         }
     }
@@ -4663,6 +4684,43 @@ mod tests {
         // Positive controls: valid injected pA / pB construct.
         assert!(POMDPAgent::from_model(model(), AgentParams { alpha: 1.0, learn_a: true, initial_pa: Some(ok_counts()), ..Default::default() }).is_ok());
         assert!(POMDPAgent::from_model(model(), AgentParams { alpha: 1.0, learn_b: true, initial_pb: Some(ok_pb()), ..Default::default() }).is_ok());
+    }
+
+    #[test]
+    fn test_injected_count_subfloor_column_rejected() {
+        // Regression for the validate/normalize threshold mismatch: a column summing
+        // into (0, CONC_NORM_FLOOR] is positive yet would land un-normalized in A/B
+        // (the write-back only normalizes columns whose sum exceeds the floor). Such a
+        // column must be rejected at construction, so validation and normalization share
+        // CONC_NORM_FLOOR. Column 1 here sums to 5e-11 ∈ (0, 1e-10].
+        let model = |b: Vec<DMatrix<f64>>| {
+            single_factor_model(DMatrix::from_row_slice(2, 2, &[0.9, 0.1, 0.1, 0.9]), b, vec![0.5, 0.5])
+        };
+        let pa_subfloor = POMDPAgent::from_model(
+            model(vec![DMatrix::identity(2, 2)]),
+            AgentParams {
+                alpha: 1.0,
+                learn_a: true,
+                initial_pa: Some(vec![DMatrix::from_row_slice(2, 2, &[1.0, 2e-11, 3.0, 3e-11])]),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(pa_subfloor, Err(AifError::InvalidDistribution(_))), "sub-floor pA column must be rejected");
+
+        // Same guard on pB (control 0, column 0 sums to 5e-11).
+        let pb_subfloor = POMDPAgent::from_model(
+            model(vec![DMatrix::identity(2, 2), DMatrix::identity(2, 2)]),
+            AgentParams {
+                alpha: 1.0,
+                learn_b: true,
+                initial_pb: Some(vec![vec![
+                    DMatrix::from_row_slice(2, 2, &[2e-11, 1.0, 3e-11, 2.0]),
+                    DMatrix::from_element(2, 2, 1.0),
+                ]]),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(pb_subfloor, Err(AifError::InvalidDistribution(_))), "sub-floor pB column must be rejected");
     }
 
     #[test]

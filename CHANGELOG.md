@@ -12,7 +12,9 @@ replicated across outcome rows; `initial_precision_b` — scalar × `B`) cannot 
 row-structured counts, and under `learn_a` the first update's `A = normalize(pA)`
 write-back erases any structured `A` the model supplied — making
 structured-`A` + `learn_a` agents impossible. Count injection fixes both. Fully
-additive; defaults (`None`) are bit-identical to 0.10.1.
+additive; defaults (`None`) are bit-identical to 0.10.1. This release is tracked
+downstream by [koalisi #44](https://github.com/sustia-llc/koalisi/issues/44), not by
+a tira issue.
 
 ### Added
 - **`AgentParams::initial_pa: Option<Vec<DMatrix<f64>>>`** — full `pA` Dirichlet

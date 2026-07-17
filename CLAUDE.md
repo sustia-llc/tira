@@ -44,7 +44,7 @@ to the scalar `competence_efe` bridge — G affine in covered-bit count under bi
 coverage + deterministic B — verdict `FALSIFIED (multimodality)`; a live-info-gain
 persistent-agent v4 is parked as koalisi #44).
 
-- **148 tests** (147 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
+- **149 tests** (148 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
 - `cargo run --release -p reproduce --bin reproduce` — full reproduction in ~30s
 
 ## Module map
