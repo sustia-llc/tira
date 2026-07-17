@@ -786,12 +786,12 @@ mod tests {
         let a_before: Vec<_> = group
             .internal_agents()
             .iter()
-            .map(|ag| ag.a_matrices()[0].clone())
+            .map(|ag| ag.observation_model()[0].clone())
             .collect();
         let pa_sum_before: Vec<f64> = group
             .internal_agents()
             .iter()
-            .map(|ag| ag.pa_counts().expect("learn_a ⇒ pA")[0].iter().sum())
+            .map(|ag| ag.pa().expect("learn_a ⇒ pA")[0].iter().sum())
             .collect();
 
         for t in 0..20 {
@@ -799,11 +799,11 @@ mod tests {
         }
 
         for (i, ag) in group.internal_agents().iter().enumerate() {
-            let a_now = &ag.a_matrices()[0];
+            let a_now = &ag.observation_model()[0];
             let changed = (0..a_now.nrows())
                 .any(|r| (0..a_now.ncols()).any(|c| (a_now[(r, c)] - a_before[i][(r, c)]).abs() > 1e-9));
             assert!(changed, "internal agent {i} A must change under CW learning");
-            let pa_sum_now: f64 = ag.pa_counts().expect("learn_a ⇒ pA")[0].iter().sum();
+            let pa_sum_now: f64 = ag.pa().expect("learn_a ⇒ pA")[0].iter().sum();
             assert!(
                 pa_sum_now > pa_sum_before[i] + 1.0,
                 "internal agent {i} pA counts must grow: {pa_sum_now} vs {}",
@@ -830,7 +830,7 @@ mod tests {
         let a_before: Vec<_> = group
             .internal_agents()
             .iter()
-            .map(|ag| ag.a_matrices()[0].clone())
+            .map(|ag| ag.observation_model()[0].clone())
             .collect();
 
         for t in 0..20 {
@@ -838,7 +838,7 @@ mod tests {
         }
 
         for (i, ag) in group.internal_agents().iter().enumerate() {
-            let a_now = &ag.a_matrices()[0];
+            let a_now = &ag.observation_model()[0];
             let changed = (0..a_now.nrows())
                 .any(|r| (0..a_now.ncols()).any(|c| (a_now[(r, c)] - a_before[i][(r, c)]).abs() > 1e-9));
             assert!(changed, "internal agent {i} A must change under probabilistic learning");

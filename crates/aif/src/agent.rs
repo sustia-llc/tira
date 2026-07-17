@@ -837,19 +837,6 @@ impl POMDPAgent {
         &self.beliefs
     }
 
-    /// Test-only view of the per-modality observation model `A` (for asserting
-    /// learning drift from sibling modules' tests).
-    #[cfg(test)]
-    pub(crate) fn a_matrices(&self) -> &[DMatrix<f64>] {
-        &self.a
-    }
-
-    /// Test-only view of the pA concentration counts (`None` when not learning).
-    #[cfg(test)]
-    pub(crate) fn pa_counts(&self) -> Option<&Vec<DMatrix<f64>>> {
-        self.pa.as_ref()
-    }
-
     /// Number of (joint) actions: `Π_f n_controls[f]`.
     #[must_use]
     pub fn n_actions(&self) -> usize {
@@ -892,9 +879,11 @@ impl POMDPAgent {
 
     /// Current initial-state prior `D`, one distribution per factor.
     ///
-    /// Reflects learning write-back: with `learn_d` enabled `D` is re-normalized
-    /// from `pD` at the trial boundary ([`reset_window`](Self::reset_window)), so
-    /// mid-trial the returned slice still shows the entering-trial prior.
+    /// Reflects `learn_d` write-back, mode-dependent: under [`StateInference::MeanField`]
+    /// (default) `D` re-syncs from `pD` at the trial's first observation; under
+    /// [`StateInference::MarginalMessagePassing`] the write-back lands only at
+    /// [`reset_window`](Self::reset_window), so mid-trial the returned slice shows
+    /// the entering-trial prior.
     #[must_use]
     pub fn state_prior(&self) -> &[DVector<f64>] {
         &self.d

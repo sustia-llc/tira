@@ -29,7 +29,8 @@ Now a **Cargo workspace** (`crates/aif` engine + `crates/reproduce` harness) ser
 the reference active-inference engine for the koalisi coalition runtime, which consumes
 the coalition-value primitive `competence_efe` and, since koalisi's K4-v3 arm, builds a
 multi-modality `GenerativeModel` directly (koalisi pins git tag `aif-v0.9.0`; the
-current release is `aif-v0.10.0` — #10 seed API, #21 B-novelty, #3/#6 hardening —
+current release is `aif-v0.10.1` — 0.10.0 features (#10 seed API, #21 B-novelty,
+#3/#6 hardening) plus read-only generative-model accessors —
 which unblocks the koalisi #44 persistent stochastic-B arm. **The canonical-AIF
 parity roadmap is complete**: #12 (multi-factor,
 multi-modality, injectable B via `GenerativeModel`/`from_model`), #15 (opt-in marginal

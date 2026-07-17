@@ -4,9 +4,11 @@
 
 ## [0.10.1] - 2026-07-17
 
-Read-only generative-model accessors on `POMDPAgent`, motivated by the koalisi #44
-persistent→query handoff (a persistent agent's learned model must be readable to
-build fresh query agents). No behavior changes; fully additive.
+Read-only generative-model accessors on `POMDPAgent`, motivated by the
+[koalisi #44](https://github.com/sustia-llc/koalisi/issues/44) persistent→query
+handoff (a persistent agent's learned model must be readable to build fresh query
+agents). No behavior changes; fully additive. This patch is tracked downstream by
+[koalisi #44](https://github.com/sustia-llc/koalisi/issues/44), not by a tira issue.
 
 ### Added
 - **`POMDPAgent::observation_model() -> &[DMatrix<f64>]`** — current `A` per
