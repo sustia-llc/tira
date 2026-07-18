@@ -65,7 +65,7 @@ beyond-paper scaffolding for the multi-agent extensions.
 | Fig 4 parameter recovery | ✅ | `plots/figure4_recovery.png` |
 | Fig 5 four-panel | ✅ | `plots/figure5_experiments.png` |
 | Appendix Fig A1 (internal-α distributions) | ❌ | not reproduced (diagnostic plot only; the Dirichlet construction it visualizes is implemented and unit-tested) |
-| Fig 5 shape claims regression-tested | ⚠️ | shapes verified by figure inspection; seeded ordering assertions are tracked upstream (needs seedable `BanditEnvironment`, issue #2) |
+| Fig 5 shape claims regression-tested | ⚠️ | shapes verified by figure inspection; issue #2 (closed) shipped the seeded foundations — bit-reproducibility (`test_seeded_runs_are_bit_reproducible`) and the Ext-5/Fig-6 fast assertion (`test_certainty_weighted_more_faithful_than_probabilistic`, matched-seed best-2-of-3) — per-panel Fig-5 ordering assertions remain tracked in issue #8 |
 
 ### §4 Discussion — extension coverage
 

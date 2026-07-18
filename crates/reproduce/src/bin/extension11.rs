@@ -34,15 +34,15 @@
 //! Totals over the 300 trials: `F_grp = Σ_t F_group(t)`, `F_sum = Σ_t Σ_i F_i(t)`,
 //! `F_mean = Σ_t mean_i F_i(t)`; ratios `R_sum = F_grp/F_sum` (strict extensivity
 //! ⇔ ≈ 1) and `R_mean = F_grp/F_mean` (the group behaves like a *typical
-//! individual* ⇔ ≈ 1). The `BanditEnvironment` is unseeded (issue #2), so each cell
-//! reports median · IQR over 10 repetitions.
+//! individual* ⇔ ≈ 1). Each cell reports median · IQR over 10 repetitions, one per
+//! distinct deterministic seed (issue #2) — the spread summarizes cross-seed variation.
 //!
 //! Run: `cargo run --release -p reproduce --bin extension11`.
 
 use rayon::prelude::*;
 use reproduce::{
     Agent, AifError, BanditEnvironment, Environment, GroupAgentBuilder, POMDPAgent, TrialData,
-    VotingMode, recover_alpha,
+    VotingMode, env_seed, group_seed, recover_alpha, substream,
 };
 
 /// Paper's standard MAB setup (matches `simulation.rs`).
@@ -50,6 +50,10 @@ const BANDIT_PROBS: [f64; 3] = [0.8, 0.2, 0.2];
 const PREFERENCES: [f64; 2] = [0.7, 0.3];
 const N_TRIALS: usize = 300;
 const REPS: usize = 10;
+/// Master seed; per-cell/per-rep seeds are derived via [`substream`] (issue #2).
+/// Deliberately distinct from `reproduce.rs`'s 2026 so the two binaries' seed-derivation
+/// trees share no root (in particular `substream(2026, 4)` — reproduce's Figure-4 base).
+const MASTER_SEED: u64 = 0xE11_2026;
 const N_SWEEP: [usize; 3] = [4, 8, 16];
 const ALPHA_SWEEP: [f64; 2] = [0.3, 0.7];
 const MODES: [(&str, VotingMode); 2] = [
@@ -68,15 +72,24 @@ struct RunMetrics {
 }
 
 /// Run one group simulation, instrumented for individual and group free energies.
-fn instrumented_run(n_internal: usize, alpha: f64, mode: VotingMode) -> Result<RunMetrics, AifError> {
+/// `seed` makes the run reproducible: [`group_seed`] seeds the group builder (which in
+/// turn derives voter = `s₁`, group = `s₁ + 0x9E37_79B9`, internal agent `i` = `s₁ + 1 +
+/// i`) and [`env_seed`] seeds the environment (issue #2).
+fn instrumented_run(
+    n_internal: usize,
+    alpha: f64,
+    mode: VotingMode,
+    seed: u64,
+) -> Result<RunMetrics, AifError> {
     let mut group = GroupAgentBuilder::new(3)
         .n_internal(n_internal)
         .observation_probs(BANDIT_PROBS.to_vec())
         .preferences(PREFERENCES.to_vec())
         .alpha(alpha)
         .voting_mode(mode)
+        .seed(group_seed(seed))
         .build_identical()?;
-    let mut env = BanditEnvironment::new(BANDIT_PROBS.to_vec())?;
+    let mut env = BanditEnvironment::with_seed(BANDIT_PROBS.to_vec(), env_seed(seed))?;
 
     // Mirror run_group_simulation, reading per-internal F each trial.
     let mut data = TrialData::new();
@@ -193,12 +206,16 @@ fn main() -> Result<(), AifError> {
         .collect();
 
     // Each cell runs REPS independent repetitions; cells and reps run in parallel.
+    // Per-cell/per-rep seeds derive from stable indices so parallelism cannot affect
+    // the reported medians (issue #2).
     let results: Vec<CellResult> = cells
         .par_iter()
-        .map(|&(n, a, ml, m)| {
+        .enumerate()
+        .map(|(cell_idx, &(n, a, ml, m))| {
+            let cell_base = substream(MASTER_SEED, cell_idx as u64);
             let reps: Vec<RunMetrics> = (0..REPS)
                 .into_par_iter()
-                .map(|_| instrumented_run(n, a, m))
+                .map(|rep| instrumented_run(n, a, m, substream(cell_base, rep as u64)))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(aggregate(n, a, ml, &reps))
         })
@@ -222,7 +239,7 @@ fn print_report(results: &[CellResult]) {
         "- Experiment-1 identical group (`build_identical`), standard MAB \
          (obs probs [0.8, 0.2, 0.2], prefs [0.7, 0.3]), `BanditEnvironment`."
     );
-    println!("- {N_TRIALS} trials per run; {REPS} repetitions per cell (unseeded env, issue #2 → median · IQR).");
+    println!("- {N_TRIALS} trials per run; {REPS} repetitions per cell (distinct per-rep seeds, issue #2 → median · IQR summarizes cross-seed variation).");
     println!(
         "- Individual `F`: `variational_free_energy()` per internal agent after each `group.act` (−ln p(o_group) under each member's own arm)."
     );

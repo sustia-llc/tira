@@ -1,10 +1,23 @@
 use reproduce::{
     experiment_certainty_weighted, experiment_deterministic, experiment_identical,
-    experiment_varying_alpha, experiment_varying_preferences, parameter_recovery_single,
+    experiment_varying_alpha, experiment_varying_preferences, parameter_recovery_single, substream,
     AifError, RecoveryResult, TrialData,
 };
 use rayon::prelude::*;
 use std::time::Instant;
+
+/// Master seed for the whole reproduction. Every run derives a deterministic
+/// per-(figure, panel, cell, rep) seed from this constant via [`substream`], so the
+/// figures are byte-reproducible independent of rayon scheduling order (issue #2).
+/// `extension11` uses a *distinct* master so the two binaries' seed trees never overlap.
+const MASTER_SEED: u64 = 2026;
+
+/// Two-level per-cell seed: mix `base` with the outer index `i`, then the inner index
+/// `j`. Deterministic in the indices, so rayon scheduling order cannot affect results.
+/// Named once and used at both sweep sites (Figure 4 and [`run_experiment`]).
+fn cell_seed(base: u64, i: usize, j: usize) -> u64 {
+    substream(substream(base, i as u64), j as u64)
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
@@ -18,12 +31,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Figure 4: Parameter Recovery ===");
 
     let true_alphas: Vec<f64> = (1..=40).map(|i| i as f64 * 0.05).collect();
+    let fig4_base = substream(MASTER_SEED, 4);
     let recovery_points: Vec<(f64, f64)> = true_alphas
         .par_iter()
-        .flat_map(|&true_alpha| {
+        .enumerate()
+        .flat_map(|(ai, &true_alpha)| {
             (0..5)
-                .filter_map(move |_| {
-                    parameter_recovery_single(true_alpha, n_trials)
+                .filter_map(move |rep| {
+                    // Stable per-(α-index, rep) seed — independent of rayon order.
+                    let seed = cell_seed(fig4_base, ai, rep);
+                    // Seeds are deterministic, so a dropped run is a real failure, not
+                    // RNG luck — log it rather than silently thinning the figure. Fuller
+                    // fix (propagate instead of drop) tracked in issue #7.
+                    parameter_recovery_single(true_alpha, n_trials, Some(seed))
+                        .inspect_err(|e| eprintln!("fig4 run failed (dropped from figure): {e}"))
                         .ok()
                         .map(|r| (true_alpha, r.estimated_alpha))
                 })
@@ -41,28 +62,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n_agents_list: [usize; 4] = [4, 8, 16, 100];
     let alpha_steps: Vec<f64> = (1..=20).map(|i| i as f64 * 0.05).collect();
 
-    let exp1_results = run_experiment("Experiment 1: Identical agents", &n_agents_list, &alpha_steps, n_trials, |n, alpha, nt| {
-        experiment_identical(n, alpha, nt)
-    });
+    // Per-experiment seed bases: distinct stream indices off MASTER_SEED (fig4 uses 4).
+    // Experiment 5's base is deliberately Experiment 2's (52), not a fresh index —
+    // stream index 55 is retired and must not be reused (see Figure 6 below).
+    let exp2_base = substream(MASTER_SEED, 52);
 
-    let exp2_results = run_experiment("Experiment 2: Varying alphas", &n_agents_list, &alpha_steps, n_trials, |n, alpha, nt| {
-        experiment_varying_alpha(n, alpha, nt)
-    });
+    let exp1_results = run_experiment("Experiment 1: Identical agents", &n_agents_list, &alpha_steps, n_trials, substream(MASTER_SEED, 51), experiment_identical);
 
-    let exp3_results = run_experiment("Experiment 3: Deterministic voting", &n_agents_list, &alpha_steps, n_trials, |n, alpha, nt| {
-        experiment_deterministic(n, alpha, nt)
-    });
+    let exp2_results = run_experiment("Experiment 2: Varying alphas", &n_agents_list, &alpha_steps, n_trials, exp2_base, experiment_varying_alpha);
 
-    let exp4_results = run_experiment("Experiment 4: Varying preferences", &n_agents_list, &alpha_steps, n_trials, |n, alpha, nt| {
-        experiment_varying_preferences(n, alpha, nt)
-    });
+    let exp3_results = run_experiment("Experiment 3: Deterministic voting", &n_agents_list, &alpha_steps, n_trials, substream(MASTER_SEED, 53), experiment_deterministic);
+
+    let exp4_results = run_experiment("Experiment 4: Varying preferences", &n_agents_list, &alpha_steps, n_trials, substream(MASTER_SEED, 54), experiment_varying_preferences);
 
     // -----------------------------------------------------------------------
     // Figure 6: Extension — Certainty-weighted voting vs simple voting
     // -----------------------------------------------------------------------
-    let exp5_results = run_experiment("Experiment 5: Certainty-weighted voting", &n_agents_list, &alpha_steps, n_trials, |n, alpha, nt| {
-        experiment_certainty_weighted(n, alpha, nt)
-    });
+    // Matched-pairs design: Experiment 5 reuses Experiment 2's base seed, so each Fig-6
+    // cell draws the *same* Dirichlet alphas, the *same* internal-agent streams, and the
+    // *same* environment as its Experiment-2 counterpart — the two panels differ only in
+    // voting mode (probabilistic vs certainty-weighted), isolating the aggregation effect.
+    let exp5_results = run_experiment("Experiment 5: Certainty-weighted voting", &n_agents_list, &alpha_steps, n_trials, exp2_base, experiment_certainty_weighted);
 
     // -----------------------------------------------------------------------
     // Generate plots
@@ -84,15 +104,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Run an experiment sweep across agent counts and alpha steps.
+///
+/// `base_seed` anchors this sweep's reproducible seeds: each (agent-count index,
+/// α-step index) cell gets `substream(substream(base_seed, group_idx), alpha_idx)`,
+/// so results are independent of rayon scheduling order (issue #2).
 fn run_experiment<F>(
     name: &str,
     n_agents_list: &[usize; 4],
     alpha_steps: &[f64],
     n_trials: usize,
+    base_seed: u64,
     experiment_fn: F,
 ) -> Vec<(f64, f64, usize)>
 where
-    F: Fn(usize, f64, usize) -> Result<(TrialData, RecoveryResult), AifError>
+    F: Fn(usize, f64, usize, Option<u64>) -> Result<(TrialData, RecoveryResult), AifError>
         + Sync
         + Send,
 {
@@ -104,8 +129,15 @@ where
         .flat_map(|(group_idx, &n)| {
             alpha_steps
                 .par_iter()
-                .filter_map(move |&alpha| {
-                    f(n, alpha, n_trials)
+                .enumerate()
+                .filter_map(move |(alpha_idx, &alpha)| {
+                    let seed = cell_seed(base_seed, group_idx, alpha_idx);
+                    // Deterministic seeds ⇒ a dropped cell is a genuine failure, not RNG
+                    // luck; log before thinning the figure. Fuller fix is issue #7.
+                    f(n, alpha, n_trials, Some(seed))
+                        .inspect_err(|e| {
+                            eprintln!("{name}: cell (n={n}, α={alpha:.2}) failed (dropped): {e}");
+                        })
                         .ok()
                         .map(|(_, r)| (alpha, r.estimated_alpha, group_idx))
                 })

@@ -46,7 +46,7 @@ learned per-bit precisions + novelty at fixed γ, no precision dynamics) beat th
 magnitude arm 0.4406 vs 0.2720 out-of-sample, the first arm to do so; arm choice is
 now koalisi #54 (cost-quality tradeoff)).
 
-- **149 tests** (148 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
+- **153 tests** (152 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
 - `cargo run --release -p reproduce --bin reproduce` — full reproduction in ~30s
 
 ## Module map
@@ -61,8 +61,8 @@ is the paper-reproduction harness and depends on `aif`.
 | `crates/aif/src/coalition.rs` | `competence_efe()` + `ObsPrecisionParams` — the reusable coalition-**value** primitive (scalar competence `c∈[0,1]` → observation precision → G; the supported bridge for downstream value calculators). `ObsPrecisionParams.transition_noise` (0.6.0, default 0.0) opts into a stochastic-B bridge POMDP so G includes the live info-gain term (note: G *rises* with noise over most of the competence range — pragmatic blurring dominates; competence monotonicity preserved). Default-parameter anchors: `G(0)=1.204, G(0.5)=0.710, G(1)=0.215`. `TrustBeliefs`/`CompatibilityBeliefs`/`CoalitionHistory` + `belief_weighted_preference()`. `CoalitionEvaluator`/`CapabilityProvider` **removed in 0.6.0** (#1) |
 | `crates/aif/src/communication.rs` | `CommunicationChannel` (flume), `Message`, `MessageContent`, `CommunicatingPOMDPAgent` — used by multi-agent tests, not by the group-agent pipeline |
 | `crates/aif/src/lib.rs` | `AifError` (0.10.0: `InvalidLength { expected, got }` for length/dimension mismatches; `InvalidAction` retained for genuine out-of-range actions/votes), re-exports of the engine + coalition surface |
-| `crates/reproduce/src/lib.rs` | `BanditEnvironment`, `SharedBanditEnvironment` (with `agents_acted` tracking), `Environment`/`MultiAgentEnvironment` traits, re-exports from `aif` + simulation |
-| `crates/reproduce/src/simulation.rs` | `run_group_simulation()`, `run_single_simulation()`, `log_likelihood()`, `log_likelihood_learning()` (0.8.0 — replay that relearns A), `recover_alpha()` (grid search, half-normal prior), experiment factories for 5 experiments, `dirichlet_alphas()`, `beta_preferences()` |
+| `crates/reproduce/src/lib.rs` | `BanditEnvironment`, `SharedBanditEnvironment` (with `agents_acted` tracking) — both `StdRng`-backed since issue #2: `new()` = entropy, `with_seed(…, seed)` = deterministic, NOT `Clone` (rand 0.10 removed `Clone` from `StdRng`; nothing cloned them) — `Environment`/`MultiAgentEnvironment` traits, re-exports from `aif` + simulation (incl. `substream`/`heterogeneity_seed`/`group_seed`/`env_seed`) |
+| `crates/reproduce/src/simulation.rs` | `run_group_simulation()`, `run_single_simulation()`, `log_likelihood()`, `log_likelihood_learning()` (0.8.0 — replay that relearns A), `recover_alpha()` (grid search, half-normal prior), experiment factories for 5 experiments + `parameter_recovery_single` — all take a trailing `seed: Option<u64>` since issue #2 (`Some` → bit-reproducible via splitmix64 `substream` role streams: 0 = heterogeneity draw, 1 = group builder, 2 = env — pub helpers `heterogeneity_seed`/`group_seed`/`env_seed`; substream is avalanche-mixed because the builder derives internal streams at small offsets of its seed), `dirichlet_alphas(rng)`, `beta_preferences(rng)`; seeded tests incl. bit-reproducibility, anti-collision guard, and the matched-seed best-2-of-3 CW-faithfulness assertion |
 | `crates/reproduce/src/plotter.rs` | `plotters`-based scatter/panel helpers — currently unused by the binary (which carries its own copies); consolidation tracked in issues |
 | `crates/reproduce/src/bin/reproduce.rs` | Full reproduction: parameter recovery (Fig 4) + 4 paper experiments (Fig 5) + CW extension (Fig 6), rayon-parallelized, refactored with `run_experiment()` + `plot_panel()` helpers |
 
@@ -93,8 +93,9 @@ cargo test
 
 # Single experiment from Rust (reproduce crate)
 use reproduce::{experiment_identical, experiment_certainty_weighted};
-let (data, result) = experiment_identical(16, 0.5, 300)?;
-let (data, result) = experiment_certainty_weighted(16, 0.5, 300)?;
+// Trailing seed: Some(s) → bit-reproducible run (issue #2), None → entropy.
+let (data, result) = experiment_identical(16, 0.5, 300, Some(2026))?;
+let (data, result) = experiment_certainty_weighted(16, 0.5, 300, Some(2026))?;
 ```
 
 ## Possible extensions
