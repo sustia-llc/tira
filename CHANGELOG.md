@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### reproduce harness (unversioned; no `aif` engine change, no release required)
+
+2026-07-18, four merges (PRs #26/#27/#28/#31 — issues #2/#25/#29 closed, extensions
+1/2/3 studies run). The `aif` engine is untouched; `aif-v0.11.0` remains the current
+release and downstream pins are unaffected.
+
+- Full RNG seed-threading (#2): seeds **mandatory** on the experiment-factory surface
+  (`ExperimentOpts`), splitmix64 role streams with an executable anti-collision guard,
+  byte-reproducible figures (PNG sha256-stable), Figure 6 upgraded to a matched-pairs
+  CW-vs-probabilistic comparison.
+- Extension 3 study (`bin/extension3`, `docs/extension3-learning.md`):
+  `ExperimentOpts { seed, learn_a }`, `recover_alpha_learning`; individual A-learning
+  crushes the recovered group α (aware 0.083 vs fixed-A 0.597); aware replay is
+  load-bearing for fit, not point-α.
+- Extension 1 / MCMC (#25) (`bin/extension1`, `docs/extension1-mcmc.md`):
+  `recover_alpha_mcmc[_learning]` — seeded MH, dedicated chain role stream,
+  burn-in-adaptive proposal, Gelman-Rubin R-hat; reproduces the paper's Fig-4
+  degenerate-region posterior medians (≈3.2) that the grid MAP cannot (saturates 1.35).
+- Extension 2 study (#29) (`bin/extension2`, `docs/extension2-multiparam.md`):
+  vector MH kernel `recover_mcmc_vec` (the scalar path is its dim-1 case,
+  bit-identical, draw-order-pinned), `ModelParams`/`log_likelihood_params`; joint
+  (α,γ)/(α,p) recovery is confound-dominated on this fixture (sampler-scoped negative;
+  identifiability open → #30); β₀/ψ analytically unidentifiable on the MAB
+  (deterministic B ⇒ inert γ/β loop).
+- Test suite 149 → 167; all four study binaries byte-reproducible across runs.
+
 ## [0.11.0] - 2026-07-17
 
 Direct Dirichlet-count injection for `pA` and `pB` at construction, motivated by the

@@ -23,8 +23,11 @@ Use these when working on matrix-heavy extensions (continuous state-space models
 
 ## Project state
 
-All 5 paper implementation phases complete + Extension 5 (certainty-weighted voting).
-Four paper experiments reproduced (Figures 4-5) plus CW comparison (Figure 6).
+All 5 paper implementation phases complete. Extensions done: **1** (MCMC α recovery,
+#25), **2** (multi-parameter recovery study, #29 — confound-dominated; identifiability
+open → #30), **3** (learning-group study), **5** (certainty-weighted voting), **11**
+(extensivity study). Four paper experiments reproduced (Figures 4-5) plus CW comparison
+(Figure 6); figures byte-reproducible since #2 (mandatory-seed harness).
 Now a **Cargo workspace** (`crates/aif` engine + `crates/reproduce` harness) serving as
 the reference active-inference engine for the koalisi coalition runtime, which consumes
 the coalition-value primitive `competence_efe` and, since koalisi's K4-v3 arm, builds a
@@ -46,7 +49,7 @@ learned per-bit precisions + novelty at fixed γ, no precision dynamics) beat th
 magnitude arm 0.4406 vs 0.2720 out-of-sample, the first arm to do so; arm choice is
 now koalisi #54 (cost-quality tradeoff)).
 
-- **165 tests** (164 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
+- **167 tests** (166 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
 - `cargo run --release -p reproduce --bin reproduce` — full reproduction in ~30s
 
 ## Module map
@@ -85,7 +88,7 @@ is the paper-reproduction harness and depends on `aif`.
 ## Running experiments
 
 ```sh
-# Full reproduction (~16s release)
+# Full reproduction (~30s release)
 cargo run --release -p reproduce --bin reproduce
 
 # Tests (whole workspace)
