@@ -91,8 +91,8 @@ takeaway is narrower:
 the mis-specification shows up as *fit quality / likelihood*, not as a *point-α* bias,
 because both models are driven to the same low-α corner by the flattened action stream.
 The learning-aware replay is therefore load-bearing for likelihood-based claims (model
-comparison, and the interval/posterior work deferred to #25) but not for the α point
-estimate here.
+comparison, and the interval/posterior work now available via `recover_alpha_mcmc_learning`,
+#25) but not for the α point estimate here.
 
 **Takeaway.** Individual-level A-learning is not a second-order correction at the group
 scale — it moves the recovered group α from "tracks the truth" to "looks near-uniform,"
@@ -102,8 +102,9 @@ point-α recovery is robust to the mis-specification, while the *fit* is not (aw
 wins on log-posterior).
 
 _Caveats: one pA prior studied (`[1,1,1]`, weak/fast); learning is A-only (pB/pD/pE not
-swept); η/ω at engine defaults (1.0). Recovery is grid-search MAP over α ∈ [0, 5] step
-0.01 under the paper's half-normal(0, 4) prior — a point estimate, **not** MCMC; see #25
-for posterior-level (interval) claims, where the aware-vs-misspec fit difference is
-expected to matter more than it does for the point estimate. The low recovered group α is
-a property of this blanket-level recovery pipeline, not a claim about the members' own α._
+swept); η/ω at engine defaults (1.0). Recovery here is grid-search MAP over α ∈ [0, 5] step
+0.01 under the paper's half-normal(0, 4) prior — a point estimate. Posterior-level (interval)
+claims now have a home: MCMC shipped in #25 (`recover_alpha_mcmc[_learning]`,
+`docs/extension1-mcmc.md`), where the aware-vs-misspec fit difference is expected to matter
+more than it does for the point estimate. The low recovered group α is a property of this
+blanket-level recovery pipeline, not a claim about the members' own α._

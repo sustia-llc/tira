@@ -13,11 +13,13 @@ mod plotter;
 mod simulation;
 
 pub use simulation::{
-    BANDIT_PROBS, EXT3_INITIAL_PRECISION, ExperimentOpts, PREFERENCES, RecoveryResult, TrialData,
-    env_seed, experiment_certainty_weighted, experiment_deterministic, experiment_identical,
-    experiment_varying_alpha, experiment_varying_preferences, group_seed, heterogeneity_seed,
-    log_likelihood, log_likelihood_learning, parameter_recovery_single, recover_alpha,
-    recover_alpha_learning, run_group_simulation, run_single_simulation, run_sweep, substream,
+    BANDIT_PROBS, EXT3_INITIAL_PRECISION, ExperimentOpts, McmcConfig, McmcResult, PREFERENCES,
+    R_HAT_THRESHOLD, RecoveryResult, TrialData, env_seed, experiment_certainty_weighted,
+    experiment_deterministic, experiment_identical, experiment_varying_alpha,
+    experiment_varying_preferences, group_seed, heterogeneity_seed, log_likelihood,
+    log_likelihood_learning, mcmc_base_seed, parameter_recovery_single, recover_alpha,
+    recover_alpha_learning, recover_alpha_mcmc, recover_alpha_mcmc_learning, run_group_simulation,
+    run_single_simulation, run_sweep, single_agent_data, substream,
 };
 
 pub use plotter::ScatterPoint;

@@ -94,6 +94,7 @@ organoids/"dishbrains"). tira's numbered extension tracking (1–12) for this li
 Figures 4 and 5 (all four experiments) are reproduced in
 `plots/figure4_recovery.png` / `plots/figure5_experiments.png`, and the paper's proposed
 certainty-weighted aggregation (an extension the paper suggests but does not simulate) is
-implemented and evaluated in `plots/figure6_certainty_weighted.png`. Methodological deviations
-(grid-search MAP instead of MCMC; policy depth 1 with a proven-equivalent action marginal) are
-documented in [aif-coverage.md](aif-coverage.md).
+implemented and evaluated in `plots/figure6_certainty_weighted.png`. Methodological choices
+(grid-MAP recovery as the fast default, with MCMC posterior-median recovery also available
+since #25; policy depth 1 with a proven-equivalent action marginal) are documented in
+[aif-coverage.md](aif-coverage.md).

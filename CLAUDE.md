@@ -46,7 +46,7 @@ learned per-bit precisions + novelty at fixed γ, no precision dynamics) beat th
 magnitude arm 0.4406 vs 0.2720 out-of-sample, the first arm to do so; arm choice is
 now koalisi #54 (cost-quality tradeoff)).
 
-- **155 tests** (154 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
+- **161 tests** (160 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
 - `cargo run --release -p reproduce --bin reproduce` — full reproduction in ~30s
 
 ## Module map
@@ -62,7 +62,7 @@ is the paper-reproduction harness and depends on `aif`.
 | `crates/aif/src/communication.rs` | `CommunicationChannel` (flume), `Message`, `MessageContent`, `CommunicatingPOMDPAgent` — used by multi-agent tests, not by the group-agent pipeline |
 | `crates/aif/src/lib.rs` | `AifError` (0.10.0: `InvalidLength { expected, got }` for length/dimension mismatches; `InvalidAction` retained for genuine out-of-range actions/votes), re-exports of the engine + coalition surface |
 | `crates/reproduce/src/lib.rs` | `BanditEnvironment`, `SharedBanditEnvironment` (with `agents_acted` tracking) — both `StdRng`-backed since issue #2: `new()` = entropy, `with_seed(…, seed)` = deterministic, NOT `Clone` (rand 0.10 removed `Clone` from `StdRng`; nothing cloned them) — `Environment`/`MultiAgentEnvironment` traits, re-exports from `aif` + simulation (incl. `substream`/`heterogeneity_seed`/`group_seed`/`env_seed`) |
-| `crates/reproduce/src/simulation.rs` | `run_group_simulation()`, `run_single_simulation()`, `log_likelihood()`, `log_likelihood_learning()` (0.8.0 — replay that relearns A), `recover_alpha()` + `recover_alpha_learning()` (grid MAP, half-normal prior, shared loop `recover_alpha_with`), experiment factories for 5 experiments + `parameter_recovery_single` — all take a trailing `opts: &ExperimentOpts` (issue #2 + extension 3). `#[non_exhaustive] ExperimentOpts { seed: u64, learn_a: Option<Vec<f64>> }`: **seed is mandatory** — the entropy arm was dropped post-#2 review (a default seed would silently correlate unrelated runs; want fresh draws → generate + log a seed), so there is no `Default` impl. `seed` → bit-reproducible via splitmix64 `substream` role streams (0 = heterogeneity draw, 1 = group builder, 2 = env — pub helpers `heterogeneity_seed`/`group_seed`/`env_seed`; substream is avalanche-mixed because the builder derives internal streams at small offsets of its seed); `learn_a: Some(pA)` ⇒ `learn_a(true).initial_precision(pA)` (extension 3; length-checked vs n_bandits → `InvalidLength`). Ctors `ExperimentOpts::new(seed)` + `.with_learn_a(pA)` setter. Canonical config is now pub — `BANDIT_PROBS`/`PREFERENCES`/`EXT3_INITIAL_PRECISION` and the `stats::{percentile,median_iqr,median}` + `run_sweep` (cell×rep seeded sweep) helpers are shared by both study binaries. `dirichlet_alphas(rng)`, `beta_preferences(rng)`; seeded tests incl. bit-reproducibility, anti-collision guard, matched-seed best-2-of-3 CW-faithfulness, learning-aware recovery/fit-vs-misspec, and precision-length rejection |
+| `crates/reproduce/src/simulation.rs` | `run_group_simulation()`, `run_single_simulation()`, `log_likelihood()`, `log_likelihood_learning()` (0.8.0 — replay that relearns A), `recover_alpha()` + `recover_alpha_learning()` (grid MAP, half-normal prior, shared loop `recover_alpha_with` + `half_normal_log_prior`), `recover_alpha_mcmc()` + `recover_alpha_mcmc_learning()` (extension 1 / #25 — Metropolis-Hastings via `mcmc_with`, rayon-parallel chains each seeded from a dedicated `mcmc_base_seed`/`MCMC_STREAM` role — no collision with data-gen streams; `McmcConfig` mandatory-seed `#[non_exhaustive]` + `McmcResult` median/r_hat/acceptance/adapted_sd + `converged()` vs pub `R_HAT_THRESHOLD`; reflected-at-0 symmetric RW with burn-in Robbins-Monro proposal adaptation frozen for sampling; same objective as grid MAP via `half_normal_log_prior`), experiment factories for 5 experiments + `parameter_recovery_single` — all take a trailing `opts: &ExperimentOpts` (issue #2 + extension 3). `#[non_exhaustive] ExperimentOpts { seed: u64, learn_a: Option<Vec<f64>> }`: **seed is mandatory** — the entropy arm was dropped post-#2 review (a default seed would silently correlate unrelated runs; want fresh draws → generate + log a seed), so there is no `Default` impl. `seed` → bit-reproducible via splitmix64 `substream` role streams (0 = heterogeneity draw, 1 = group builder, 2 = env — pub helpers `heterogeneity_seed`/`group_seed`/`env_seed`; substream is avalanche-mixed because the builder derives internal streams at small offsets of its seed); `learn_a: Some(pA)` ⇒ `learn_a(true).initial_precision(pA)` (extension 3; length-checked vs n_bandits → `InvalidLength`). Ctors `ExperimentOpts::new(seed)` + `.with_learn_a(pA)` setter. Canonical config is now pub — `BANDIT_PROBS`/`PREFERENCES`/`EXT3_INITIAL_PRECISION` and the `stats::{percentile,median_iqr,median}` + `run_sweep` (cell×rep seeded sweep) helpers are shared by both study binaries. `dirichlet_alphas(rng)`, `beta_preferences(rng)`; seeded tests incl. bit-reproducibility, anti-collision guard, matched-seed best-2-of-3 CW-faithfulness, learning-aware recovery/fit-vs-misspec, and precision-length rejection |
 | `crates/reproduce/src/plotter.rs` | `plotters`-based scatter/panel helpers — currently unused by the binary (which carries its own copies); consolidation tracked in issues |
 | `crates/reproduce/src/bin/reproduce.rs` | Full reproduction: parameter recovery (Fig 4) + 4 paper experiments (Fig 5) + CW extension (Fig 6), rayon-parallelized, refactored with `run_experiment()` + `plot_panel()` helpers |
 
@@ -70,7 +70,7 @@ is the paper-reproduction harness and depends on `aif`.
 
 - **Preferences are 2-element** `[p(obs1), p(obs2)]` — matches paper's binary observations. Internally log-transformed to `C = [ln p1, ln p2]` for the pragmatic value term.
 - **α vs γ**: `gamma` (default 16.0) is the softmax temperature over expected free energy G → policy posterior. `alpha` is the softmax temperature over marginalized action probabilities. The paper uses both; many active inference implementations conflate them.
-- **Parameter recovery uses grid search** over α ∈ [0.00, 5.00] with step 0.01 and a half-normal(0, 4) prior. MAP point estimate. MCMC was deferred — grid search reproduces the paper's findings in the identifiable region (α ≤ 1); a point-MAP won't reproduce the paper's degenerate-region posterior-median clustering near ~4.
+- **Parameter recovery: grid MAP is the fast default; MCMC ships since #25.** `recover_alpha` grid-searches α ∈ [0.00, 5.00] step 0.01 under a half-normal(0, 4) prior (MAP point estimate) — the fast path, and faithful in the identifiable region (α < 1). It *cannot* reproduce the paper's degenerate-region posterior-median clustering (a point-MAP just saturates at one node). `recover_alpha_mcmc` (extension 1 / #25) now does: same objective (`log_likelihood + half_normal_log_prior` — shared `half_normal_log_prior`/`recover_alpha_with` seam), posterior **median** estimate, and in the degenerate region the median clusters at ≈ 3.2 (prior-driven, between the prior-only 2.7 and the paper's ~4) while the grid MAP pins at 1.35 (`docs/extension1-mcmc.md`). Both are validated against each other by `bin/extension1.rs`.
 - **VotingMode** governs how the active agent aggregates internal agent outputs. `Probabilistic` and `Deterministic` use discrete votes (original paper). `CertaintyWeighted` uses full action distributions weighted by `exp(-entropy)` — confident agents dominate the mixture.
 - **GroupAgent implements Agent** — the same recovery pipeline (record blanket states → `recover_alpha`) applies to single agents and groups. Note: `run_group_simulation`/`run_single_simulation` currently take concrete types, not `impl Agent` — the trait-level polymorphism that extensions 4/8 need is designed but not yet expressed in the runner signatures.
 - **B × state_belief** (not B^T) — deterministic MAB transitions produce delta-function priors. The EFE step function `efe_step()` and `infer_states()` both use the same convention.
@@ -107,18 +107,31 @@ println!("misspec α = {:.3}, aware α = {:.3}", misspec.estimated_alpha, aware.
 
 These are drawn from §4.1 of the paper and from natural next steps for the codebase.
 
-### 1. MCMC parameter estimation → tracked as #25
-Replace grid search in `recover_alpha()` with Metropolis-Hastings sampling.
-Returns a full posterior distribution over α (report median as point estimate, like the paper).
-The half-normal(0, 4) prior is already implemented; the likelihood function `log_likelihood()`
-is ready. Main work: implement MH proposal + chain, burn-in, convergence diagnostics.
-Consider `statrs` crate for distribution utilities.
+### 1. MCMC parameter estimation ✅ IMPLEMENTED (closed by #25)
+Recover α by Metropolis-Hastings, reporting the posterior median (the paper's estimator).
+Run the validation: `cargo run --release -p reproduce --bin extension1` (~60 s; report
+`docs/extension1-mcmc.md`).
 
-**Where**: `src/simulation.rs`, add `recover_alpha_mcmc()` alongside existing `recover_alpha()`.
+**Finding**: MCMC delivers what the grid point-MAP structurally cannot. In the identifiable
+region (α < 1) the posterior median coincides with the grid MAP and tracks the true α (region
+means 0.400 vs 0.405). In the degenerate region (α ≥ 1, onset right at the paper's boundary)
+the likelihood flattens: the grid MAP saturates at a single node (1.350 for every degenerate
+cell) while the MCMC median clusters at ≈ 3.2 (region mean 3.216) — the paper's Figure-4
+prior-driven clustering, sitting between the prior-only median (2.7) and the paper's ~4, with
+R-hat < 1.02 throughout. This unblocks Extension 2 (multi-parameter recovery, where a grid is
+intractable — no longer deferred, "unblocked by #25").
+
+**Implemented in**: `McmcConfig` (`#[non_exhaustive]`, `new(seed)` + `with_chains/samples/
+burn_in/proposal_sd`; mandatory seed, per-chain `substream(seed, chain)`), `McmcResult`
+(median/mean/r_hat/ess/acceptance_rate/chains), `recover_alpha_mcmc[_learning]()` — thin
+wrappers over private `mcmc_with` (Gaussian RW reflected at 0 ⇒ symmetric ⇒ plain MH; scores
+`log_likelihood + half_normal_log_prior`, the same objective as the grid MAP), and
+`crates/reproduce/src/bin/extension1.rs`.
 
 ### 2. Recover additional parameters
 The paper focuses on α but notes γ, A-matrix contents, and learning rates could also be inferred.
-Multi-dimensional grid search is expensive; this motivates the MCMC extension above.
+Multi-dimensional grid search is expensive; **unblocked by #25** — the MH sampler
+(`recover_alpha_mcmc`) is the path to multi-dimensional recovery.
 
 **Where**: Generalize `log_likelihood()` to accept a parameter vector, not just α.
 `POMDPAgent::with_params()` already supports setting γ.
@@ -144,7 +157,8 @@ the aware replay is load-bearing for likelihood/model-comparison claims, not for
 `recover_alpha_learning()` (grid MAP scoring with `log_likelihood_learning`, sharing the
 grid+prior loop with `recover_alpha` via `recover_alpha_with`), and
 `crates/reproduce/src/bin/extension3.rs` (matched-seed fixed-A vs learning arms, three
-recovered αs per cell). MCMC/interval-level follow-up is #25.
+recovered αs per cell). MCMC/interval-level recovery of learning data now ships via
+`recover_alpha_mcmc_learning` (#25).
 
 ### 4. Sensory and active agents as POMDP agents
 The paper uses a CopyAgent (sensory) and VotingAgent (active) as simple rule-based

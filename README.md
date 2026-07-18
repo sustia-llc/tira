@@ -90,6 +90,19 @@ Mis-specified fixed-A recovery of learning data barely biases the *point* estima
 mechanism: [extension3-learning.md](docs/extension3-learning.md); run with
 `cargo run --release -p reproduce --bin extension3`.
 
+### Extension 1 — MCMC parameter recovery (study, no figure)
+
+Can Metropolis-Hastings recover the paper's posterior-**median** α where the fast grid
+point-MAP cannot? **Yes.** In the identifiable region (α < 1) the MCMC median coincides with
+the grid MAP and tracks the truth (means 0.405 vs 0.400); in the degenerate region (α ≥ 1) the
+grid MAP saturates at a single node (1.35) while the MCMC median clusters at ≈ 3.2 (region
+mean 3.216) — the paper's Figure-4 prior-driven clustering, between the prior-only median
+(2.7) and the paper's ~4, R-hat ≈ 1.00 throughout (burn-in-adaptive proposal). This closes
+issue #25 and unblocks Extension 2
+(multi-parameter recovery). Full tables and MH details:
+[extension1-mcmc.md](docs/extension1-mcmc.md); run with
+`cargo run --release -p reproduce --bin extension1`.
+
 ## Architecture
 
 ```
@@ -116,11 +129,12 @@ Environment (BanditEnvironment)
 | `crates/aif/src/group.rs` | VotingMode, GroupAgent, VotingAgent (discrete + certainty-weighted), GroupAgentBuilder |
 | `crates/aif/src/coalition.rs` | `competence_efe` + `ObsPrecisionParams` (the coalition-value primitive, opt-in `transition_noise` since 0.6.0), `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory`, `belief_weighted_preference` |
 | `crates/aif/src/communication.rs` | Flume-based inter-agent messaging (for extended scenarios) |
-| `crates/reproduce/src/simulation.rs` | Simulation runner, parameter recovery (grid MAP + half-normal prior: `recover_alpha` / `recover_alpha_learning`), 5 experiment factories taking `&ExperimentOpts` (seed + optional A-learning) |
+| `crates/reproduce/src/simulation.rs` | Simulation runner, parameter recovery (grid MAP + half-normal prior: `recover_alpha` / `recover_alpha_learning`; MCMC: `recover_alpha_mcmc[_learning]` + `McmcConfig`/`McmcResult`, extension 1 / #25), 5 experiment factories taking `&ExperimentOpts` (seed + optional A-learning) |
 | `crates/reproduce/src/plotter.rs` | Plotters-based scatter helpers (pending consolidation with the binary's figure code) |
 | `crates/reproduce/src/bin/reproduce.rs` | Full paper reproduction binary |
 | `crates/reproduce/src/bin/extension11.rs` | Free-energy extensivity study (extension 11) |
 | `crates/reproduce/src/bin/extension3.rs` | Individual A-learning vs group-α recovery study (extension 3) |
+| `crates/reproduce/src/bin/extension1.rs` | MCMC (Metropolis-Hastings) α recovery vs grid MAP (extension 1 / #25) |
 
 ## Usage
 

@@ -1,9 +1,9 @@
 use aif::{Agent, GroupAgent, GroupAgentBuilder, AifError, POMDPAgent};
 use crate::{BanditEnvironment, Environment};
 use rand::rngs::StdRng;
-use rand::SeedableRng;
+use rand::{RngExt, SeedableRng};
 use rand_distr::multi::Dirichlet;
-use rand_distr::{Beta, Distribution};
+use rand_distr::{Beta, Distribution, Normal};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -166,14 +166,17 @@ pub fn log_likelihood_learning(
     Ok(ll)
 }
 
+/// Standard deviation of the paper's half-normal α prior. Single-sourced: used by
+/// [`half_normal_log_prior`] AND as the MCMC chains' overdispersed-init spread.
+const PRIOR_SD: f64 = 4.0;
+
 /// The paper's half-normal(0, SD=4) log-prior on α, up to an additive constant.
 ///
 /// This is the shared *objective component* of the recovery target: the grid-search MAP
-/// below adds it to the log-likelihood. The MCMC extension (#25) is expected to consume
-/// the same function so its posterior target matches [`recover_alpha`]'s exactly.
+/// and the MCMC sampler both add it to the log-likelihood, so both target the identical
+/// posterior. Callers compose it explicitly (`log_likelihood(..) + half_normal_log_prior`).
 #[must_use]
 fn half_normal_log_prior(alpha: f64) -> f64 {
-    const PRIOR_SD: f64 = 4.0;
     -(alpha * alpha) / (2.0 * PRIOR_SD * PRIOR_SD)
 }
 
@@ -277,6 +280,290 @@ pub fn recover_alpha_learning(
 pub struct RecoveryResult {
     pub estimated_alpha: f64,
     pub log_posterior: f64,
+}
+
+// ---------------------------------------------------------------------------
+// MCMC parameter recovery (extension 1 / #25)
+// ---------------------------------------------------------------------------
+
+/// R-hat below this ⇒ chains are considered converged ([`McmcResult::converged`]).
+/// 1.05 is stricter than Gelman's classic 1.1 but looser than the modern rank-normalized
+/// 1.01 bound (Vehtari et al. 2021), which needs a better estimator than our classic
+/// Gelman-Rubin — a sensible cut for this 1-D target.
+pub const R_HAT_THRESHOLD: f64 = 1.05;
+
+/// Target acceptance rate for the burn-in proposal adaptation (Robbins-Monro).
+const ADAPT_TARGET: f64 = 0.35;
+
+/// Configuration for the Metropolis-Hastings α recovery ([`recover_alpha_mcmc`]).
+///
+/// Seed is **mandatory** (post-#2 design decision — no entropy arm); chain `k` draws its
+/// RNG from `substream(mcmc_base_seed(seed), k)` — a **dedicated** MCMC role so the chain
+/// RNGs never coincide with the data-generation streams (heterogeneity/group/env) under
+/// matched-seed usage. No `Default` impl; build with [`new`](Self::new) + the `with_*`
+/// setters.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct McmcConfig {
+    pub seed: u64,
+    /// Number of independent chains (≥ 2 for a finite R-hat).
+    pub n_chains: usize,
+    /// Post-burn-in samples kept **per chain**.
+    pub n_samples: usize,
+    /// Warm-up iterations discarded per chain before sampling; the proposal SD adapts
+    /// (Robbins-Monro toward acceptance `ADAPT_TARGET`) over these, then freezes.
+    pub burn_in: usize,
+    /// **Initial** standard deviation of the Gaussian random-walk proposal on α. Adapted
+    /// during burn-in and frozen for the sampling phase (see [`McmcResult::adapted_sd`]).
+    pub proposal_sd: f64,
+}
+
+impl McmcConfig {
+    /// New config seeded with `seed` (mandatory) and the standard defaults: 4 chains,
+    /// 2000 post-burn-in samples/chain, 500 burn-in, initial proposal SD 0.3.
+    #[must_use]
+    pub fn new(seed: u64) -> Self {
+        Self { seed, n_chains: 4, n_samples: 2000, burn_in: 500, proposal_sd: 0.3 }
+    }
+
+    #[must_use]
+    pub fn with_chains(mut self, n_chains: usize) -> Self {
+        self.n_chains = n_chains;
+        self
+    }
+
+    #[must_use]
+    pub fn with_samples(mut self, n_samples: usize) -> Self {
+        self.n_samples = n_samples;
+        self
+    }
+
+    #[must_use]
+    pub fn with_burn_in(mut self, burn_in: usize) -> Self {
+        self.burn_in = burn_in;
+        self
+    }
+
+    /// Set the **initial** proposal SD (adapted during burn-in).
+    #[must_use]
+    pub fn with_proposal_sd(mut self, proposal_sd: f64) -> Self {
+        self.proposal_sd = proposal_sd;
+        self
+    }
+}
+
+/// Posterior summary from [`recover_alpha_mcmc`].
+///
+/// The point estimate is the posterior **median** (pooled across chains, post-burn-in).
+/// `r_hat` is the classic Gelman-Rubin potential scale reduction factor; use
+/// [`converged`](Self::converged) (`r_hat < R_HAT_THRESHOLD`) for the convergence verdict.
+/// `acceptance_rate` is over the sampling phase only. `adapted_sd` is the mean frozen
+/// proposal SD across chains (a burn-in-tuning diagnostic).
+#[derive(Debug, Clone)]
+pub struct McmcResult {
+    pub median: f64,
+    pub r_hat: f64,
+    pub acceptance_rate: f64,
+    pub adapted_sd: f64,
+    /// Post-burn-in samples, one inner vector per chain.
+    pub chains: Vec<Vec<f64>>,
+}
+
+impl McmcResult {
+    /// Chains considered mixed: `r_hat < R_HAT_THRESHOLD`. A NaN `r_hat` (e.g. a single
+    /// chain, where R-hat is undefined) ⇒ `false`.
+    #[must_use]
+    pub fn converged(&self) -> bool {
+        self.r_hat < R_HAT_THRESHOLD
+    }
+}
+
+/// Classic Gelman-Rubin R-hat across equal-length `chains`.
+///
+/// `R̂ = sqrt(v̂ / W)` with between-chain `B`, within-chain `W`, and
+/// `v̂ = (n-1)/n · W + B/n`. Returns NaN for the degenerate cases where R-hat is
+/// undefined: fewer than 2 chains (no between-chain variance), fewer than 2 samples per
+/// chain, or zero within-chain variance (all samples identical).
+fn gelman_rubin(chains: &[Vec<f64>]) -> f64 {
+    let m = chains.len();
+    if m < 2 {
+        return f64::NAN;
+    }
+    let n = chains[0].len();
+    if n < 2 {
+        return f64::NAN;
+    }
+    let nf = n as f64;
+    let mf = m as f64;
+    let chain_means: Vec<f64> = chains.iter().map(|c| c.iter().sum::<f64>() / nf).collect();
+    let grand = chain_means.iter().sum::<f64>() / mf;
+    let b = nf / (mf - 1.0) * chain_means.iter().map(|&cm| (cm - grand).powi(2)).sum::<f64>();
+    let w = chains
+        .iter()
+        .zip(&chain_means)
+        .map(|(c, &cm)| c.iter().map(|&x| (x - cm).powi(2)).sum::<f64>() / (nf - 1.0))
+        .sum::<f64>()
+        / mf;
+    if w == 0.0 {
+        return f64::NAN;
+    }
+    let var_hat = (nf - 1.0) / nf * w + b / nf;
+    (var_hat / w).sqrt()
+}
+
+/// One chain's outputs: post-burn-in samples, sampling-phase accept count, and the
+/// frozen (post-adaptation) proposal SD.
+struct ChainOutput {
+    samples: Vec<f64>,
+    accepts: usize,
+    adapted_sd: f64,
+}
+
+/// Run a single MH chain. During burn-in the proposal SD adapts by Robbins-Monro toward
+/// [`ADAPT_TARGET`] acceptance (diminishing gain `1/(i+1)^0.6` on `log(sd)`), then
+/// **freezes** — so the sampling phase is plain, unadapted MH with detailed balance
+/// intact. Proposal is a Gaussian random walk **reflected at 0** (`α' = |α + N(0, σ)|`);
+/// reflection keeps the proposal symmetric (the normal density is even ⇒ folded densities
+/// match), so acceptance is `min(1, exp(Δlogpost))` with no Hastings correction. Init is
+/// an overdispersed `|N(0, PRIOR_SD)|` draw; the current log-posterior is cached (one eval
+/// per iteration).
+fn run_chain<F>(chain_idx: usize, config: &McmcConfig, logpost: &F) -> Result<ChainOutput, AifError>
+where
+    F: Fn(f64) -> Result<f64, AifError>,
+{
+    let std_normal =
+        Normal::new(0.0_f64, 1.0).map_err(|e| AifError::InvalidDistribution(e.to_string()))?;
+    let mut rng = StdRng::seed_from_u64(substream(mcmc_base_seed(config.seed), chain_idx as u64));
+
+    // Overdispersed init |N(0, PRIOR_SD)| — spread single-sourced with the prior.
+    let mut cur = (PRIOR_SD * std_normal.sample(&mut rng)).abs();
+    let mut cur_lp = logpost(cur)?;
+
+    // Burn-in: adapt log(sd); `proposal_sd` is the initial value.
+    let mut log_sd = config.proposal_sd.ln();
+    for i in 0..config.burn_in {
+        let sd = log_sd.exp();
+        let prop = (cur + sd * std_normal.sample(&mut rng)).abs(); // reflect at 0
+        let prop_lp = logpost(prop)?;
+        let accepted = prop_lp >= cur_lp || rng.random::<f64>() < (prop_lp - cur_lp).exp();
+        if accepted {
+            cur = prop;
+            cur_lp = prop_lp;
+        }
+        let gain = 1.0 / ((i + 1) as f64).powf(0.6);
+        log_sd += gain * (f64::from(u8::from(accepted)) - ADAPT_TARGET);
+    }
+
+    // Freeze the proposal SD for the sampling phase.
+    let sd = log_sd.exp();
+    let mut samples = Vec::with_capacity(config.n_samples);
+    let mut accepts = 0usize;
+    for _ in 0..config.n_samples {
+        let prop = (cur + sd * std_normal.sample(&mut rng)).abs();
+        let prop_lp = logpost(prop)?;
+        let accepted = prop_lp >= cur_lp || rng.random::<f64>() < (prop_lp - cur_lp).exp();
+        if accepted {
+            cur = prop;
+            cur_lp = prop_lp;
+            accepts += 1;
+        }
+        samples.push(cur);
+    }
+
+    Ok(ChainOutput { samples, accepts, adapted_sd: sd })
+}
+
+/// Metropolis-Hastings over α against the caller-supplied **full log-posterior** closure
+/// `logpost` (the caller composes `log_likelihood + half_normal_log_prior`, exactly as
+/// [`recover_alpha_with`] does — so grid MAP and MCMC target the identical posterior). The
+/// kernel keeps only parameter-agnostic MH mechanics. Chains run in parallel (each has its
+/// own seeded RNG; `collect` preserves order ⇒ bit-identical to sequential).
+fn mcmc_with<F>(logpost: F, config: &McmcConfig) -> Result<McmcResult, AifError>
+where
+    F: Fn(f64) -> Result<f64, AifError> + Sync,
+{
+    let outputs: Vec<ChainOutput> = (0..config.n_chains)
+        .into_par_iter()
+        .map(|chain_idx| run_chain(chain_idx, config, &logpost))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut chains: Vec<Vec<f64>> = Vec::with_capacity(config.n_chains);
+    let mut accepts = 0usize;
+    let mut sd_sum = 0.0;
+    for o in outputs {
+        accepts += o.accepts;
+        sd_sum += o.adapted_sd;
+        chains.push(o.samples);
+    }
+
+    let mut pooled = Vec::with_capacity(config.n_chains * config.n_samples);
+    for c in &chains {
+        pooled.extend_from_slice(c);
+    }
+    let median = crate::stats::median(pooled);
+
+    // Acceptance over the sampling phase only (burn-in adaptation excluded).
+    let denom = (config.n_chains * config.n_samples) as f64;
+    Ok(McmcResult {
+        median,
+        r_hat: gelman_rubin(&chains),
+        acceptance_rate: accepts as f64 / denom,
+        adapted_sd: sd_sum / config.n_chains as f64,
+        chains,
+    })
+}
+
+/// Recover α from behaviour by **Metropolis-Hastings** (extension 1 / #25), returning the
+/// full posterior summary. The point estimate is the posterior median (the paper's
+/// choice), which — unlike the grid point-MAP [`recover_alpha`] — reproduces the
+/// degenerate-region (α > 1) posterior-median clustering the likelihood alone cannot pin.
+/// Check [`McmcResult::converged`] before trusting the median.
+///
+/// Scores the **fixed-A** likelihood plus the paper's half-normal(0, 4) prior — the same
+/// [`half_normal_log_prior`] objective the grid MAP maximizes.
+#[allow(clippy::missing_errors_doc)]
+pub fn recover_alpha_mcmc(
+    data: &TrialData,
+    n_bandits: usize,
+    observation_probs: &[f64],
+    preferences: &[f64],
+    config: &McmcConfig,
+) -> Result<McmcResult, AifError> {
+    mcmc_with(
+        |alpha| {
+            Ok(log_likelihood(data, alpha, n_bandits, observation_probs, preferences)?
+                + half_normal_log_prior(alpha))
+        },
+        config,
+    )
+}
+
+/// A-learning counterpart of [`recover_alpha_mcmc`]: scores [`log_likelihood_learning`]
+/// plus the same half-normal prior, so the replay relearns A during each evaluation.
+/// `initial_precision` must have length `n_bandits`.
+#[allow(clippy::missing_errors_doc)]
+pub fn recover_alpha_mcmc_learning(
+    data: &TrialData,
+    n_bandits: usize,
+    observation_probs: &[f64],
+    preferences: &[f64],
+    initial_precision: &[f64],
+    config: &McmcConfig,
+) -> Result<McmcResult, AifError> {
+    validate_precision_len(initial_precision, n_bandits)?;
+    mcmc_with(
+        |alpha| {
+            Ok(log_likelihood_learning(
+                data,
+                alpha,
+                n_bandits,
+                observation_probs,
+                preferences,
+                initial_precision,
+            )? + half_normal_log_prior(alpha))
+        },
+        config,
+    )
 }
 
 /// Options controlling an experiment-factory run.
@@ -473,11 +760,12 @@ pub fn experiment_certainty_weighted(
 /// Roll out a single seeded [`POMDPAgent`] per `opts` for `n_trials` in a fresh seeded
 /// environment, returning the recorded blanket stream.
 ///
-/// Shared by [`parameter_recovery_single`] and the extension-3 learning-recovery tests so
-/// both drive the identical generating pipeline (build agent → seed → step the env).
-/// `opts.learn_a` builds the agent with `learn_a` + the given pA `initial_precision`
-/// (length-checked against `n_bandits`).
-fn single_agent_data(
+/// Shared by [`parameter_recovery_single`], the extension-3 learning-recovery tests, and
+/// the extension-1 MCMC validation binary so all drive the identical generating pipeline
+/// (build agent → seed → step the env). `opts.learn_a` builds the agent with `learn_a` +
+/// the given pA `initial_precision` (length-checked against `n_bandits`).
+#[allow(clippy::missing_errors_doc)]
+pub fn single_agent_data(
     true_alpha: f64,
     n_trials: usize,
     opts: &ExperimentOpts,
@@ -540,13 +828,17 @@ pub fn substream(master: u64, stream: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-// Substream role indices. Each factory splits its master seed into three independent
-// streams via [`substream`]; these constants name the roles so the mapping lives in
-// exactly one place (factories, `extension11`, and the seeded tests all go through the
-// [`heterogeneity_seed`]/[`group_seed`]/[`env_seed`] accessors below).
+// Substream role indices. A master seed splits into independent role streams via
+// [`substream`]; these constants name the roles so the mapping lives in exactly one place
+// (factories, `extension11`, the MCMC chains, and the seeded tests all go through the
+// [`heterogeneity_seed`]/[`group_seed`]/[`env_seed`]/[`mcmc_base_seed`] accessors below).
 const HETEROGENEITY_STREAM: u64 = 0;
 const GROUP_STREAM: u64 = 1;
 const ENV_STREAM: u64 = 2;
+/// MCMC chain-seed base role. Chain `k` seeds from `substream(mcmc_base_seed(master), k)`
+/// — a **dedicated** role so chain RNGs never coincide with the data-generation streams
+/// (0/1/2) under matched-seed usage (the #25 chain-seed-collision fix).
+const MCMC_STREAM: u64 = 3;
 
 /// Seed for the per-agent heterogeneity draw (Dirichlet α / Beta preferences).
 #[must_use]
@@ -572,6 +864,15 @@ pub fn group_seed(master: u64) -> u64 {
 #[must_use]
 pub fn env_seed(master: u64) -> u64 {
     substream(master, ENV_STREAM)
+}
+
+/// Base seed for the MCMC chains ([`recover_alpha_mcmc`]). Chain `k` then seeds from
+/// `substream(mcmc_base_seed(master), k)`, keeping the chain RNGs clear of the
+/// heterogeneity/group/env streams so a matched `master` never has a chain replay the
+/// action-sampler or environment stream that generated the data.
+#[must_use]
+pub fn mcmc_base_seed(master: u64) -> u64 {
+    substream(master, MCMC_STREAM)
 }
 
 /// Run a seeded cell × rep sweep in parallel, returning per-cell rep results in cell
@@ -925,7 +1226,7 @@ mod tests {
     /// group of ≤199 agents.
     #[test]
     fn substream_streams_are_well_separated() {
-        for &s in &[2026u64, 0xE11_2026, 0xE3_2026, 9001] {
+        for &s in &[2026u64, 0xE11_2026, 0xE3_2026, 0xE1_2026, 9001] {
             let streams: [u64; 4] =
                 [substream(s, 0), substream(s, 1), substream(s, 2), substream(s, 3)];
 
@@ -959,6 +1260,28 @@ mod tests {
                     b.wrapping_add(0x9E37_79B9),
                     "stream {k} collides with the builder group-RNG seed"
                 );
+            }
+
+            // The MCMC chain seeds (substream(mcmc_base_seed(s), k)) must be clear of ALL
+            // role streams and of the builder neighborhood — the #25 chain-seed-collision
+            // guard (a chain must never replay the action-sampler or env stream).
+            assert_eq!(mcmc_base_seed(s), streams[3], "mcmc_base_seed must equal substream(s, 3)");
+            let chain_seeds: Vec<u64> =
+                (0..4).map(|k| substream(mcmc_base_seed(s), k)).collect();
+            for (k, &cs) in chain_seeds.iter().enumerate() {
+                for (r, &role) in streams.iter().enumerate() {
+                    assert_ne!(cs, role, "chain seed {k} collides with role stream {r} for master {s}");
+                }
+                assert!(
+                    !(b..=b.wrapping_add(200)).contains(&cs),
+                    "chain seed {k} = {cs} collides with builder agent-seed neighborhood of b={b}"
+                );
+                assert_ne!(cs, b.wrapping_add(0x9E37_79B9), "chain seed {k} collides with the group-RNG seed");
+                for (j, &other) in chain_seeds.iter().enumerate() {
+                    if j != k {
+                        assert_ne!(cs, other, "chain seeds {k},{j} collide for master {s}");
+                    }
+                }
             }
         }
     }
@@ -1168,5 +1491,112 @@ mod tests {
             matches!(err, Err(AifError::InvalidLength { expected: 3, got: 2 })),
             "recover_alpha_learning should reject a length-2 precision, got {err:?}"
         );
+    }
+
+    // ----- Extension 1 (#25): MCMC α recovery -----
+
+    /// Reduced MH config for the test suite (small chains keep the suite fast). The
+    /// proposal SD adapts during burn-in, so the initial value is not load-bearing here;
+    /// 2 chains × (100 burn-in + 200 samples) keeps the 5 MCMC tests well under budget.
+    /// Retune only alongside the binary, per the regeneration protocol.
+    fn test_mcmc_config(seed: u64) -> McmcConfig {
+        McmcConfig::new(seed)
+            .with_chains(2)
+            .with_burn_in(100)
+            .with_samples(200)
+    }
+
+    /// Same config ⇒ bit-identical posterior (samples + median); a different seed diverges.
+    #[test]
+    fn test_mcmc_deterministic() -> Result<(), AifError> {
+        let data = single_agent_data(0.5, 60, &ExperimentOpts::new(1234))?;
+        let a = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &test_mcmc_config(77))?;
+        let b = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &test_mcmc_config(77))?;
+        assert_eq!(a.median, b.median, "same config must reproduce the median");
+        assert_eq!(a.chains, b.chains, "same config must reproduce every sample");
+
+        let c = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &test_mcmc_config(99))?;
+        assert!(a.chains != c.chains, "a different seed should produce different samples");
+        Ok(())
+    }
+
+    /// Identifiable region (true α = 0.5): posterior median lands near the truth and the
+    /// chains converge (`R_HAT_THRESHOLD`). At the fixed seed the median is ≈ 0.50
+    /// (R-hat ≈ 1.01).
+    #[test]
+    fn test_mcmc_identifiable_region_recovers() -> Result<(), AifError> {
+        const SEED: u64 = 20250101;
+        let data = single_agent_data(0.5, 150, &ExperimentOpts::new(SEED))?;
+        let r = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &test_mcmc_config(SEED))?;
+        println!("identifiable α=0.5: median={:.3}, r_hat={:.3}", r.median, r.r_hat);
+        assert!(
+            (r.median - 0.5).abs() <= 0.3,
+            "MCMC median should land near true α=0.5, got {:.3}",
+            r.median
+        );
+        assert!(r.converged(), "chains should converge (R-hat < {R_HAT_THRESHOLD}), got {:.3}", r.r_hat);
+        Ok(())
+    }
+
+    /// Degenerate region (true α = 3.0): the likelihood flattens, so the posterior median
+    /// is prior-driven and sits WELL above the identifiable band — and materially above the
+    /// grid point-MAP, which just saturates. Conservative floors (verified at this
+    /// seed/reduced config: MCMC median ≈ 2.84, grid MAP ≈ 1.27).
+    #[test]
+    fn test_mcmc_degenerate_region_exceeds_grid_map() -> Result<(), AifError> {
+        const SEED: u64 = 20250102;
+        let data = single_agent_data(3.0, 150, &ExperimentOpts::new(SEED))?;
+        let grid = recover_alpha(&data, 3, &BANDIT_PROBS, &PREFERENCES)?;
+        let mcmc = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &test_mcmc_config(SEED))?;
+        println!(
+            "degenerate α=3.0: grid MAP={:.3}, MCMC median={:.3}",
+            grid.estimated_alpha, mcmc.median
+        );
+        assert!(
+            mcmc.median > 1.0,
+            "degenerate MCMC median should sit well above the identifiable band, got {:.3}",
+            mcmc.median
+        );
+        assert!(
+            mcmc.median > grid.estimated_alpha + 0.5,
+            "MCMC median {:.3} should materially exceed the saturated grid MAP {:.3} (the #25 claim)",
+            mcmc.median,
+            grid.estimated_alpha
+        );
+        Ok(())
+    }
+
+    /// The learning MCMC variant rejects a wrong-length precision up front.
+    #[test]
+    fn test_mcmc_learning_wrong_length_rejected() {
+        let data = TrialData::new();
+        let err = recover_alpha_mcmc_learning(
+            &data,
+            3,
+            &BANDIT_PROBS,
+            &PREFERENCES,
+            &[1.0, 1.0],
+            &test_mcmc_config(1),
+        );
+        assert!(
+            matches!(err, Err(AifError::InvalidLength { expected: 3, got: 2 })),
+            "recover_alpha_mcmc_learning should reject a length-2 precision, got {err:?}"
+        );
+    }
+
+    /// R-hat edge cases: a single chain is undefined (NaN, documented), and a
+    /// one-sample-per-chain run is undefined too — neither panics.
+    #[test]
+    fn test_mcmc_rhat_edge_cases() -> Result<(), AifError> {
+        let data = single_agent_data(0.5, 60, &ExperimentOpts::new(5))?;
+        let one_chain = McmcConfig::new(5).with_chains(1).with_burn_in(50).with_samples(200);
+        let r = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &one_chain)?;
+        assert!(r.r_hat.is_nan(), "single-chain R-hat is undefined (NaN), got {:.3}", r.r_hat);
+        assert!(r.median.is_finite(), "median must still be finite with one chain");
+
+        let one_sample = McmcConfig::new(5).with_chains(2).with_burn_in(10).with_samples(1);
+        let r = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &one_sample)?;
+        assert!(r.r_hat.is_nan(), "one-sample-per-chain R-hat is undefined (NaN), got {:.3}", r.r_hat);
+        Ok(())
     }
 }
