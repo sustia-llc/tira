@@ -103,6 +103,21 @@ issue #25 and unblocks Extension 2
 [extension1-mcmc.md](docs/extension1-mcmc.md); run with
 `cargo run --release -p reproduce --bin extension1`.
 
+### Extension 2 — multi-parameter recovery (study, no figure)
+
+Can we recover γ, the A-matrix contents, or the learning rates *jointly* with α? **On this
+MAB a componentwise-scaled diagonal random-walk MH cannot** — the (α, γ) and (α, good-arm p)
+posteriors are strongly anti-correlated ridges (pooled r ≈ −0.72 and −0.82; a sampler-path
+magnitude — sign robust) that this sampler does not mix (R-hat ≫ 1.05), so the marginals are
+not recovered. The non-convergence is structural to the diagonal proposal, not budget;
+**identifiability proper on the MAB stays open** — a ridge-following sampler (covariance-adapted
+/ reparameterized / NUTS, follow-up #30) could recover them or prove non-identifiability. This
+is why the single-α studies fix every other parameter. Learning rates (η, ω) are only weakly
+identifiable; β₀/ψ are analytically excluded (deterministic B ⇒ inert γ/β loop; needs a
+stochastic-B environment). Full tables and the vector-MH details:
+[extension2-multiparam.md](docs/extension2-multiparam.md); run with
+`cargo run --release -p reproduce --bin extension2`.
+
 ## Architecture
 
 ```
@@ -129,12 +144,13 @@ Environment (BanditEnvironment)
 | `crates/aif/src/group.rs` | VotingMode, GroupAgent, VotingAgent (discrete + certainty-weighted), GroupAgentBuilder |
 | `crates/aif/src/coalition.rs` | `competence_efe` + `ObsPrecisionParams` (the coalition-value primitive, opt-in `transition_noise` since 0.6.0), `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory`, `belief_weighted_preference` |
 | `crates/aif/src/communication.rs` | Flume-based inter-agent messaging (for extended scenarios) |
-| `crates/reproduce/src/simulation.rs` | Simulation runner, parameter recovery (grid MAP + half-normal prior: `recover_alpha` / `recover_alpha_learning`; MCMC: `recover_alpha_mcmc[_learning]` + `McmcConfig`/`McmcResult`, extension 1 / #25), 5 experiment factories taking `&ExperimentOpts` (seed + optional A-learning) |
+| `crates/reproduce/src/simulation.rs` | Simulation runner, parameter recovery (grid MAP: `recover_alpha[_learning]`; MCMC: `recover_alpha_mcmc[_learning]`, #25; vector MH `recover_mcmc_vec` + `McmcVecConfig`/`ModelParams`/`log_likelihood_params`, extension 2 / #29), 5 experiment factories taking `&ExperimentOpts` (seed + optional A-learning) |
 | `crates/reproduce/src/plotter.rs` | Plotters-based scatter helpers (pending consolidation with the binary's figure code) |
 | `crates/reproduce/src/bin/reproduce.rs` | Full paper reproduction binary |
 | `crates/reproduce/src/bin/extension11.rs` | Free-energy extensivity study (extension 11) |
 | `crates/reproduce/src/bin/extension3.rs` | Individual A-learning vs group-α recovery study (extension 3) |
 | `crates/reproduce/src/bin/extension1.rs` | MCMC (Metropolis-Hastings) α recovery vs grid MAP (extension 1 / #25) |
+| `crates/reproduce/src/bin/extension2.rs` | Joint multi-parameter recovery: (α,γ)/(α,p)/(η,ω) confound study (extension 2 / #29) |
 
 ## Usage
 
