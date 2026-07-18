@@ -28,21 +28,23 @@ Four paper experiments reproduced (Figures 4-5) plus CW comparison (Figure 6).
 Now a **Cargo workspace** (`crates/aif` engine + `crates/reproduce` harness) serving as
 the reference active-inference engine for the koalisi coalition runtime, which consumes
 the coalition-value primitive `competence_efe` and, since koalisi's K4-v3 arm, builds a
-multi-modality `GenerativeModel` directly (koalisi pins git tag `aif-v0.9.0`; the
-current release is `aif-v0.11.0` — 0.10.0 features (#10 seed API, #21 B-novelty,
-#3/#6 hardening), read-only generative-model accessors (0.10.1), and direct
-Dirichlet-count injection (`initial_pa`/`initial_pb`, 0.11.0) —
-which unblocks the koalisi #44 persistent→query handoff (structured learned counts
-now transferable to fresh query agents). **The canonical-AIF
-parity roadmap is complete**: #12 (multi-factor,
+multi-modality `GenerativeModel` directly (koalisi pins git tag `aif-v0.11.0`, the
+current release — 0.10.0 (#10 seed API, #21 B-novelty, #3/#6 hardening), 0.10.1
+(read-only generative-model accessors), 0.11.0 (direct Dirichlet-count injection
+`initial_pa`/`initial_pb`) — the three releases cut 2026-07-17 for koalisi's
+persistent→query handoff (structured learned counts transferable to fresh query
+agents). **The canonical-AIF parity roadmap is complete**: #12 (multi-factor,
 multi-modality, injectable B via `GenerativeModel`/`from_model`), #15 (opt-in marginal
 message passing), #16 (surfaced F), #13 (full pA/pB/pD/pE learning with η/ω, novelty
 EFE term, parameter free energies) + the #4 group-learning wiring fix, and #14 (opt-in
-γ/β precision dynamics, per-policy future-τ MMP windows). Downstream K4-v3 rematch
-(koalisi #43, closed): the pre-registered multimodal arm proved *decision-equivalent*
-to the scalar `competence_efe` bridge — G affine in covered-bit count under binary
-coverage + deterministic B — verdict `FALSIFIED (multimodality)`; a live-info-gain
-persistent-agent v4 is parked as koalisi #44).
+γ/β precision dynamics, per-policy future-τ MMP windows). Downstream K4 verdicts:
+v3 (koalisi #43) `FALSIFIED (multimodality)` — decision-equivalence theorem; v4
+(koalisi #44) `FALSIFIED (persistence)` — the full E1+E2+B-novelty stack lost on
+performance while genuinely escaping the v3 theorem (act divergence 30/30); v5
+(koalisi #53) **`VALIDATED (gap closed)`** — the E1-only configuration (persistent
+learned per-bit precisions + novelty at fixed γ, no precision dynamics) beat the
+magnitude arm 0.4406 vs 0.2720 out-of-sample, the first arm to do so; arm choice is
+now koalisi #54 (cost-quality tradeoff)).
 
 - **149 tests** (148 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
 - `cargo run --release -p reproduce --bin reproduce` — full reproduction in ~30s
