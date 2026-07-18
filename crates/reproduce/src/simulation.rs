@@ -1,5 +1,6 @@
-use aif::{Agent, GroupAgent, GroupAgentBuilder, AifError, POMDPAgent};
+use aif::{Agent, AgentParams, GenerativeModel, GroupAgent, GroupAgentBuilder, AifError, POMDPAgent};
 use crate::{BanditEnvironment, Environment};
+use nalgebra::DMatrix;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use rand_distr::multi::Dirichlet;
@@ -113,16 +114,7 @@ pub fn log_likelihood(
         alpha,
         false,
     )?;
-
-    let mut ll = 0.0;
-    for i in 0..data.len() {
-        let obs = if i == 0 { 0 } else { data.observations[i - 1] };
-        let action_probs = model.action_probabilities(obs);
-        let p = action_probs[data.actions[i]].max(1e-15);
-        ll += p.ln();
-        model.record_action(data.actions[i]);
-    }
-    Ok(ll)
+    Ok(score_replay(&mut model, data))
 }
 
 /// Log-likelihood of an observed sequence under an **A-learning** POMDP model.
@@ -154,30 +146,30 @@ pub fn log_likelihood_learning(
         alpha,
         true,
     )?;
-
-    let mut ll = 0.0;
-    for i in 0..data.len() {
-        let obs = if i == 0 { 0 } else { data.observations[i - 1] };
-        let action_probs = model.action_probabilities(obs);
-        let p = action_probs[data.actions[i]].max(1e-15);
-        ll += p.ln();
-        model.record_action(data.actions[i]);
-    }
-    Ok(ll)
+    Ok(score_replay(&mut model, data))
 }
 
 /// Standard deviation of the paper's half-normal α prior. Single-sourced: used by
-/// [`half_normal_log_prior`] AND as the MCMC chains' overdispersed-init spread.
-const PRIOR_SD: f64 = 4.0;
+/// [`half_normal_log_prior`], the scalar MCMC chains' overdispersed-init spread, and the
+/// study binaries' α priors/init spreads.
+pub const PRIOR_SD: f64 = 4.0;
 
-/// The paper's half-normal(0, SD=4) log-prior on α, up to an additive constant.
-///
-/// This is the shared *objective component* of the recovery target: the grid-search MAP
-/// and the MCMC sampler both add it to the log-likelihood, so both target the identical
-/// posterior. Callers compose it explicitly (`log_likelihood(..) + half_normal_log_prior`).
+/// Half-normal(0, `sd`) log-prior on a non-negative parameter, up to an additive
+/// constant. The shared prior-objective component: recovery targets are
+/// `log_likelihood + Σ half_normal_log_prior_sd`. Exposed so multi-parameter callers
+/// (extension 2) can give each dimension a scale-appropriate prior without duplicating
+/// the form (e.g. α at SD 4, γ at SD 32).
+#[must_use]
+pub fn half_normal_log_prior_sd(x: f64, sd: f64) -> f64 {
+    -(x * x) / (2.0 * sd * sd)
+}
+
+/// The paper's half-normal(0, SD=4) log-prior on α (`half_normal_log_prior_sd` at
+/// [`PRIOR_SD`]). Grid MAP and MCMC both add it to the log-likelihood, so both target the
+/// identical posterior.
 #[must_use]
 fn half_normal_log_prior(alpha: f64) -> f64 {
-    -(alpha * alpha) / (2.0 * PRIOR_SD * PRIOR_SD)
+    half_normal_log_prior_sd(alpha, PRIOR_SD)
 }
 
 /// Grid-search MAP over α ∈ [0, 5] (step 0.01) under [`half_normal_log_prior`], scoring
@@ -411,116 +403,330 @@ fn gelman_rubin(chains: &[Vec<f64>]) -> f64 {
     (var_hat / w).sqrt()
 }
 
-/// One chain's outputs: post-burn-in samples, sampling-phase accept count, and the
-/// frozen (post-adaptation) proposal SD.
-struct ChainOutput {
-    samples: Vec<f64>,
-    accepts: usize,
-    adapted_sd: f64,
+// ---------------------------------------------------------------------------
+// Vector MH kernel (extension 2 / #29) — the scalar path (extension 1 / #25) is dim-1
+// ---------------------------------------------------------------------------
+
+/// Reflect `x` into `[lo, hi]` (`hi` may be `+∞`). Reflection is symmetric, so a
+/// Gaussian random-walk proposal folded through it stays symmetric and plain MH
+/// acceptance needs no Hastings correction.
+///
+/// For `hi = +∞` this is a single lower barrier `lo + |x − lo|` (⇒ `|x|` when `lo = 0`,
+/// the extension-1 scalar convention). For finite `[lo, hi]` it is an O(1) triangle-wave
+/// fold, correct for any proposal magnitude.
+#[must_use]
+fn reflect(x: f64, lo: f64, hi: f64) -> f64 {
+    if !hi.is_finite() {
+        return lo + (x - lo).abs();
+    }
+    let range = hi - lo;
+    let period = 2.0 * range;
+    let mut t = (x - lo).rem_euclid(period);
+    if t > range {
+        t = period - t;
+    }
+    lo + t
 }
 
-/// Run a single MH chain. During burn-in the proposal SD adapts by Robbins-Monro toward
-/// [`ADAPT_TARGET`] acceptance (diminishing gain `1/(i+1)^0.6` on `log(sd)`), then
-/// **freezes** — so the sampling phase is plain, unadapted MH with detailed balance
-/// intact. Proposal is a Gaussian random walk **reflected at 0** (`α' = |α + N(0, σ)|`);
-/// reflection keeps the proposal symmetric (the normal density is even ⇒ folded densities
-/// match), so acceptance is `min(1, exp(Δlogpost))` with no Hastings correction. Init is
-/// an overdispersed `|N(0, PRIOR_SD)|` draw; the current log-posterior is cached (one eval
-/// per iteration).
-fn run_chain<F>(chain_idx: usize, config: &McmcConfig, logpost: &F) -> Result<ChainOutput, AifError>
+/// One recovered dimension of a [`McmcVecConfig`] sweep.
+///
+/// **Epsilon-lo contract**: the kernel *propagates* a likelihood `Err` (it does not
+/// reject-and-resample), so a dimension whose likelihood rejects a boundary value must
+/// keep that value out of reach with an epsilon-inset bound — e.g. a probability that must
+/// stay in `(0, 1)` uses `lo = 0.01, hi = 0.99`, and a strictly-positive rate uses
+/// `lo = 0.01`. Bounds where the likelihood is defined *at* the boundary (α, γ) may use
+/// `lo = 0.0`. `hi = f64::INFINITY` is the only permitted infinite bound; `lo`, `initial_sd`,
+/// and `init_spread` must be finite and positive (validated by [`McmcVecConfig::new`]).
+#[derive(Debug, Clone, Copy)]
+pub struct McmcDim {
+    /// Initial proposal SD for this dimension. Adapted by a **jointly-scaled** (not
+    /// per-dimension) global factor during burn-in — the σ *ratios* between dimensions
+    /// stay frozen at these initial values (see [`recover_mcmc_vec`]).
+    pub initial_sd: f64,
+    /// Reflective lower bound (finite).
+    pub lo: f64,
+    /// Reflective upper bound (finite or `f64::INFINITY`).
+    pub hi: f64,
+    /// Overdispersed-init spread: init = `reflect(N(0, init_spread), lo, hi)`.
+    pub init_spread: f64,
+}
+
+/// Configuration for the vector Metropolis-Hastings recovery ([`recover_mcmc_vec`]).
+///
+/// Seed is **mandatory** (post-#2); chain `k` seeds from the dedicated MCMC role
+/// `substream(mcmc_base_seed(seed), k)`. `dims` gives one [`McmcDim`] per recovered
+/// parameter (its length is the θ dimensionality the caller's log-posterior must accept).
+/// `#[non_exhaustive]`; build with [`new`](Self::new) + the `with_*` setters.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct McmcVecConfig {
+    pub seed: u64,
+    pub n_chains: usize,
+    pub n_samples: usize,
+    pub burn_in: usize,
+    pub dims: Vec<McmcDim>,
+}
+
+impl McmcVecConfig {
+    /// New config over `dims` (mandatory seed; defaults 4 chains, 2000 samples, 500
+    /// burn-in). Rejects empty `dims`, `lo ≥ hi`, or non-positive `initial_sd`.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn new(seed: u64, dims: Vec<McmcDim>) -> Result<Self, AifError> {
+        if dims.is_empty() {
+            return Err(AifError::InvalidLength { expected: 1, got: 0 });
+        }
+        for d in &dims {
+            // `hi` may be +∞; everything else must be finite and positive. `lo.is_finite()`
+            // + `lo < hi` also rejects a NaN/-∞ `hi` (nothing is `> NaN`, `< -∞`).
+            let valid = d.lo.is_finite()
+                && d.lo < d.hi
+                && d.initial_sd.is_finite()
+                && d.initial_sd > 0.0
+                && d.init_spread.is_finite()
+                && d.init_spread > 0.0;
+            if !valid {
+                return Err(AifError::InvalidDistribution(
+                    "McmcDim requires finite lo < hi (hi may be +∞) and finite positive initial_sd/init_spread"
+                        .to_owned(),
+                ));
+            }
+        }
+        Ok(Self { seed, n_chains: 4, n_samples: 2000, burn_in: 500, dims })
+    }
+
+    #[must_use]
+    pub fn with_chains(mut self, n_chains: usize) -> Self {
+        self.n_chains = n_chains;
+        self
+    }
+
+    #[must_use]
+    pub fn with_samples(mut self, n_samples: usize) -> Self {
+        self.n_samples = n_samples;
+        self
+    }
+
+    #[must_use]
+    pub fn with_burn_in(mut self, burn_in: usize) -> Self {
+        self.burn_in = burn_in;
+        self
+    }
+}
+
+/// Posterior summary for one recovered dimension.
+#[derive(Debug, Clone, Copy)]
+pub struct DimResult {
+    pub median: f64,
+    pub r_hat: f64,
+    pub adapted_sd: f64,
+}
+
+/// Result of a [`recover_mcmc_vec`] run.
+#[derive(Debug, Clone)]
+pub struct McmcVecResult {
+    /// Per-dimension summaries (same order as [`McmcVecConfig::dims`]).
+    pub dims: Vec<DimResult>,
+    /// Joint (whole-vector) acceptance rate over the sampling phase.
+    pub acceptance_rate: f64,
+    /// Post-burn-in samples: `chains[c][s]` is the θ-vector at sample `s` of chain `c`.
+    pub chains: Vec<Vec<Vec<f64>>>,
+}
+
+impl McmcVecResult {
+    /// All dimensions mixed: `r_hat < R_HAT_THRESHOLD` for every dimension.
+    #[must_use]
+    pub fn converged(&self) -> bool {
+        self.dims.iter().all(|d| d.r_hat < R_HAT_THRESHOLD)
+    }
+
+    /// Pearson correlation between the pooled post-burn-in draws of dimensions `i` and `j`.
+    /// NaN if fewer than 2 samples or a dimension has zero variance.
+    ///
+    /// **Caveat**: when the chains have NOT [`converged`](Self::converged), this is a
+    /// *sampler-path* statistic (the geometry of stuck chains crawling along a ridge), not
+    /// the posterior correlation. Its **sign and existence** are robust — a strong
+    /// anti-correlation reliably signals a confound — but its **magnitude** is not a
+    /// posterior quantity. Check `converged()` before quoting the magnitude.
+    #[must_use]
+    pub fn correlation(&self, i: usize, j: usize) -> f64 {
+        let xs: Vec<f64> = self.chains.iter().flatten().map(|t| t[i]).collect();
+        let ys: Vec<f64> = self.chains.iter().flatten().map(|t| t[j]).collect();
+        crate::stats::pearson(&xs, &ys)
+    }
+}
+
+/// One vector chain's outputs.
+struct VecChainOutput {
+    samples: Vec<Vec<f64>>,
+    accepts: usize,
+    adapted_sd: Vec<f64>,
+}
+
+/// Run one vector MH chain: a **joint diagonal-Gaussian** random-walk proposal over all
+/// dimensions (each dimension scaled by its own `σ_d` and reflected into its bounds), with
+/// **one** accept/reject per full vector. The proposal is uncorrelated across dimensions
+/// (diagonal covariance ∝ the `initial_sd` ratios).
+///
+/// Adaptation is **jointly-scaled, not per-dimension**: during burn-in a single scalar
+/// Robbins-Monro increment (from the *joint* accept indicator, diminishing gain
+/// `1/(i+1)^0.6`, target [`ADAPT_TARGET`]) is added to **every** dimension's `log(σ_d)`,
+/// so only the global proposal scale adapts — the σ *ratios* stay frozen at the
+/// `initial_sd` ratios. Adaptation freezes at burn-in end; plain MH thereafter (detailed
+/// balance intact). A genuinely per-dimension or covariance-adapted proposal is tracked as
+/// #30. At `dims.len() == 1` this reduces bit-for-bit to the extension-1 scalar chain.
+///
+/// The kernel **propagates** a likelihood `Err` (it does not reject-and-resample) — hence
+/// the epsilon-lo contract on [`McmcDim`].
+///
+/// **RNG draw order is load-bearing** (extension-1 byte-identity is pinned by
+/// `tests::test_recover_alpha_mcmc_dim1_draw_order`): per-dim init in `dims` order, then per
+/// iteration `n` proposal normals in `dims` order followed by a short-circuited accept
+/// uniform. Do not reorder the draws below.
+fn vec_run_chain<F>(
+    chain_idx: usize,
+    config: &McmcVecConfig,
+    logpost: &F,
+) -> Result<VecChainOutput, AifError>
 where
-    F: Fn(f64) -> Result<f64, AifError>,
+    F: Fn(&[f64]) -> Result<f64, AifError>,
 {
     let std_normal =
         Normal::new(0.0_f64, 1.0).map_err(|e| AifError::InvalidDistribution(e.to_string()))?;
     let mut rng = StdRng::seed_from_u64(substream(mcmc_base_seed(config.seed), chain_idx as u64));
+    let n = config.dims.len();
 
-    // Overdispersed init |N(0, PRIOR_SD)| — spread single-sourced with the prior.
-    let mut cur = (PRIOR_SD * std_normal.sample(&mut rng)).abs();
-    let mut cur_lp = logpost(cur)?;
+    let mut cur = vec![0.0_f64; n];
+    for (d, dim) in config.dims.iter().enumerate() {
+        // DRAW ORDER (load-bearing): one init normal per dim, in dims order.
+        cur[d] = reflect(dim.init_spread * std_normal.sample(&mut rng), dim.lo, dim.hi);
+    }
+    let mut cur_lp = logpost(&cur)?;
+    let mut log_sd: Vec<f64> = config.dims.iter().map(|d| d.initial_sd.ln()).collect();
+    let mut prop = vec![0.0_f64; n];
 
-    // Burn-in: adapt log(sd); `proposal_sd` is the initial value.
-    let mut log_sd = config.proposal_sd.ln();
     for i in 0..config.burn_in {
-        let sd = log_sd.exp();
-        let prop = (cur + sd * std_normal.sample(&mut rng)).abs(); // reflect at 0
-        let prop_lp = logpost(prop)?;
+        for (d, dim) in config.dims.iter().enumerate() {
+            // DRAW ORDER (load-bearing): one proposal normal per dim, in dims order.
+            prop[d] = reflect(cur[d] + log_sd[d].exp() * std_normal.sample(&mut rng), dim.lo, dim.hi);
+        }
+        let prop_lp = logpost(&prop)?;
+        // DRAW ORDER (load-bearing): accept uniform is short-circuited — drawn only when
+        // prop_lp < cur_lp. Do not evaluate the uniform unconditionally.
         let accepted = prop_lp >= cur_lp || rng.random::<f64>() < (prop_lp - cur_lp).exp();
         if accepted {
-            cur = prop;
+            cur.copy_from_slice(&prop);
             cur_lp = prop_lp;
         }
-        let gain = 1.0 / ((i + 1) as f64).powf(0.6);
-        log_sd += gain * (f64::from(u8::from(accepted)) - ADAPT_TARGET);
+        // Jointly-scaled: same increment added to every dim ⇒ σ ratios frozen.
+        let adj = 1.0 / ((i + 1) as f64).powf(0.6) * (f64::from(u8::from(accepted)) - ADAPT_TARGET);
+        for s in &mut log_sd {
+            *s += adj;
+        }
     }
 
-    // Freeze the proposal SD for the sampling phase.
-    let sd = log_sd.exp();
+    let sd: Vec<f64> = log_sd.iter().map(|s| s.exp()).collect();
     let mut samples = Vec::with_capacity(config.n_samples);
     let mut accepts = 0usize;
     for _ in 0..config.n_samples {
-        let prop = (cur + sd * std_normal.sample(&mut rng)).abs();
-        let prop_lp = logpost(prop)?;
+        for (d, dim) in config.dims.iter().enumerate() {
+            // DRAW ORDER (load-bearing): one proposal normal per dim, in dims order.
+            prop[d] = reflect(cur[d] + sd[d] * std_normal.sample(&mut rng), dim.lo, dim.hi);
+        }
+        let prop_lp = logpost(&prop)?;
+        // DRAW ORDER (load-bearing): short-circuited accept uniform (see burn-in above).
         let accepted = prop_lp >= cur_lp || rng.random::<f64>() < (prop_lp - cur_lp).exp();
         if accepted {
-            cur = prop;
+            cur.copy_from_slice(&prop);
             cur_lp = prop_lp;
             accepts += 1;
         }
-        samples.push(cur);
+        samples.push(cur.clone());
     }
 
-    Ok(ChainOutput { samples, accepts, adapted_sd: sd })
+    Ok(VecChainOutput { samples, accepts, adapted_sd: sd })
 }
 
-/// Metropolis-Hastings over α against the caller-supplied **full log-posterior** closure
-/// `logpost` (the caller composes `log_likelihood + half_normal_log_prior`, exactly as
-/// [`recover_alpha_with`] does — so grid MAP and MCMC target the identical posterior). The
-/// kernel keeps only parameter-agnostic MH mechanics. Chains run in parallel (each has its
-/// own seeded RNG; `collect` preserves order ⇒ bit-identical to sequential).
-fn mcmc_with<F>(logpost: F, config: &McmcConfig) -> Result<McmcResult, AifError>
+/// Vector Metropolis-Hastings recovery (extension 2 / #29): the parameter-agnostic kernel.
+/// The caller composes the **full log-posterior** closure over the parameter vector
+/// (likelihood + per-dimension priors — e.g. via [`half_normal_log_prior_sd`]), exactly the
+/// #25 seam generalized to θ. Chains run in parallel (each seeded ⇒ order-independent,
+/// bit-identical). The scalar [`recover_alpha_mcmc`] is this at `dims.len() == 1`.
+#[allow(clippy::missing_errors_doc)]
+pub fn recover_mcmc_vec<F>(logpost: F, config: &McmcVecConfig) -> Result<McmcVecResult, AifError>
 where
-    F: Fn(f64) -> Result<f64, AifError> + Sync,
+    F: Fn(&[f64]) -> Result<f64, AifError> + Sync,
 {
-    let outputs: Vec<ChainOutput> = (0..config.n_chains)
+    let outputs: Vec<VecChainOutput> = (0..config.n_chains)
         .into_par_iter()
-        .map(|chain_idx| run_chain(chain_idx, config, &logpost))
+        .map(|chain_idx| vec_run_chain(chain_idx, config, &logpost))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let mut chains: Vec<Vec<f64>> = Vec::with_capacity(config.n_chains);
+    let n_dims = config.dims.len();
+    let mut chains: Vec<Vec<Vec<f64>>> = Vec::with_capacity(config.n_chains);
     let mut accepts = 0usize;
-    let mut sd_sum = 0.0;
+    let mut sd_sum = vec![0.0_f64; n_dims];
     for o in outputs {
         accepts += o.accepts;
-        sd_sum += o.adapted_sd;
+        for (s, &a) in sd_sum.iter_mut().zip(&o.adapted_sd) {
+            *s += a;
+        }
         chains.push(o.samples);
     }
 
-    let mut pooled = Vec::with_capacity(config.n_chains * config.n_samples);
-    for c in &chains {
-        pooled.extend_from_slice(c);
+    let mut dims = Vec::with_capacity(n_dims);
+    for d in 0..n_dims {
+        let per_chain: Vec<Vec<f64>> =
+            chains.iter().map(|c| c.iter().map(|t| t[d]).collect()).collect();
+        let pooled: Vec<f64> = per_chain.concat();
+        dims.push(DimResult {
+            median: crate::stats::median(pooled),
+            r_hat: gelman_rubin(&per_chain),
+            adapted_sd: sd_sum[d] / config.n_chains as f64,
+        });
     }
-    let median = crate::stats::median(pooled);
 
-    // Acceptance over the sampling phase only (burn-in adaptation excluded).
     let denom = (config.n_chains * config.n_samples) as f64;
-    Ok(McmcResult {
-        median,
-        r_hat: gelman_rubin(&chains),
-        acceptance_rate: accepts as f64 / denom,
-        adapted_sd: sd_sum / config.n_chains as f64,
-        chains,
-    })
+    Ok(McmcVecResult { dims, acceptance_rate: accepts as f64 / denom, chains })
 }
 
-/// Recover α from behaviour by **Metropolis-Hastings** (extension 1 / #25), returning the
-/// full posterior summary. The point estimate is the posterior median (the paper's
-/// choice), which — unlike the grid point-MAP [`recover_alpha`] — reproduces the
-/// degenerate-region (α > 1) posterior-median clustering the likelihood alone cannot pin.
-/// Check [`McmcResult::converged`] before trusting the median.
+/// Build the dim-1 [`McmcVecConfig`] the scalar α recovery delegates through. Bounds
+/// `[0, ∞)` and init spread `PRIOR_SD` make the reflection reduce to the extension-1
+/// `abs`, so the dim-1 kernel is bit-identical to the pre-#29 scalar kernel.
+fn scalar_to_vec_config(config: &McmcConfig) -> McmcVecConfig {
+    McmcVecConfig {
+        seed: config.seed,
+        n_chains: config.n_chains,
+        n_samples: config.n_samples,
+        burn_in: config.burn_in,
+        dims: vec![McmcDim {
+            initial_sd: config.proposal_sd,
+            lo: 0.0,
+            hi: f64::INFINITY,
+            init_spread: PRIOR_SD,
+        }],
+    }
+}
+
+/// Collapse a dim-1 [`McmcVecResult`] to the scalar [`McmcResult`].
+fn collapse_scalar(res: McmcVecResult) -> McmcResult {
+    let d = res.dims[0];
+    McmcResult {
+        median: d.median,
+        r_hat: d.r_hat,
+        acceptance_rate: res.acceptance_rate,
+        adapted_sd: d.adapted_sd,
+        chains: res.chains.into_iter().map(|c| c.into_iter().map(|t| t[0]).collect()).collect(),
+    }
+}
+
+/// Recover α by **Metropolis-Hastings** (extension 1 / #25), returning the posterior
+/// summary. The point estimate is the posterior median (the paper's choice), which —
+/// unlike the grid point-MAP [`recover_alpha`] — reproduces the degenerate-region (α > 1)
+/// posterior-median clustering the likelihood alone cannot pin. Check
+/// [`McmcResult::converged`] before trusting the median. Since #29 this is the dim-1 case
+/// of [`recover_mcmc_vec`] (bit-identical to the previous scalar kernel).
 ///
-/// Scores the **fixed-A** likelihood plus the paper's half-normal(0, 4) prior — the same
-/// [`half_normal_log_prior`] objective the grid MAP maximizes.
+/// Scores the **fixed-A** likelihood plus the paper's half-normal(0, 4) prior.
 #[allow(clippy::missing_errors_doc)]
 pub fn recover_alpha_mcmc(
     data: &TrialData,
@@ -529,13 +735,14 @@ pub fn recover_alpha_mcmc(
     preferences: &[f64],
     config: &McmcConfig,
 ) -> Result<McmcResult, AifError> {
-    mcmc_with(
-        |alpha| {
-            Ok(log_likelihood(data, alpha, n_bandits, observation_probs, preferences)?
-                + half_normal_log_prior(alpha))
+    let res = recover_mcmc_vec(
+        |theta| {
+            Ok(log_likelihood(data, theta[0], n_bandits, observation_probs, preferences)?
+                + half_normal_log_prior(theta[0]))
         },
-        config,
-    )
+        &scalar_to_vec_config(config),
+    )?;
+    Ok(collapse_scalar(res))
 }
 
 /// A-learning counterpart of [`recover_alpha_mcmc`]: scores [`log_likelihood_learning`]
@@ -551,19 +758,189 @@ pub fn recover_alpha_mcmc_learning(
     config: &McmcConfig,
 ) -> Result<McmcResult, AifError> {
     validate_precision_len(initial_precision, n_bandits)?;
-    mcmc_with(
-        |alpha| {
+    let res = recover_mcmc_vec(
+        |theta| {
             Ok(log_likelihood_learning(
                 data,
-                alpha,
+                theta[0],
                 n_bandits,
                 observation_probs,
                 preferences,
                 initial_precision,
-            )? + half_normal_log_prior(alpha))
+            )? + half_normal_log_prior(theta[0]))
         },
-        config,
-    )
+        &scalar_to_vec_config(config),
+    )?;
+    Ok(collapse_scalar(res))
+}
+
+// ---------------------------------------------------------------------------
+// Generalized likelihood over a parameter vector (extension 2 / #29)
+// ---------------------------------------------------------------------------
+
+/// The MAB's non-good-arm observation probability (the `[good_arm_p, 0.2, 0.2]` tail).
+const BAD_ARM_PROB: f64 = 0.2;
+
+/// A-learning knobs for the generalized likelihood (extension 2 Q3).
+#[derive(Debug, Clone)]
+pub struct LearningParams {
+    pub eta: f64,
+    pub omega: f64,
+    pub initial_precision: Vec<f64>,
+}
+
+/// Parameter set for the generalized likelihood [`log_likelihood_params`] (extension 2).
+///
+/// Beyond α this exposes γ (the EFE→policy-posterior temperature, applied via
+/// `POMDPAgent::with_params`) and `good_arm_p` (the A-matrix contents — the MAB observation
+/// vector is `[good_arm_p, 0.2, 0.2]`). `learning` opts into A-learning with per-step η/ω
+/// (via `POMDPAgent::from_model` + `AgentParams`).
+///
+/// **Not included: β₀/ψ under `PrecisionDynamics`.** On the paper's deterministic-B MAB
+/// these are *unidentifiable* — deterministic B ⇒ B† uniform ⇒ `F_π` is policy-constant ⇒
+/// the γ/β precision loop is provably inert (test-pinned in aif). Recovering them would
+/// need a stochastic-B environment; out of scope (see `docs/extension2-multiparam.md`).
+#[derive(Debug, Clone)]
+pub struct ModelParams {
+    pub alpha: f64,
+    pub gamma: f64,
+    pub good_arm_p: f64,
+    pub learning: Option<LearningParams>,
+}
+
+impl ModelParams {
+    /// Fixed-A params at `(α, γ, good_arm_p)`.
+    #[must_use]
+    pub fn new(alpha: f64, gamma: f64, good_arm_p: f64) -> Self {
+        Self { alpha, gamma, good_arm_p, learning: None }
+    }
+
+    /// Opt into A-learning with the given η/ω/precision.
+    #[must_use]
+    pub fn with_learning(mut self, learning: LearningParams) -> Self {
+        self.learning = Some(learning);
+        self
+    }
+
+    fn obs_probs(&self) -> Vec<f64> {
+        vec![self.good_arm_p, BAD_ARM_PROB, BAD_ARM_PROB]
+    }
+}
+
+/// Build the standard 3-arm MAB [`GenerativeModel`] for `obs_probs`/`preferences`,
+/// mirroring `POMDPAgent::new`'s construction (A columns `[p, 1−p]`, deterministic B,
+/// C = prefs, uniform D) so a `from_model` agent matches the `new`/`with_params` one.
+fn build_mab_model(obs_probs: &[f64], preferences: &[f64]) -> GenerativeModel {
+    let n = obs_probs.len();
+    let mut a_data = Vec::with_capacity(2 * n);
+    for &p in obs_probs {
+        a_data.push(p);
+        a_data.push(1.0 - p);
+    }
+    let a = DMatrix::from_vec(2, n, a_data);
+    let b: Vec<DMatrix<f64>> = (0..n)
+        .map(|i| {
+            let mut m = DMatrix::zeros(n, n);
+            m.row_mut(i).fill(1.0);
+            m
+        })
+        .collect();
+    GenerativeModel {
+        a: vec![a],
+        b: vec![b],
+        c: vec![preferences.to_vec()],
+        d: vec![vec![1.0 / n as f64; n]],
+    }
+}
+
+/// Replay an (obs, action) sequence through `model`, summing `ln P(action_t | obs_t)`.
+/// Shared inner loop for the parameterized likelihood.
+fn score_replay(model: &mut POMDPAgent, data: &TrialData) -> f64 {
+    let mut ll = 0.0;
+    for i in 0..data.len() {
+        let obs = if i == 0 { 0 } else { data.observations[i - 1] };
+        let action_probs = model.action_probabilities(obs);
+        let p = action_probs[data.actions[i]].max(1e-15);
+        ll += p.ln();
+        model.record_action(data.actions[i]);
+    }
+    ll
+}
+
+/// Build a fresh agent at `params` — fixed-A via `with_params` (α/γ/good-arm p), or
+/// A-learning via `from_model` + `AgentParams` (adds η/ω). Shared by
+/// [`log_likelihood_params`] (recovery) and [`generate_params_data`] (generation) so both
+/// use the identical construction. Learning precision is length-checked against n_bandits.
+/// The preferences `C` are fixed at the paper's [`PREFERENCES`] (only α/γ/p/η/ω vary).
+fn build_params_agent(params: &ModelParams) -> Result<POMDPAgent, AifError> {
+    let obs_probs = params.obs_probs();
+    let n = obs_probs.len();
+    match &params.learning {
+        None => POMDPAgent::with_params(
+            n,
+            Some(obs_probs),
+            None,
+            PREFERENCES.to_vec(),
+            None,
+            params.alpha,
+            params.gamma,
+            1,
+            false,
+        ),
+        Some(lp) => {
+            validate_precision_len(&lp.initial_precision, n)?;
+            let generative = build_mab_model(&obs_probs, &PREFERENCES);
+            let agent_params = AgentParams {
+                alpha: params.alpha,
+                gamma: params.gamma,
+                learn_a: true,
+                eta: lp.eta,
+                omega: lp.omega,
+                initial_precision: Some(lp.initial_precision.clone()),
+                ..Default::default()
+            };
+            POMDPAgent::from_model(generative, agent_params)
+        }
+    }
+}
+
+/// Generalized log-likelihood over a full [`ModelParams`] (extension 2): builds the agent
+/// at those params, replays `data`, and sums `ln P(action | obs)`.
+///
+/// The single-α [`log_likelihood`] remains the pinned extension-1/3 surface; this is its
+/// multi-parameter generalization.
+#[allow(clippy::missing_errors_doc)]
+pub fn log_likelihood_params(data: &TrialData, params: &ModelParams) -> Result<f64, AifError> {
+    let mut agent = build_params_agent(params)?;
+    Ok(score_replay(&mut agent, data))
+}
+
+/// Generate a single-agent trajectory at `params` (extension 2): the generation
+/// counterpart of [`log_likelihood_params`], building the identical agent, seeding it
+/// ([`group_seed`]) and the standard-MAB environment ([`env_seed`]), and rolling out
+/// `n_trials`. The environment reward probs are always the paper's `BANDIT_PROBS` (the
+/// agent's `good_arm_p` only sets its *own* observation model / A matrix).
+#[allow(clippy::missing_errors_doc)]
+pub fn generate_params_data(
+    params: &ModelParams,
+    n_trials: usize,
+    seed: u64,
+) -> Result<TrialData, AifError> {
+    run_seeded_agent(build_params_agent(params)?, n_trials, seed)
+}
+
+/// Seed a prebuilt agent's action sampler ([`group_seed`]) + a fresh standard-MAB
+/// environment ([`env_seed`]) and roll out `n_trials`. The single source of the
+/// generation seeding pipeline, shared by [`single_agent_data`] and
+/// [`generate_params_data`] so their RNG streams are byte-identical for a given seed.
+fn run_seeded_agent(
+    mut agent: POMDPAgent,
+    n_trials: usize,
+    seed: u64,
+) -> Result<TrialData, AifError> {
+    agent.reseed(group_seed(seed));
+    let mut env = make_env(seed)?;
+    run_single_simulation(&mut agent, &mut env, n_trials)
 }
 
 /// Options controlling an experiment-factory run.
@@ -773,7 +1150,7 @@ pub fn single_agent_data(
     if let Some(precision) = &opts.learn_a {
         validate_precision_len(precision, BANDIT_PROBS.len())?;
     }
-    let mut agent = POMDPAgent::new(
+    let agent = POMDPAgent::new(
         3,
         Some(BANDIT_PROBS.to_vec()),
         opts.learn_a.clone(),
@@ -782,9 +1159,7 @@ pub fn single_agent_data(
         true_alpha,
         opts.learn_a.is_some(),
     )?;
-    agent.reseed(group_seed(opts.seed));
-    let mut env = make_env(opts.seed)?;
-    run_single_simulation(&mut agent, &mut env, n_trials)
+    run_seeded_agent(agent, n_trials, opts.seed)
 }
 
 /// Single-agent parameter recovery for validation (§3.1 / Figure 4).
@@ -1226,7 +1601,7 @@ mod tests {
     /// group of ≤199 agents.
     #[test]
     fn substream_streams_are_well_separated() {
-        for &s in &[2026u64, 0xE11_2026, 0xE3_2026, 0xE1_2026, 9001] {
+        for &s in &[2026u64, 0xE11_2026, 0xE3_2026, 0xE1_2026, 0xE2_2026, 9001] {
             let streams: [u64; 4] =
                 [substream(s, 0), substream(s, 1), substream(s, 2), substream(s, 3)];
 
@@ -1597,6 +1972,187 @@ mod tests {
         let one_sample = McmcConfig::new(5).with_chains(2).with_burn_in(10).with_samples(1);
         let r = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &one_sample)?;
         assert!(r.r_hat.is_nan(), "one-sample-per-chain R-hat is undefined (NaN), got {:.3}", r.r_hat);
+        Ok(())
+    }
+
+    // ----- Extension 2 (#29): vector MH kernel + generalized likelihood -----
+
+    /// Reduced 2-D config for the test suite.
+    fn test_vec_config(seed: u64, dims: Vec<McmcDim>) -> McmcVecConfig {
+        McmcVecConfig::new(seed, dims)
+            .expect("valid test dims")
+            .with_chains(2)
+            .with_burn_in(100)
+            .with_samples(200)
+    }
+
+    /// The generalized likelihood at (α, γ=16, good-arm p=0.8) reproduces the pinned scalar
+    /// [`log_likelihood`] bit-for-bit — `with_params(α, 16)` builds the same agent as `new(α)`.
+    #[test]
+    fn test_log_likelihood_params_matches_scalar() -> Result<(), AifError> {
+        let data = single_agent_data(0.5, 120, &ExperimentOpts::new(31))?;
+        for &alpha in &[0.2_f64, 0.7, 1.5] {
+            let generalized = log_likelihood_params(&data, &ModelParams::new(alpha, 16.0, 0.8))?;
+            let scalar = log_likelihood(&data, alpha, 3, &BANDIT_PROBS, &PREFERENCES)?;
+            assert!(
+                (generalized - scalar).abs() < 1e-12,
+                "log_likelihood_params(α={alpha}) {generalized} != scalar {scalar}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The learning generalized likelihood rejects a wrong-length precision; McmcVecConfig
+    /// rejects empty dims and lo ≥ hi.
+    #[test]
+    fn test_ext2_length_and_config_rejections() {
+        let data = TrialData::new();
+        let bad = ModelParams::new(0.5, 16.0, 0.8).with_learning(LearningParams {
+            eta: 1.0,
+            omega: 1.0,
+            initial_precision: vec![1.0, 1.0], // len 2 ≠ 3 bandits
+        });
+        assert!(
+            matches!(log_likelihood_params(&data, &bad), Err(AifError::InvalidLength { expected: 3, got: 2 })),
+            "learning likelihood should reject a length-2 precision"
+        );
+        assert!(
+            matches!(McmcVecConfig::new(1, vec![]), Err(AifError::InvalidLength { .. })),
+            "empty dims should be rejected"
+        );
+        // lo ≥ hi, non-finite lo, non-positive/non-finite init_spread or initial_sd are all
+        // rejected at construction (hi = +∞ is the one permitted infinity).
+        let base = McmcDim { initial_sd: 0.3, lo: 0.0, hi: 1.0, init_spread: 0.3 };
+        for bad in [
+            McmcDim { lo: 1.0, hi: 0.5, ..base },              // lo ≥ hi
+            McmcDim { lo: f64::NEG_INFINITY, ..base },         // non-finite lo
+            McmcDim { hi: f64::NAN, ..base },                  // NaN hi
+            McmcDim { init_spread: 0.0, ..base },              // non-positive init_spread
+            McmcDim { init_spread: f64::INFINITY, ..base },    // non-finite init_spread
+            McmcDim { initial_sd: 0.0, ..base },               // non-positive initial_sd
+        ] {
+            assert!(McmcVecConfig::new(1, vec![bad]).is_err(), "invalid dim {bad:?} should be rejected");
+        }
+        // hi = +∞ is allowed.
+        assert!(McmcVecConfig::new(1, vec![McmcDim { hi: f64::INFINITY, ..base }]).is_ok());
+    }
+
+    /// Same vector config twice ⇒ bit-identical chains; a bounded dimension's samples never
+    /// leave `[lo, hi]`.
+    #[test]
+    fn test_vec_mcmc_deterministic_and_bounded() -> Result<(), AifError> {
+        let data = single_agent_data(0.5, 80, &ExperimentOpts::new(4242))?;
+        // Two dims: α in [0, ∞), and a bounded p in [0.2, 0.9].
+        let dims = vec![
+            McmcDim { initial_sd: 0.4, lo: 0.0, hi: f64::INFINITY, init_spread: 4.0 },
+            McmcDim { initial_sd: 0.1, lo: 0.2, hi: 0.9, init_spread: 0.2 },
+        ];
+        let logpost = |t: &[f64]| -> Result<f64, AifError> {
+            Ok(log_likelihood_params(&data, &ModelParams::new(t[0], 16.0, t[1]))?
+                + half_normal_log_prior_sd(t[0], 4.0))
+        };
+        let a = recover_mcmc_vec(logpost, &test_vec_config(7, dims.clone()))?;
+        let b = recover_mcmc_vec(logpost, &test_vec_config(7, dims.clone()))?;
+        assert_eq!(a.chains, b.chains, "same config must reproduce every sample");
+
+        // Bounded dim (index 1) stays within [0.2, 0.9] for every sample.
+        for chain in &a.chains {
+            for theta in chain {
+                assert!(
+                    (0.2..=0.9).contains(&theta[1]),
+                    "bounded dim escaped [0.2, 0.9]: {}",
+                    theta[1]
+                );
+            }
+        }
+        // A different seed diverges.
+        let c = recover_mcmc_vec(logpost, &test_vec_config(8, dims))?;
+        assert!(a.chains != c.chains, "a different seed should diverge");
+        Ok(())
+    }
+
+    /// 2-D (α, γ) recovery smoke: the joint runs, returns finite per-dim summaries and a
+    /// well-defined α–γ correlation. (Recovery quality is a study finding — the confound
+    /// makes the marginals wander — not a unit invariant, so no near-truth assertion.)
+    #[test]
+    fn test_vec_2d_alpha_gamma_smoke() -> Result<(), AifError> {
+        let data =
+            generate_params_data(&ModelParams::new(0.5, 16.0, 0.8), 120, 20250201)?;
+        let dims = vec![
+            McmcDim { initial_sd: 0.5, lo: 0.0, hi: f64::INFINITY, init_spread: 4.0 },
+            McmcDim { initial_sd: 4.0, lo: 0.0, hi: f64::INFINITY, init_spread: 32.0 },
+        ];
+        let res = recover_mcmc_vec(
+            |t| {
+                Ok(log_likelihood_params(&data, &ModelParams::new(t[0], t[1], 0.8))?
+                    + half_normal_log_prior_sd(t[0], 4.0)
+                    + half_normal_log_prior_sd(t[1], 32.0))
+            },
+            &test_vec_config(20250201, dims),
+        )?;
+        assert_eq!(res.dims.len(), 2);
+        assert!(res.dims.iter().all(|d| d.median.is_finite()), "medians must be finite");
+        assert!(res.correlation(0, 1).is_finite(), "α–γ correlation must be finite");
+        // converged() is just the per-dim R-hat gate — computable without panic.
+        let _ = res.converged();
+        Ok(())
+    }
+
+    /// The generalized likelihood on the A-learning path with η = ω = 1 reproduces the
+    /// pinned scalar [`log_likelihood_learning`] bit-for-bit — which also indirectly pins
+    /// `build_mab_model` + `from_model` against `POMDPAgent::new` (both must build the
+    /// identical MAB agent).
+    #[test]
+    fn test_log_likelihood_params_learning_matches_scalar() -> Result<(), AifError> {
+        let prec = vec![1.0, 1.0, 1.0];
+        let data = single_agent_data(0.5, 120, &ExperimentOpts::new(51).with_learn_a(prec.clone()))?;
+        for &alpha in &[0.3_f64, 0.8] {
+            let generalized = log_likelihood_params(
+                &data,
+                &ModelParams::new(alpha, 16.0, 0.8).with_learning(LearningParams {
+                    eta: 1.0,
+                    omega: 1.0,
+                    initial_precision: prec.clone(),
+                }),
+            )?;
+            let scalar = log_likelihood_learning(&data, alpha, 3, &BANDIT_PROBS, &PREFERENCES, &prec)?;
+            assert!(
+                (generalized - scalar).abs() < 1e-12,
+                "params-learning(α={alpha}) {generalized} != scalar {scalar}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Load-bearing RNG-draw-order pin for the scalar dim-1 path (guards extension-1
+    /// byte-identity). The invariant is the draw sequence in `vec_run_chain` (per-dim init in
+    /// dims order; per iteration n proposal normals in dims order then a short-circuited
+    /// accept uniform). This fixes the exact first samples of chain 0 at a known seed/config;
+    /// if it moves, the scalar path's draw order changed — do NOT re-pin without confirming
+    /// `extension1` is still byte-identical.
+    #[test]
+    fn test_recover_alpha_mcmc_dim1_draw_order() -> Result<(), AifError> {
+        let data = single_agent_data(0.5, 60, &ExperimentOpts::new(2024))?;
+        // Config/seed chosen so the chain MOVES within the pinned window — the samples below
+        // contain both accepted proposals (values change) AND a rejected one (sample 5 repeats
+        // sample 4). So the pin depends jointly on the init draw, the per-iter proposal normal,
+        // AND the short-circuited accept uniform: reordering or shifting ANY of those draws
+        // moves at least one value. burn_in = 0 ⇒ the samples are the raw post-init walk.
+        let cfg = McmcConfig::new(0).with_chains(1).with_burn_in(0).with_samples(8).with_proposal_sd(0.5);
+        let r = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &cfg)?;
+        let got: Vec<f64> = r.chains[0].iter().map(|&x| (x * 1e9).round() / 1e9).collect();
+        let want = [
+            6.884148141, 5.607902918, 5.269027445, 6.126933458, 6.343628103, 6.343628103,
+            7.313531378, 7.383831249,
+        ];
+        assert_eq!(got.len(), want.len());
+        // Sanity: the window genuinely mixes accepts and rejects (so a proposal-draw change
+        // would be caught, not masked by all-reject).
+        assert!(got[4] == got[5], "expected a rejected proposal at sample 5 (a stationary step)");
+        assert!(got[0] != got[1] && got[6] != got[7], "expected accepted proposals (moving steps)");
+        for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
+            assert!((g - w).abs() < 1e-9, "dim-1 draw order changed at sample {i}: {g} != {w}");
+        }
         Ok(())
     }
 }

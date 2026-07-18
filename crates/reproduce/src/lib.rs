@@ -13,13 +13,16 @@ mod plotter;
 mod simulation;
 
 pub use simulation::{
-    BANDIT_PROBS, EXT3_INITIAL_PRECISION, ExperimentOpts, McmcConfig, McmcResult, PREFERENCES,
-    R_HAT_THRESHOLD, RecoveryResult, TrialData, env_seed, experiment_certainty_weighted,
-    experiment_deterministic, experiment_identical, experiment_varying_alpha,
-    experiment_varying_preferences, group_seed, heterogeneity_seed, log_likelihood,
-    log_likelihood_learning, mcmc_base_seed, parameter_recovery_single, recover_alpha,
-    recover_alpha_learning, recover_alpha_mcmc, recover_alpha_mcmc_learning, run_group_simulation,
-    run_single_simulation, run_sweep, single_agent_data, substream,
+    BANDIT_PROBS, DimResult, EXT3_INITIAL_PRECISION, ExperimentOpts, LearningParams, McmcConfig,
+    McmcDim, McmcResult, McmcVecConfig, McmcVecResult, ModelParams, PREFERENCES, PRIOR_SD,
+    R_HAT_THRESHOLD,
+    RecoveryResult, TrialData, env_seed, experiment_certainty_weighted, experiment_deterministic,
+    experiment_identical, experiment_varying_alpha, experiment_varying_preferences, group_seed,
+    generate_params_data, half_normal_log_prior_sd, heterogeneity_seed, log_likelihood,
+    log_likelihood_learning, log_likelihood_params, mcmc_base_seed, parameter_recovery_single,
+    recover_alpha,
+    recover_alpha_learning, recover_alpha_mcmc, recover_alpha_mcmc_learning, recover_mcmc_vec,
+    run_group_simulation, run_single_simulation, run_sweep, single_agent_data, substream,
 };
 
 pub use plotter::ScatterPoint;
@@ -56,6 +59,41 @@ pub mod stats {
     pub fn median(mut v: Vec<f64>) -> f64 {
         v.sort_by(f64::total_cmp);
         percentile(&v, 0.5)
+    }
+
+    /// Arithmetic mean; NaN for an empty slice.
+    #[must_use]
+    pub fn mean(v: &[f64]) -> f64 {
+        if v.is_empty() {
+            f64::NAN
+        } else {
+            v.iter().sum::<f64>() / v.len() as f64
+        }
+    }
+
+    /// Pearson correlation of two equal-length samples. NaN for < 2 points or when either
+    /// has zero variance. (Over unconverged MCMC chains this is a sampler-path statistic —
+    /// sign robust, magnitude not a posterior quantity.)
+    #[must_use]
+    pub fn pearson(x: &[f64], y: &[f64]) -> f64 {
+        let n = x.len();
+        if n < 2 {
+            return f64::NAN;
+        }
+        let mx = mean(x);
+        let my = mean(y);
+        let (mut sxy, mut sxx, mut syy) = (0.0, 0.0, 0.0);
+        for (&xi, &yi) in x.iter().zip(y) {
+            let dx = xi - mx;
+            let dy = yi - my;
+            sxy += dx * dy;
+            sxx += dx * dx;
+            syy += dy * dy;
+        }
+        if sxx == 0.0 || syy == 0.0 {
+            return f64::NAN;
+        }
+        sxy / (sxx.sqrt() * syy.sqrt())
     }
 }
 

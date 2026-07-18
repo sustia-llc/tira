@@ -27,7 +27,7 @@
 //!
 //! Run: `cargo run --release -p reproduce --bin extension1`.
 
-use reproduce::stats::median_iqr;
+use reproduce::stats::{mean, median_iqr};
 use reproduce::{
     AifError, BANDIT_PROBS, ExperimentOpts, McmcConfig, PREFERENCES, R_HAT_THRESHOLD,
     recover_alpha, recover_alpha_mcmc, run_sweep, single_agent_data,
@@ -181,11 +181,7 @@ fn print_report(results: &[CellResult]) {
             .filter(|c| is_identifiable(c.true_alpha) == identifiable)
             .map(sel)
             .collect();
-        if xs.is_empty() {
-            f64::NAN
-        } else {
-            xs.iter().sum::<f64>() / xs.len() as f64
-        }
+        mean(&xs)
     };
     let id_grid = region_mean(true, |c| c.grid_map.0);
     let id_mcmc = region_mean(true, |c| c.mcmc_median.0);
