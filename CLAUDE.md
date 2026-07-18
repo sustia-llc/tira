@@ -46,7 +46,7 @@ learned per-bit precisions + novelty at fixed γ, no precision dynamics) beat th
 magnitude arm 0.4406 vs 0.2720 out-of-sample, the first arm to do so; arm choice is
 now koalisi #54 (cost-quality tradeoff)).
 
-- **153 tests** (152 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
+- **155 tests** (154 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
 - `cargo run --release -p reproduce --bin reproduce` — full reproduction in ~30s
 
 ## Module map
@@ -62,7 +62,7 @@ is the paper-reproduction harness and depends on `aif`.
 | `crates/aif/src/communication.rs` | `CommunicationChannel` (flume), `Message`, `MessageContent`, `CommunicatingPOMDPAgent` — used by multi-agent tests, not by the group-agent pipeline |
 | `crates/aif/src/lib.rs` | `AifError` (0.10.0: `InvalidLength { expected, got }` for length/dimension mismatches; `InvalidAction` retained for genuine out-of-range actions/votes), re-exports of the engine + coalition surface |
 | `crates/reproduce/src/lib.rs` | `BanditEnvironment`, `SharedBanditEnvironment` (with `agents_acted` tracking) — both `StdRng`-backed since issue #2: `new()` = entropy, `with_seed(…, seed)` = deterministic, NOT `Clone` (rand 0.10 removed `Clone` from `StdRng`; nothing cloned them) — `Environment`/`MultiAgentEnvironment` traits, re-exports from `aif` + simulation (incl. `substream`/`heterogeneity_seed`/`group_seed`/`env_seed`) |
-| `crates/reproduce/src/simulation.rs` | `run_group_simulation()`, `run_single_simulation()`, `log_likelihood()`, `log_likelihood_learning()` (0.8.0 — replay that relearns A), `recover_alpha()` (grid search, half-normal prior), experiment factories for 5 experiments + `parameter_recovery_single` — all take a trailing `seed: Option<u64>` since issue #2 (`Some` → bit-reproducible via splitmix64 `substream` role streams: 0 = heterogeneity draw, 1 = group builder, 2 = env — pub helpers `heterogeneity_seed`/`group_seed`/`env_seed`; substream is avalanche-mixed because the builder derives internal streams at small offsets of its seed), `dirichlet_alphas(rng)`, `beta_preferences(rng)`; seeded tests incl. bit-reproducibility, anti-collision guard, and the matched-seed best-2-of-3 CW-faithfulness assertion |
+| `crates/reproduce/src/simulation.rs` | `run_group_simulation()`, `run_single_simulation()`, `log_likelihood()`, `log_likelihood_learning()` (0.8.0 — replay that relearns A), `recover_alpha()` + `recover_alpha_learning()` (grid MAP, half-normal prior, shared loop `recover_alpha_with`), experiment factories for 5 experiments + `parameter_recovery_single` — all take a trailing `opts: &ExperimentOpts` (issue #2 + extension 3). `#[non_exhaustive] ExperimentOpts { seed: u64, learn_a: Option<Vec<f64>> }`: **seed is mandatory** — the entropy arm was dropped post-#2 review (a default seed would silently correlate unrelated runs; want fresh draws → generate + log a seed), so there is no `Default` impl. `seed` → bit-reproducible via splitmix64 `substream` role streams (0 = heterogeneity draw, 1 = group builder, 2 = env — pub helpers `heterogeneity_seed`/`group_seed`/`env_seed`; substream is avalanche-mixed because the builder derives internal streams at small offsets of its seed); `learn_a: Some(pA)` ⇒ `learn_a(true).initial_precision(pA)` (extension 3; length-checked vs n_bandits → `InvalidLength`). Ctors `ExperimentOpts::new(seed)` + `.with_learn_a(pA)` setter. Canonical config is now pub — `BANDIT_PROBS`/`PREFERENCES`/`EXT3_INITIAL_PRECISION` and the `stats::{percentile,median_iqr,median}` + `run_sweep` (cell×rep seeded sweep) helpers are shared by both study binaries. `dirichlet_alphas(rng)`, `beta_preferences(rng)`; seeded tests incl. bit-reproducibility, anti-collision guard, matched-seed best-2-of-3 CW-faithfulness, learning-aware recovery/fit-vs-misspec, and precision-length rejection |
 | `crates/reproduce/src/plotter.rs` | `plotters`-based scatter/panel helpers — currently unused by the binary (which carries its own copies); consolidation tracked in issues |
 | `crates/reproduce/src/bin/reproduce.rs` | Full reproduction: parameter recovery (Fig 4) + 4 paper experiments (Fig 5) + CW extension (Fig 6), rayon-parallelized, refactored with `run_experiment()` + `plot_panel()` helpers |
 
@@ -92,10 +92,15 @@ cargo run --release -p reproduce --bin reproduce
 cargo test
 
 # Single experiment from Rust (reproduce crate)
-use reproduce::{experiment_identical, experiment_certainty_weighted};
-// Trailing seed: Some(s) → bit-reproducible run (issue #2), None → entropy.
-let (data, result) = experiment_identical(16, 0.5, 300, Some(2026))?;
-let (data, result) = experiment_certainty_weighted(16, 0.5, 300, Some(2026))?;
+use reproduce::{ExperimentOpts, experiment_identical, experiment_certainty_weighted, recover_alpha_learning};
+// Seed is mandatory (ExperimentOpts::new(seed)); the harness has no entropy arm (post-#2).
+let (data, result) = experiment_identical(16, 0.5, 300, &ExperimentOpts::new(2026))?;
+let (data, result) = experiment_certainty_weighted(16, 0.5, 300, &ExperimentOpts::new(2026))?;
+// Extension 3: A-learning group (weak pA prior). The returned fit is the fixed-A
+// (mis-specified) recovery; recover_alpha_learning is the well-specified one.
+let (data, misspec) = experiment_identical(16, 0.5, 300, &ExperimentOpts::new(2026).with_learn_a(vec![1.0; 3]))?;
+let aware = recover_alpha_learning(&data, 3, &[0.8, 0.2, 0.2], &[0.7, 0.3], &[1.0; 3])?;
+println!("misspec α = {:.3}, aware α = {:.3}", misspec.estimated_alpha, aware.estimated_alpha);
 ```
 
 ## Possible extensions
@@ -118,17 +123,28 @@ Multi-dimensional grid search is expensive; this motivates the MCMC extension ab
 **Where**: Generalize `log_likelihood()` to accept a parameter vector, not just α.
 `POMDPAgent::with_params()` already supports setting γ.
 
-### 3. Parameter learning (temporal dynamics)
-Current agents use fixed A matrices (paper §2.1: "we do not include parameter learning").
-Enable `learn_a: true` in group experiments to study how learning dynamics at the individual
-level affect the group-level generative model over time. The pA concentration parameter
-machinery is already implemented in `POMDPAgent`.
+### 3. Parameter learning (temporal dynamics) ✅ STUDY RUN
+The paper (§2.1) omits parameter learning ("we do not include parameter learning"). Turn
+`learn_a` on for every internal agent and measure how it reshapes the recovered group α.
+Run the study: `cargo run --release -p reproduce --bin extension3` (~10 s; report
+`docs/extension3-learning.md`).
 
-**Where**: engine + group wiring done since 0.8.0 (#13/#4) — `GroupAgentBuilder::initial_precision`
-builds learning groups, the CertaintyWeighted pipeline learns through the learning-aware
-`action_probabilities`, and `log_likelihood_learning` replays learning exactly. Remaining
-work is the *study*: add a `learn_a` parameter to the experiment factories and a
-learning-aware `recover_alpha`, then compare recovery against the fixed-A baselines.
+**Finding**: individual A-learning shifts the recovered group α **sharply downward** and
+that shift dominates every other effect — the fixed-A baseline tracks the true α (and
+saturates at ~1.35 for α=0.9, the paper's Fig-4 degenerate region), while the *same* group
+with learning on recovers α ≈ 0.01–0.30 (mean aware 0.083 vs fixed-A 0.597), falling
+further as n grows (diffuse early A flattens the members' action distributions, so the
+blanket stream reads as a low-precision agent). Mis-specified fixed-A recovery of learning
+data barely biases the *point* estimate (mean `gap = aware − misspec` ≈ +0.010), even
+though the learning-aware model is a strictly better *fit* (higher max log-posterior) — so
+the aware replay is load-bearing for likelihood/model-comparison claims, not for point-α.
+
+**Implemented in**: `ExperimentOpts { seed, learn_a }` (factories take `&ExperimentOpts`;
+`learn_a: Some(initial_precision)` ⇒ `learn_a(true).initial_precision(..)`),
+`recover_alpha_learning()` (grid MAP scoring with `log_likelihood_learning`, sharing the
+grid+prior loop with `recover_alpha` via `recover_alpha_with`), and
+`crates/reproduce/src/bin/extension3.rs` (matched-seed fixed-A vs learning arms, three
+recovered αs per cell). MCMC/interval-level follow-up is #25.
 
 ### 4. Sensory and active agents as POMDP agents
 The paper uses a CopyAgent (sensory) and VotingAgent (active) as simple rule-based

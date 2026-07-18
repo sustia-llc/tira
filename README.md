@@ -77,6 +77,19 @@ low-precision exploration noise. Full tables and mechanism:
 [extension11-extensivity.md](docs/extension11-extensivity.md); run with
 `cargo run --release -p reproduce --bin extension11`.
 
+### Extension 3 — individual A-learning and group-α recovery (study, no figure)
+
+Does turning on individual-level observation-model (`A`) learning change the recovered
+**group** α? **Yes — sharply downward.** The fixed-A baseline tracks the true α, but the
+*same* group with `learn_a` on recovers α ≈ 0.01–0.30 (mean aware 0.083 vs fixed-A 0.597,
+true mean 0.500) and falls further as the group grows — the diffuse early-learning `A`
+flattens each member's action
+distribution, so the blanket stream reads as a low-precision, exploratory agent.
+Mis-specified fixed-A recovery of learning data barely biases the *point* estimate (gap ≈
++0.01) even though the learning-aware model is a strictly better *fit*. Full tables and
+mechanism: [extension3-learning.md](docs/extension3-learning.md); run with
+`cargo run --release -p reproduce --bin extension3`.
+
 ## Architecture
 
 ```
@@ -103,10 +116,11 @@ Environment (BanditEnvironment)
 | `crates/aif/src/group.rs` | VotingMode, GroupAgent, VotingAgent (discrete + certainty-weighted), GroupAgentBuilder |
 | `crates/aif/src/coalition.rs` | `competence_efe` + `ObsPrecisionParams` (the coalition-value primitive, opt-in `transition_noise` since 0.6.0), `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory`, `belief_weighted_preference` |
 | `crates/aif/src/communication.rs` | Flume-based inter-agent messaging (for extended scenarios) |
-| `crates/reproduce/src/simulation.rs` | Simulation runner, parameter recovery (grid search + half-normal prior), 5 experiment factories |
+| `crates/reproduce/src/simulation.rs` | Simulation runner, parameter recovery (grid MAP + half-normal prior: `recover_alpha` / `recover_alpha_learning`), 5 experiment factories taking `&ExperimentOpts` (seed + optional A-learning) |
 | `crates/reproduce/src/plotter.rs` | Plotters-based scatter helpers (pending consolidation with the binary's figure code) |
 | `crates/reproduce/src/bin/reproduce.rs` | Full paper reproduction binary |
 | `crates/reproduce/src/bin/extension11.rs` | Free-energy extensivity study (extension 11) |
+| `crates/reproduce/src/bin/extension3.rs` | Individual A-learning vs group-α recovery study (extension 3) |
 
 ## Usage
 
@@ -156,9 +170,18 @@ let cw_group = GroupAgentBuilder::new(3)
     .certainty_weighted(true)
     .build_identical()?;
 
-// Run simulation and recover group-level α (Some(seed) → bit-reproducible; None → entropy)
-let (data, result) = experiment_identical(16, 0.5, 300, Some(2026))?;
+// Run simulation and recover group-level α.
+// The seed is mandatory — the harness has no entropy arm (post-#2). Want fresh draws?
+// Generate a seed and log it, keeping the run reproducible after the fact.
+let (data, result) = experiment_identical(16, 0.5, 300, &ExperimentOpts::new(2026))?;
 println!("Group α = {:.3}", result.estimated_alpha);
+
+// Extension 3: A-learning group (weak pA prior). The returned fit is the fixed-A
+// (mis-specified) recovery; recover_alpha_learning is the well-specified one.
+let (data, misspec) = experiment_identical(16, 0.5, 300,
+    &ExperimentOpts::new(2026).with_learn_a(vec![1.0; 3]))?;
+let aware = recover_alpha_learning(&data, 3, &[0.8, 0.2, 0.2], &[0.7, 0.3], &[1.0; 3])?;
+println!("misspec α = {:.3}, aware α = {:.3}", misspec.estimated_alpha, aware.estimated_alpha);
 ```
 
 ## Coalition layer (`aif::coalition`)

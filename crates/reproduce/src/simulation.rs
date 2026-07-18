@@ -4,6 +4,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rand_distr::multi::Dirichlet;
 use rand_distr::{Beta, Distribution};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// Recorded blanket states from a group agent simulation.
@@ -165,33 +166,36 @@ pub fn log_likelihood_learning(
     Ok(ll)
 }
 
-/// Recover α from observed behaviour using grid search (MAP estimate).
+/// The paper's half-normal(0, SD=4) log-prior on α, up to an additive constant.
 ///
-/// Evaluates log-likelihood over a grid of α values and returns the one
-/// with the highest posterior (using the paper's half-normal prior:
-/// mean=0, SD=4, truncated to non-negative).
-#[allow(clippy::missing_errors_doc)]
-pub fn recover_alpha(
-    data: &TrialData,
-    n_bandits: usize,
-    observation_probs: &[f64],
-    preferences: &[f64],
-) -> Result<RecoveryResult, AifError> {
-    // Grid starts at 0.0 (paper range [0,1]): α=0 yields uniform action probs,
-    // no division by zero in the likelihood path, so it is a valid candidate.
-    let grid: Vec<f64> = (0..=500).map(|i| i as f64 * 0.01).collect();
-    let prior_sd = 4.0;
+/// This is the shared *objective component* of the recovery target: the grid-search MAP
+/// below adds it to the log-likelihood. The MCMC extension (#25) is expected to consume
+/// the same function so its posterior target matches [`recover_alpha`]'s exactly.
+#[must_use]
+fn half_normal_log_prior(alpha: f64) -> f64 {
+    const PRIOR_SD: f64 = 4.0;
+    -(alpha * alpha) / (2.0 * PRIOR_SD * PRIOR_SD)
+}
 
-    // Default NaN so a degenerate all-NEG_INFINITY posterior surfaces as NaN
-    // rather than masquerading as a real estimate; the first finite posterior
-    // sets best_alpha via the comparison below, so normal runs are unaffected.
+/// Grid-search MAP over α ∈ [0, 5] (step 0.01) under [`half_normal_log_prior`], scoring
+/// each α with the supplied log-likelihood closure. Shared by [`recover_alpha`] (fixed-A
+/// likelihood) and [`recover_alpha_learning`] (A-learning likelihood) so the grid + prior
+/// loop lives in exactly one place.
+///
+/// The grid starts at 0.0 (paper range [0,1]): α=0 yields uniform action probs, no
+/// division by zero in the likelihood path, so it is a valid candidate. `best_alpha`
+/// defaults to NaN so a degenerate all-`NEG_INFINITY` posterior surfaces as NaN rather
+/// than masquerading as a real estimate; the first finite posterior sets it via the
+/// comparison below, so normal runs are unaffected.
+fn recover_alpha_with<F>(mut score: F) -> Result<RecoveryResult, AifError>
+where
+    F: FnMut(f64) -> Result<f64, AifError>,
+{
     let mut best_alpha = f64::NAN;
     let mut best_log_posterior = f64::NEG_INFINITY;
 
-    for &alpha in &grid {
-        let ll = log_likelihood(data, alpha, n_bandits, observation_probs, preferences)?;
-        let log_prior = -(alpha * alpha) / (2.0 * prior_sd * prior_sd);
-        let lp = ll + log_prior;
+    for alpha in (0..=500).map(|i| f64::from(i) * 0.01) {
+        let lp = score(alpha)? + half_normal_log_prior(alpha);
         if lp > best_log_posterior {
             best_log_posterior = lp;
             best_alpha = alpha;
@@ -204,6 +208,70 @@ pub fn recover_alpha(
     })
 }
 
+/// Recover α from observed behaviour using grid search (MAP estimate).
+///
+/// Evaluates the **fixed-A** log-likelihood over a grid of α values and returns the one
+/// with the highest posterior (using the paper's half-normal prior: mean=0, SD=4,
+/// truncated to non-negative).
+#[allow(clippy::missing_errors_doc)]
+pub fn recover_alpha(
+    data: &TrialData,
+    n_bandits: usize,
+    observation_probs: &[f64],
+    preferences: &[f64],
+) -> Result<RecoveryResult, AifError> {
+    recover_alpha_with(|alpha| log_likelihood(data, alpha, n_bandits, observation_probs, preferences))
+}
+
+/// Reject a pA precision vector whose length ≠ `n_bandits` (one Dirichlet concentration
+/// per bandit / joint-state column).
+///
+/// `POMDPAgent::new` silently pads/truncates a mismatched precision vector, so without
+/// this guard a caller would unknowingly run with a *different* prior than the one it
+/// passed. Callers that accept learning precision validate up front and surface
+/// [`AifError::InvalidLength`].
+fn validate_precision_len(precision: &[f64], n_bandits: usize) -> Result<(), AifError> {
+    if precision.len() != n_bandits {
+        return Err(AifError::InvalidLength {
+            expected: n_bandits,
+            got: precision.len(),
+        });
+    }
+    Ok(())
+}
+
+/// Recover α from a learning agent's behaviour (extension 3).
+///
+/// Identical grid + half-normal(0, SD=4) prior to [`recover_alpha`], but each α is
+/// scored with [`log_likelihood_learning`] under the given pA `initial_precision`, so
+/// the replay relearns A exactly as the generating `learn_a` agent did. This is the
+/// *well-specified* recovery for data produced by an A-learning group/agent; scoring
+/// such data with the fixed-A [`recover_alpha`] is the mis-specified alternative
+/// (extension 3 measures the gap between the two).
+///
+/// The learning hyperparameters (η/ω) and `initial_precision` are treated as known and
+/// fixed — only α is recovered. `initial_precision` must have length `n_bandits`.
+#[allow(clippy::missing_errors_doc)]
+pub fn recover_alpha_learning(
+    data: &TrialData,
+    n_bandits: usize,
+    observation_probs: &[f64],
+    preferences: &[f64],
+    initial_precision: &[f64],
+) -> Result<RecoveryResult, AifError> {
+    validate_precision_len(initial_precision, n_bandits)?;
+    recover_alpha_with(|alpha| {
+        log_likelihood_learning(
+            data,
+            alpha,
+            n_bandits,
+            observation_probs,
+            preferences,
+            initial_precision,
+        )
+    })
+}
+
 /// Result of parameter recovery.
 #[derive(Debug, Clone)]
 pub struct RecoveryResult {
@@ -211,34 +279,88 @@ pub struct RecoveryResult {
     pub log_posterior: f64,
 }
 
+/// Options controlling an experiment-factory run.
+///
+/// - `seed`: **mandatory** master seed threading the reproducible RNG streams. Issue #2
+///   eliminated hidden entropy from the harness; the entropy arm is dropped entirely (a
+///   defaultable seed would silently correlate unrelated runs — a footgun flagged in the
+///   #2 review). Want fresh draws? Generate a seed and **log it**, keeping the run
+///   reproducible after the fact.
+/// - `learn_a`: `Some(initial_precision)` builds the group (or single agent) with
+///   `learn_a(true)` and the given per-bandit pA concentration — same semantics as
+///   [`log_likelihood_learning`]'s `initial_precision` — so the internal agents learn A
+///   online (extension 3). `None` ⇒ fixed A. The field is named `learn_a` (not
+///   `learning`) on purpose: only pA / A-learning is exposed here — the engine's wider
+///   surface (`learn_b`/`learn_d`/`learn_e`, η/ω) is not claimed by this harness.
+///
+/// No `Default` impl on purpose (there is no safe default seed). Build with
+/// [`new`](Self::new); add learning with [`with_learn_a`](Self::with_learn_a).
+/// `#[non_exhaustive]` so the study binaries (separate crates) construct only through
+/// the constructor + setter, leaving room for future fields.
+///
+/// Note the factory's *returned* [`RecoveryResult`] is always the fixed-A
+/// [`recover_alpha`] fit regardless of `learn_a`; when `learn_a` is set that fit is
+/// the *mis-specified* recovery of learning data. The *well-specified* recovery is
+/// [`recover_alpha_learning`] with the same `initial_precision`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ExperimentOpts {
+    pub seed: u64,
+    pub learn_a: Option<Vec<f64>>,
+}
+
+impl ExperimentOpts {
+    /// Fixed-A run seeded with `seed` (mandatory — the harness has no entropy arm).
+    #[must_use]
+    pub fn new(seed: u64) -> Self {
+        Self { seed, learn_a: None }
+    }
+
+    /// Opt into A-learning with the given per-bandit pA concentration
+    /// (`initial_precision`, one entry per bandit). Builder-style setter on
+    /// [`new`](Self::new), e.g. `ExperimentOpts::new(seed).with_learn_a(vec![1.0; 3])`.
+    #[must_use]
+    pub fn with_learn_a(mut self, initial_precision: Vec<f64>) -> Self {
+        self.learn_a = Some(initial_precision);
+        self
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Experiment configurations (§2.4)
 // ---------------------------------------------------------------------------
 
-/// Paper's standard MAB setup.
-const BANDIT_PROBS: [f64; 3] = [0.8, 0.2, 0.2];
-const PREFERENCES: [f64; 2] = [0.7, 0.3];
+/// Paper's standard MAB setup. Public so the study binaries share the exact canonical
+/// configuration instead of keeping drifting local copies.
+pub const BANDIT_PROBS: [f64; 3] = [0.8, 0.2, 0.2];
+/// Paper's binary-observation preference `[p(obs1), p(obs2)]`.
+pub const PREFERENCES: [f64; 2] = [0.7, 0.3];
+/// Extension 3's pA initial concentration — a weak prior (⇒ fast A-learning), one entry
+/// per bandit. Shared by the `extension3` binary and the learning-recovery unit tests so
+/// the test config is tied to the study config.
+pub const EXT3_INITIAL_PRECISION: [f64; 3] = [1.0, 1.0, 1.0];
 
 /// Experiment 1: all internal agents share the same α.
 ///
-/// `seed`: `Some(s)` makes the whole run reproducible — [`group_seed`] seeds the group
-/// builder (which internally derives voter = `s₁`, group = `s₁ + 0x9E37_79B9`, internal
-/// agent `i` = `s₁ + 1 + i` from that value) and [`env_seed`] seeds the bandit
-/// environment; `None` draws from entropy (pre-#2 behavior). This experiment has no
-/// heterogeneity draw, so the heterogeneity stream is unused here.
+/// `opts.seed` (mandatory) makes the whole run reproducible — [`group_seed`] seeds the
+/// group builder (which internally derives voter = `s₁`, group = `s₁ + 0x9E37_79B9`,
+/// internal agent `i` = `s₁ + 1 + i` from that value) and [`env_seed`] seeds the bandit
+/// environment. This experiment has no heterogeneity draw, so the heterogeneity stream is
+/// unused here. `opts.learn_a` opts the internal agents into pA A-learning (extension 3);
+/// `None` ⇒ fixed A.
 #[allow(clippy::missing_errors_doc)]
 pub fn experiment_identical(
     n_internal: usize,
     alpha: f64,
     n_trials: usize,
-    seed: Option<u64>,
+    opts: &ExperimentOpts,
 ) -> Result<(TrialData, RecoveryResult), AifError> {
-    let mut group = base_builder(n_internal, seed)
+    let mut group = base_builder(n_internal, opts)?
         .preferences(PREFERENCES.to_vec())
         .alpha(alpha)
         .build_identical()?;
 
-    let mut env = make_env(seed)?;
+    let mut env = make_env(opts.seed)?;
     let data = run_group_simulation(&mut group, &mut env, n_trials)?;
     let result = recover_alpha(&data, 3, &BANDIT_PROBS, &PREFERENCES)?;
     Ok((data, result))
@@ -246,24 +368,23 @@ pub fn experiment_identical(
 
 /// Experiment 2: varying α across agents, Dirichlet-constructed to control mean.
 ///
-/// `seed`: `Some(s)` seeds the per-agent α draw ([`heterogeneity_seed`]), the group
+/// `opts.seed` (mandatory) seeds the per-agent α draw ([`heterogeneity_seed`]), the group
 /// builder ([`group_seed`] — which internally derives voter = `s₁`, group = `s₁ +
-/// 0x9E37_79B9`, internal agent `i` = `s₁ + 1 + i`), and the environment
-/// ([`env_seed`]); `None` uses entropy.
+/// 0x9E37_79B9`, internal agent `i` = `s₁ + 1 + i`), and the environment ([`env_seed`]).
 #[allow(clippy::missing_errors_doc)]
 pub fn experiment_varying_alpha(
     n_internal: usize,
     mean_alpha: f64,
     n_trials: usize,
-    seed: Option<u64>,
+    opts: &ExperimentOpts,
 ) -> Result<(TrialData, RecoveryResult), AifError> {
-    let mut het_rng = heterogeneity_rng(seed);
+    let mut het_rng = heterogeneity_rng(opts.seed);
     let alphas = dirichlet_alphas(n_internal, mean_alpha, &mut het_rng);
-    let mut group = base_builder(n_internal, seed)
+    let mut group = base_builder(n_internal, opts)?
         .preferences(PREFERENCES.to_vec())
         .build_varying_alpha(&alphas)?;
 
-    let mut env = make_env(seed)?;
+    let mut env = make_env(opts.seed)?;
     let data = run_group_simulation(&mut group, &mut env, n_trials)?;
     let result = recover_alpha(&data, 3, &BANDIT_PROBS, &PREFERENCES)?;
     Ok((data, result))
@@ -271,24 +392,24 @@ pub fn experiment_varying_alpha(
 
 /// Experiment 3: deterministic voting with varying α.
 ///
-/// `seed`: `Some(s)` seeds the per-agent α draw ([`heterogeneity_seed`]), the group
+/// `opts.seed` (mandatory) seeds the per-agent α draw ([`heterogeneity_seed`]), the group
 /// builder ([`group_seed`] — voter = `s₁`, group = `s₁ + 0x9E37_79B9`, internal agent
-/// `i` = `s₁ + 1 + i`), and the environment ([`env_seed`]); `None` uses entropy.
+/// `i` = `s₁ + 1 + i`), and the environment ([`env_seed`]).
 #[allow(clippy::missing_errors_doc)]
 pub fn experiment_deterministic(
     n_internal: usize,
     mean_alpha: f64,
     n_trials: usize,
-    seed: Option<u64>,
+    opts: &ExperimentOpts,
 ) -> Result<(TrialData, RecoveryResult), AifError> {
-    let mut het_rng = heterogeneity_rng(seed);
+    let mut het_rng = heterogeneity_rng(opts.seed);
     let alphas = dirichlet_alphas(n_internal, mean_alpha, &mut het_rng);
-    let mut group = base_builder(n_internal, seed)
+    let mut group = base_builder(n_internal, opts)?
         .preferences(PREFERENCES.to_vec())
         .deterministic(true)
         .build_varying_alpha(&alphas)?;
 
-    let mut env = make_env(seed)?;
+    let mut env = make_env(opts.seed)?;
     let data = run_group_simulation(&mut group, &mut env, n_trials)?;
     let result = recover_alpha(&data, 3, &BANDIT_PROBS, &PREFERENCES)?;
     Ok((data, result))
@@ -296,23 +417,23 @@ pub fn experiment_deterministic(
 
 /// Experiment 4: varying preferences across agents, Beta(0.8, 0.8)-distributed.
 ///
-/// `seed`: `Some(s)` seeds the per-agent preference draw ([`heterogeneity_seed`]), the
-/// group builder ([`group_seed`] — voter = `s₁`, group = `s₁ + 0x9E37_79B9`, internal
-/// agent `i` = `s₁ + 1 + i`), and the environment ([`env_seed`]); `None` uses entropy.
+/// `opts.seed` (mandatory) seeds the per-agent preference draw ([`heterogeneity_seed`]),
+/// the group builder ([`group_seed`] — voter = `s₁`, group = `s₁ + 0x9E37_79B9`, internal
+/// agent `i` = `s₁ + 1 + i`), and the environment ([`env_seed`]).
 #[allow(clippy::missing_errors_doc)]
 pub fn experiment_varying_preferences(
     n_internal: usize,
     alpha: f64,
     n_trials: usize,
-    seed: Option<u64>,
+    opts: &ExperimentOpts,
 ) -> Result<(TrialData, RecoveryResult), AifError> {
-    let mut het_rng = heterogeneity_rng(seed);
+    let mut het_rng = heterogeneity_rng(opts.seed);
     let pref_sets = beta_preferences(n_internal, &mut het_rng);
-    let mut group = base_builder(n_internal, seed)
+    let mut group = base_builder(n_internal, opts)?
         .alpha(alpha)
         .build_varying_preferences(&pref_sets)?;
 
-    let mut env = make_env(seed)?;
+    let mut env = make_env(opts.seed)?;
     let data = run_group_simulation(&mut group, &mut env, n_trials)?;
     // Intentional mismatch: data is generated from HETEROGENEOUS per-agent
     // preferences but scored against the CANONICAL `PREFERENCES` constant.
@@ -334,45 +455,64 @@ pub fn experiment_certainty_weighted(
     n_internal: usize,
     mean_alpha: f64,
     n_trials: usize,
-    seed: Option<u64>,
+    opts: &ExperimentOpts,
 ) -> Result<(TrialData, RecoveryResult), AifError> {
-    let mut het_rng = heterogeneity_rng(seed);
+    let mut het_rng = heterogeneity_rng(opts.seed);
     let alphas = dirichlet_alphas(n_internal, mean_alpha, &mut het_rng);
-    let mut group = base_builder(n_internal, seed)
+    let mut group = base_builder(n_internal, opts)?
         .preferences(PREFERENCES.to_vec())
         .certainty_weighted(true)
         .build_varying_alpha(&alphas)?;
 
-    let mut env = make_env(seed)?;
+    let mut env = make_env(opts.seed)?;
     let data = run_group_simulation(&mut group, &mut env, n_trials)?;
     let result = recover_alpha(&data, 3, &BANDIT_PROBS, &PREFERENCES)?;
     Ok((data, result))
 }
 
+/// Roll out a single seeded [`POMDPAgent`] per `opts` for `n_trials` in a fresh seeded
+/// environment, returning the recorded blanket stream.
+///
+/// Shared by [`parameter_recovery_single`] and the extension-3 learning-recovery tests so
+/// both drive the identical generating pipeline (build agent → seed → step the env).
+/// `opts.learn_a` builds the agent with `learn_a` + the given pA `initial_precision`
+/// (length-checked against `n_bandits`).
+fn single_agent_data(
+    true_alpha: f64,
+    n_trials: usize,
+    opts: &ExperimentOpts,
+) -> Result<TrialData, AifError> {
+    if let Some(precision) = &opts.learn_a {
+        validate_precision_len(precision, BANDIT_PROBS.len())?;
+    }
+    let mut agent = POMDPAgent::new(
+        3,
+        Some(BANDIT_PROBS.to_vec()),
+        opts.learn_a.clone(),
+        PREFERENCES.to_vec(),
+        None,
+        true_alpha,
+        opts.learn_a.is_some(),
+    )?;
+    agent.reseed(group_seed(opts.seed));
+    let mut env = make_env(opts.seed)?;
+    run_single_simulation(&mut agent, &mut env, n_trials)
+}
+
 /// Single-agent parameter recovery for validation (§3.1 / Figure 4).
 ///
-/// `seed`: `Some(s)` reseeds the agent's action sampler ([`group_seed`]) and the
-/// environment ([`env_seed`]), making recovery reproducible; `None` uses entropy.
+/// `opts.seed` (mandatory) reseeds the agent's action sampler ([`group_seed`]) and the
+/// environment ([`env_seed`]), making recovery reproducible.
+/// `opts.learn_a`: builds the agent with `learn_a` + the given pA `initial_precision`
+/// (same construction as [`log_likelihood_learning`]'s model); the returned recovery is
+/// still the fixed-A [`recover_alpha`] fit (see [`ExperimentOpts`]).
 #[allow(clippy::missing_errors_doc)]
 pub fn parameter_recovery_single(
     true_alpha: f64,
     n_trials: usize,
-    seed: Option<u64>,
+    opts: &ExperimentOpts,
 ) -> Result<RecoveryResult, AifError> {
-    let mut agent = POMDPAgent::new(
-        3,
-        Some(BANDIT_PROBS.to_vec()),
-        None,
-        PREFERENCES.to_vec(),
-        None,
-        true_alpha,
-        false,
-    )?;
-    if let Some(s) = seed {
-        agent.reseed(group_seed(s));
-    }
-    let mut env = make_env(seed)?;
-    let data = run_single_simulation(&mut agent, &mut env, n_trials)?;
+    let data = single_agent_data(true_alpha, n_trials, opts)?;
     recover_alpha(&data, 3, &BANDIT_PROBS, &PREFERENCES)
 }
 
@@ -434,36 +574,66 @@ pub fn env_seed(master: u64) -> u64 {
     substream(master, ENV_STREAM)
 }
 
+/// Run a seeded cell × rep sweep in parallel, returning per-cell rep results in cell
+/// order. Single-sources the issue-#2 seed-derivation convention shared by the study
+/// binaries: cell `i` gets base `substream(master, i)`, and rep `j` within it runs at
+/// `substream(cell_base, j)`. Because every rep is a pure function of its seed, the
+/// returned values are independent of rayon scheduling — the output is byte-identical
+/// across runs, and identical to the hand-rolled nested loops the binaries used before.
+///
+/// `run(cell, seed)` produces one rep's metrics; the caller aggregates per cell.
+#[allow(clippy::missing_errors_doc)]
+pub fn run_sweep<C, M>(
+    cells: &[C],
+    reps: usize,
+    master: u64,
+    run: impl Fn(&C, u64) -> Result<M, AifError> + Sync,
+) -> Result<Vec<Vec<M>>, AifError>
+where
+    C: Sync,
+    M: Send,
+{
+    cells
+        .par_iter()
+        .enumerate()
+        .map(|(cell_idx, cell)| {
+            let cell_base = substream(master, cell_idx as u64);
+            (0..reps)
+                .into_par_iter()
+                .map(|rep| run(cell, substream(cell_base, rep as u64)))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect()
+}
+
 /// Shared builder prefix for every group factory: 3 bandits, `n_internal` agents, the
-/// standard observation model, and — under `Some(s)` — the group-stream seed wiring
-/// ([`group_seed`]). The caller appends the per-experiment configuration
-/// (`preferences` / `alpha` / `deterministic` / `certainty_weighted`) before building.
-fn base_builder(n_internal: usize, seed: Option<u64>) -> GroupAgentBuilder {
+/// standard observation model, the (mandatory) group-stream seed wiring ([`group_seed`]),
+/// and — when `opts.learn_a` is set — the A-learning wiring
+/// (`learn_a(true).initial_precision(..)`). The caller appends the per-experiment
+/// configuration (`preferences` / `alpha` / `deterministic` / `certainty_weighted`)
+/// before building.
+fn base_builder(n_internal: usize, opts: &ExperimentOpts) -> Result<GroupAgentBuilder, AifError> {
     let mut builder = GroupAgentBuilder::new(3)
         .n_internal(n_internal)
-        .observation_probs(BANDIT_PROBS.to_vec());
-    if let Some(s) = seed {
-        builder = builder.seed(group_seed(s));
+        .observation_probs(BANDIT_PROBS.to_vec())
+        .seed(group_seed(opts.seed));
+    if let Some(precision) = &opts.learn_a {
+        validate_precision_len(precision, BANDIT_PROBS.len())?;
+        builder = builder.learn_a(true).initial_precision(precision.clone());
     }
-    builder
+    Ok(builder)
 }
 
-/// Build a factory's heterogeneity-sampling RNG: seeded on [`heterogeneity_seed`]
-/// under `Some`, drawn from entropy under `None` (preserving the pre-#2 behavior).
-fn heterogeneity_rng(seed: Option<u64>) -> StdRng {
-    match seed {
-        Some(s) => StdRng::seed_from_u64(heterogeneity_seed(s)),
-        None => StdRng::from_rng(&mut rand::rng()),
-    }
+/// Build a factory's heterogeneity-sampling RNG, always seeded on [`heterogeneity_seed`]
+/// of the (mandatory) master seed — the harness has no entropy arm.
+fn heterogeneity_rng(master: u64) -> StdRng {
+    StdRng::seed_from_u64(heterogeneity_seed(master))
 }
 
-/// Build the standard-MAB [`BanditEnvironment`] for a factory: seeded on [`env_seed`]
-/// under `Some`, entropy under `None`.
-fn make_env(seed: Option<u64>) -> Result<BanditEnvironment, AifError> {
-    match seed {
-        Some(s) => BanditEnvironment::with_seed(BANDIT_PROBS.to_vec(), env_seed(s)),
-        None => BanditEnvironment::new(BANDIT_PROBS.to_vec()),
-    }
+/// Build the standard-MAB [`BanditEnvironment`] for a factory, always seeded on
+/// [`env_seed`] of the (mandatory) master seed.
+fn make_env(master: u64) -> Result<BanditEnvironment, AifError> {
+    BanditEnvironment::with_seed(BANDIT_PROBS.to_vec(), env_seed(master))
 }
 
 /// Generate α values from a Dirichlet distribution with controlled mean (§2.4).
@@ -573,7 +743,7 @@ mod tests {
         // decorrelated realizations rather than three views of one lucky stream.
         const SEED: u64 = 20260202;
         for (case_idx, &true_alpha) in [0.2_f64, 0.5].iter().enumerate() {
-            let r = parameter_recovery_single(true_alpha, 300, Some(substream(SEED, case_idx as u64)))?;
+            let r = parameter_recovery_single(true_alpha, 300, &ExperimentOpts::new(substream(SEED, case_idx as u64)))?;
             println!("true α={true_alpha}, recovered α={:.3}", r.estimated_alpha);
             assert!(
                 (r.estimated_alpha - true_alpha).abs() < 0.25,
@@ -586,7 +756,7 @@ mod tests {
         // the paper shows estimates clustering high. Assert it recovers HIGH but is pulled
         // BELOW the true value by identifiability + the half-normal(0, SD=4) prior
         // (prior shrinkage), rather than landing at 1.5. Distinct seed (case index 2).
-        let high = parameter_recovery_single(1.5, 300, Some(substream(SEED, 2)))?;
+        let high = parameter_recovery_single(1.5, 300, &ExperimentOpts::new(substream(SEED, 2)))?;
         println!("true α=1.5 (degenerate), recovered α={:.3}", high.estimated_alpha);
         assert!(
             high.estimated_alpha > 0.8,
@@ -607,7 +777,7 @@ mod tests {
         // 4 internal agents bit-identical to the n=4 group (the builder derives agent i at
         // s₁+1+i), so the two checks would not be independent.
         const SEED: u64 = 20260203;
-        let (data, result) = experiment_identical(4, 0.5, 200, Some(substream(SEED, 0)))?;
+        let (data, result) = experiment_identical(4, 0.5, 200, &ExperimentOpts::new(substream(SEED, 0)))?;
         assert_eq!(data.len(), 200);
         println!(
             "Exp1: n=4, true α=0.5, group α={:.3}",
@@ -618,7 +788,7 @@ mod tests {
         // (group α ≈ individual α). Seeded (issue #2) → a single reproducible run in a
         // band around the true 0.5 (kept modest since exact goldens on sampling code are
         // brittle across rand_distr versions).
-        let (_, r) = experiment_identical(8, 0.5, 250, Some(substream(SEED, 1)))?;
+        let (_, r) = experiment_identical(8, 0.5, 250, &ExperimentOpts::new(substream(SEED, 1)))?;
         assert!(
             (0.25..=0.85).contains(&r.estimated_alpha),
             "Exp1 group α should track the identity near 0.5, got {:.3}",
@@ -629,7 +799,7 @@ mod tests {
 
     #[test]
     fn test_experiment_varying_alpha_runs() -> Result<(), AifError> {
-        let (data, result) = experiment_varying_alpha(8, 0.5, 200, Some(20260204))?;
+        let (data, result) = experiment_varying_alpha(8, 0.5, 200, &ExperimentOpts::new(20260204))?;
         assert_eq!(data.len(), 200);
         println!(
             "Exp2: n=8, mean α=0.5, group α={:.3}",
@@ -640,7 +810,7 @@ mod tests {
 
     #[test]
     fn test_experiment_deterministic_runs() -> Result<(), AifError> {
-        let (data, result) = experiment_deterministic(8, 0.5, 200, Some(20260205))?;
+        let (data, result) = experiment_deterministic(8, 0.5, 200, &ExperimentOpts::new(20260205))?;
         assert_eq!(data.len(), 200);
         println!(
             "Exp3: n=8, mean α=0.5 (det), group α={:.3}",
@@ -651,7 +821,7 @@ mod tests {
 
     #[test]
     fn test_experiment_varying_preferences_runs() -> Result<(), AifError> {
-        let (data, result) = experiment_varying_preferences(8, 0.5, 200, Some(20260206))?;
+        let (data, result) = experiment_varying_preferences(8, 0.5, 200, &ExperimentOpts::new(20260206))?;
         assert_eq!(data.len(), 200);
         println!(
             "Exp4: n=8, α=0.5 (varying prefs), group α={:.3}",
@@ -662,7 +832,7 @@ mod tests {
 
     #[test]
     fn test_experiment_certainty_weighted_runs() -> Result<(), AifError> {
-        let (data, result) = experiment_certainty_weighted(8, 0.5, 200, Some(20260207))?;
+        let (data, result) = experiment_certainty_weighted(8, 0.5, 200, &ExperimentOpts::new(20260207))?;
         assert_eq!(data.len(), 200);
         println!(
             "Exp5-CW: n=8, mean α=0.5 (certainty-weighted), group α={:.3}",
@@ -686,8 +856,8 @@ mod tests {
     /// different seed diverges within the first trials.
     #[test]
     fn test_seeded_runs_are_bit_reproducible() -> Result<(), AifError> {
-        let (d1, r1) = experiment_varying_alpha(8, 0.5, 300, Some(4242))?;
-        let (d2, r2) = experiment_varying_alpha(8, 0.5, 300, Some(4242))?;
+        let (d1, r1) = experiment_varying_alpha(8, 0.5, 300, &ExperimentOpts::new(4242))?;
+        let (d2, r2) = experiment_varying_alpha(8, 0.5, 300, &ExperimentOpts::new(4242))?;
         assert_eq!(d1.observations, d2.observations, "obs stream must match");
         assert_eq!(d1.actions, d2.actions, "action stream must match");
         assert_eq!(
@@ -701,7 +871,7 @@ mod tests {
         // compare a fresh 50-trial run against d1's first 50 rather than running (and
         // discarding the recover_alpha of) a full 300-trial d3. Comparing full unequal
         // runs would risk a vacuous pass, and this catches divergence earlier.
-        let (d3, _) = experiment_varying_alpha(8, 0.5, 50, Some(9001))?;
+        let (d3, _) = experiment_varying_alpha(8, 0.5, 50, &ExperimentOpts::new(9001))?;
         assert!(
             d3.observations[..] != d1.observations[..50] || d3.actions[..] != d1.actions[..50],
             "a different seed should diverge within the first 50 trials"
@@ -727,8 +897,8 @@ mod tests {
 
         let mut wins = 0;
         for &seed in &SEEDS {
-            let (_, prob) = experiment_varying_alpha(N, MEAN_ALPHA, N_TRIALS, Some(seed))?;
-            let (_, cw) = experiment_certainty_weighted(N, MEAN_ALPHA, N_TRIALS, Some(seed))?;
+            let (_, prob) = experiment_varying_alpha(N, MEAN_ALPHA, N_TRIALS, &ExperimentOpts::new(seed))?;
+            let (_, cw) = experiment_certainty_weighted(N, MEAN_ALPHA, N_TRIALS, &ExperimentOpts::new(seed))?;
             let prob_err = (prob.estimated_alpha - MEAN_ALPHA).abs();
             let cw_err = (cw.estimated_alpha - MEAN_ALPHA).abs();
             println!(
@@ -755,7 +925,7 @@ mod tests {
     /// group of ≤199 agents.
     #[test]
     fn substream_streams_are_well_separated() {
-        for &s in &[2026u64, 0xE11_2026, 9001] {
+        for &s in &[2026u64, 0xE11_2026, 0xE3_2026, 9001] {
             let streams: [u64; 4] =
                 [substream(s, 0), substream(s, 1), substream(s, 2), substream(s, 3)];
 
@@ -912,5 +1082,91 @@ mod tests {
             "learning LL must differ from the fixed-A LL: {ll} vs {ll_fixed}"
         );
         Ok(())
+    }
+
+    // ----- Extension 3 (learning-group study): recover_alpha_learning -----
+
+    /// The learning-aware recovery lands near the true α on data a **single** A-learning
+    /// agent actually generated (well-specified recovery). Single-agent is used here
+    /// deliberately: at the GROUP level A-learning drives the recovered α far below the
+    /// true value (~0.07 at n=8, α=0.5) — that shift is a genuine study finding reported
+    /// by the `extension3` binary, not a unit invariant. Seeded; band is modest (grid MAP,
+    /// not MCMC — see #25 — and A drifts during the run). At `SEED`/150 trials the aware
+    /// estimate is ≈ 0.460 (well within the ±0.3 band). Follow the regeneration protocol
+    /// above before retuning the seed, trial count, or band.
+    #[test]
+    fn test_recover_alpha_learning_recovers_true_alpha() -> Result<(), AifError> {
+        const SEED: u64 = 20260301;
+        // Reuse the exact generating pipeline (build seeded learn_a agent → roll out env).
+        let data = single_agent_data(
+            0.5,
+            150,
+            &ExperimentOpts::new(SEED).with_learn_a(EXT3_INITIAL_PRECISION.to_vec()),
+        )?;
+        let aware =
+            recover_alpha_learning(&data, 3, &BANDIT_PROBS, &PREFERENCES, &EXT3_INITIAL_PRECISION)?;
+        println!("single-agent learning-aware recovered α = {:.3}", aware.estimated_alpha);
+        assert!(
+            (aware.estimated_alpha - 0.5).abs() <= 0.3,
+            "learning-aware recovery should land near true α=0.5, got {:.3}",
+            aware.estimated_alpha
+        );
+        Ok(())
+    }
+
+    /// On learning-group data, the learning-aware model fits strictly better than the
+    /// mis-specified fixed-A model — it attains a higher maximum log-posterior. Note the
+    /// aware replay is the well-specified *single-agent surrogate* for the group blanket
+    /// stream, not the literal generative model for n>1 (both candidates are blanket-level
+    /// approximations of the group); all this test claims is "fits strictly better than
+    /// fixed-A". (The factory's returned recovery is the fixed-A / mis-specified fit; see
+    /// [`ExperimentOpts`].) At `SEED`/150 trials the fit margin is ≈ 0.74 nats (strict).
+    #[test]
+    fn test_learning_aware_recovery_fits_better_than_misspecified() -> Result<(), AifError> {
+        const SEED: u64 = 20260302;
+        let (data, misspec) = experiment_identical(
+            8,
+            0.5,
+            150,
+            &ExperimentOpts::new(SEED).with_learn_a(EXT3_INITIAL_PRECISION.to_vec()),
+        )?;
+        let aware =
+            recover_alpha_learning(&data, 3, &BANDIT_PROBS, &PREFERENCES, &EXT3_INITIAL_PRECISION)?;
+        println!(
+            "learning data: aware α={:.3} (lp {:.2}) vs misspec α={:.3} (lp {:.2})",
+            aware.estimated_alpha, aware.log_posterior, misspec.estimated_alpha, misspec.log_posterior
+        );
+        assert!(
+            aware.log_posterior > misspec.log_posterior,
+            "aware log-posterior {:.3} should exceed the mis-specified fixed-A fit {:.3}",
+            aware.log_posterior,
+            misspec.log_posterior
+        );
+        Ok(())
+    }
+
+    /// A learning precision vector whose length ≠ n_bandits is rejected up front with
+    /// `InvalidLength` (rather than silently padded/truncated by `POMDPAgent::new`).
+    #[test]
+    fn test_wrong_length_learning_precision_rejected() {
+        // Group factory path (via base_builder).
+        let err = experiment_identical(4, 0.5, 10, &ExperimentOpts::new(1).with_learn_a(vec![1.0, 1.0]));
+        assert!(
+            matches!(err, Err(AifError::InvalidLength { expected: 3, got: 2 })),
+            "group factory should reject a length-2 precision, got {err:?}"
+        );
+        // Single-agent recovery path (via single_agent_data).
+        let err = parameter_recovery_single(0.5, 10, &ExperimentOpts::new(1).with_learn_a(vec![1.0; 4]));
+        assert!(
+            matches!(err, Err(AifError::InvalidLength { expected: 3, got: 4 })),
+            "parameter_recovery_single should reject a length-4 precision, got {err:?}"
+        );
+        // Learning-aware recovery path (initial_precision arg).
+        let data = TrialData::new();
+        let err = recover_alpha_learning(&data, 3, &BANDIT_PROBS, &PREFERENCES, &[1.0, 1.0]);
+        assert!(
+            matches!(err, Err(AifError::InvalidLength { expected: 3, got: 2 })),
+            "recover_alpha_learning should reject a length-2 precision, got {err:?}"
+        );
     }
 }

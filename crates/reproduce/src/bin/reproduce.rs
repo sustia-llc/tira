@@ -1,7 +1,7 @@
 use reproduce::{
     experiment_certainty_weighted, experiment_deterministic, experiment_identical,
     experiment_varying_alpha, experiment_varying_preferences, parameter_recovery_single, substream,
-    AifError, RecoveryResult, TrialData,
+    AifError, ExperimentOpts, RecoveryResult, TrialData,
 };
 use rayon::prelude::*;
 use std::time::Instant;
@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Seeds are deterministic, so a dropped run is a real failure, not
                     // RNG luck — log it rather than silently thinning the figure. Fuller
                     // fix (propagate instead of drop) tracked in issue #7.
-                    parameter_recovery_single(true_alpha, n_trials, Some(seed))
+                    parameter_recovery_single(true_alpha, n_trials, &ExperimentOpts::new(seed))
                         .inspect_err(|e| eprintln!("fig4 run failed (dropped from figure): {e}"))
                         .ok()
                         .map(|r| (true_alpha, r.estimated_alpha))
@@ -117,7 +117,7 @@ fn run_experiment<F>(
     experiment_fn: F,
 ) -> Vec<(f64, f64, usize)>
 where
-    F: Fn(usize, f64, usize, Option<u64>) -> Result<(TrialData, RecoveryResult), AifError>
+    F: Fn(usize, f64, usize, &ExperimentOpts) -> Result<(TrialData, RecoveryResult), AifError>
         + Sync
         + Send,
 {
@@ -131,10 +131,11 @@ where
                 .par_iter()
                 .enumerate()
                 .filter_map(move |(alpha_idx, &alpha)| {
-                    let seed = cell_seed(base_seed, group_idx, alpha_idx);
-                    // Deterministic seeds ⇒ a dropped cell is a genuine failure, not RNG
-                    // luck; log before thinning the figure. Fuller fix is issue #7.
-                    f(n, alpha, n_trials, Some(seed))
+                    // Fixed-A (learning off) — the figures are the paper's non-learning
+                    // baseline. Deterministic seeds ⇒ a dropped cell is a genuine failure,
+                    // not RNG luck; log before thinning the figure. Fuller fix is issue #7.
+                    let opts = ExperimentOpts::new(cell_seed(base_seed, group_idx, alpha_idx));
+                    f(n, alpha, n_trials, &opts)
                         .inspect_err(|e| {
                             eprintln!("{name}: cell (n={n}, α={alpha:.2}) failed (dropped): {e}");
                         })
