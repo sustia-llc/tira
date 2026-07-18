@@ -39,15 +39,12 @@
 //!
 //! Run: `cargo run --release -p reproduce --bin extension11`.
 
-use rayon::prelude::*;
+use reproduce::stats::{median, median_iqr};
 use reproduce::{
-    Agent, AifError, BanditEnvironment, Environment, GroupAgentBuilder, POMDPAgent, TrialData,
-    VotingMode, env_seed, group_seed, recover_alpha, substream,
+    Agent, AifError, BANDIT_PROBS, BanditEnvironment, Environment, GroupAgentBuilder, PREFERENCES,
+    POMDPAgent, TrialData, VotingMode, env_seed, group_seed, recover_alpha, run_sweep,
 };
 
-/// Paper's standard MAB setup (matches `simulation.rs`).
-const BANDIT_PROBS: [f64; 3] = [0.8, 0.2, 0.2];
-const PREFERENCES: [f64; 2] = [0.7, 0.3];
 const N_TRIALS: usize = 300;
 const REPS: usize = 10;
 /// Master seed; per-cell/per-rep seeds are derived via [`substream`] (issue #2).
@@ -156,32 +153,6 @@ struct CellResult {
     alpha_med: f64,
 }
 
-/// Linear-interpolation percentile of a pre-sorted slice.
-fn percentile(sorted: &[f64], p: f64) -> f64 {
-    match sorted.len() {
-        0 => f64::NAN,
-        1 => sorted[0],
-        n => {
-            let rank = p * (n - 1) as f64;
-            let lo = rank.floor() as usize;
-            let hi = rank.ceil() as usize;
-            let frac = rank - lo as f64;
-            sorted[lo] * (1.0 - frac) + sorted[hi] * frac
-        }
-    }
-}
-
-/// `(median, IQR)` over a sample (consumed, sorted).
-fn median_iqr(mut v: Vec<f64>) -> (f64, f64) {
-    v.sort_by(f64::total_cmp);
-    (percentile(&v, 0.5), percentile(&v, 0.75) - percentile(&v, 0.25))
-}
-
-fn median(mut v: Vec<f64>) -> f64 {
-    v.sort_by(f64::total_cmp);
-    percentile(&v, 0.5)
-}
-
 fn aggregate(n: usize, alpha: f64, mode: &'static str, reps: &[RunMetrics]) -> CellResult {
     CellResult {
         n,
@@ -205,21 +176,16 @@ fn main() -> Result<(), AifError> {
         })
         .collect();
 
-    // Each cell runs REPS independent repetitions; cells and reps run in parallel.
-    // Per-cell/per-rep seeds derive from stable indices so parallelism cannot affect
-    // the reported medians (issue #2).
+    // Shared seeded cell × rep sweep (issue #2 derivation single-sourced in `run_sweep`);
+    // aggregate each cell's reps into medians afterwards.
+    let per_cell = run_sweep(&cells, REPS, MASTER_SEED, |&(n, a, _ml, m), seed| {
+        instrumented_run(n, a, m, seed)
+    })?;
     let results: Vec<CellResult> = cells
-        .par_iter()
-        .enumerate()
-        .map(|(cell_idx, &(n, a, ml, m))| {
-            let cell_base = substream(MASTER_SEED, cell_idx as u64);
-            let reps: Vec<RunMetrics> = (0..REPS)
-                .into_par_iter()
-                .map(|rep| instrumented_run(n, a, m, substream(cell_base, rep as u64)))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(aggregate(n, a, ml, &reps))
-        })
-        .collect::<Result<Vec<_>, AifError>>()?;
+        .iter()
+        .zip(&per_cell)
+        .map(|(&(n, a, ml, _m), reps)| aggregate(n, a, ml, reps))
+        .collect();
 
     print_report(&results);
     Ok(())

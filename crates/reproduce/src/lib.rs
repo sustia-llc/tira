@@ -13,13 +13,49 @@ mod plotter;
 mod simulation;
 
 pub use simulation::{
-    RecoveryResult, TrialData, env_seed, experiment_certainty_weighted, experiment_deterministic,
-    experiment_identical, experiment_varying_alpha, experiment_varying_preferences, group_seed,
-    heterogeneity_seed, log_likelihood, log_likelihood_learning, parameter_recovery_single,
-    recover_alpha, run_group_simulation, run_single_simulation, substream,
+    BANDIT_PROBS, EXT3_INITIAL_PRECISION, ExperimentOpts, PREFERENCES, RecoveryResult, TrialData,
+    env_seed, experiment_certainty_weighted, experiment_deterministic, experiment_identical,
+    experiment_varying_alpha, experiment_varying_preferences, group_seed, heterogeneity_seed,
+    log_likelihood, log_likelihood_learning, parameter_recovery_single, recover_alpha,
+    recover_alpha_learning, run_group_simulation, run_single_simulation, run_sweep, substream,
 };
 
 pub use plotter::ScatterPoint;
+
+/// Small summary-statistics helpers shared by the study binaries (extension3,
+/// extension11) so the percentile/median/IQR conventions live in one place.
+pub mod stats {
+    /// Linear-interpolation percentile `p ∈ [0, 1]` of a **pre-sorted** slice.
+    /// Empty ⇒ NaN; single element ⇒ that element.
+    #[must_use]
+    pub fn percentile(sorted: &[f64], p: f64) -> f64 {
+        match sorted.len() {
+            0 => f64::NAN,
+            1 => sorted[0],
+            n => {
+                let rank = p * (n - 1) as f64;
+                let lo = rank.floor() as usize;
+                let hi = rank.ceil() as usize;
+                let frac = rank - lo as f64;
+                sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+            }
+        }
+    }
+
+    /// `(median, IQR)` over a sample (consumed, sorted with `total_cmp`).
+    #[must_use]
+    pub fn median_iqr(mut v: Vec<f64>) -> (f64, f64) {
+        v.sort_by(f64::total_cmp);
+        (percentile(&v, 0.5), percentile(&v, 0.75) - percentile(&v, 0.25))
+    }
+
+    /// Median over a sample (consumed, sorted with `total_cmp`).
+    #[must_use]
+    pub fn median(mut v: Vec<f64>) -> f64 {
+        v.sort_by(f64::total_cmp);
+        percentile(&v, 0.5)
+    }
+}
 
 #[allow(clippy::missing_errors_doc)]
 pub trait Environment {
