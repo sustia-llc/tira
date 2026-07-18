@@ -5,17 +5,18 @@ pub use aif::{
     AifError, POMDPAgent,
 };
 
-use rand::prelude::*;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use rand_distr::{Bernoulli, Distribution};
 
 mod plotter;
 mod simulation;
 
 pub use simulation::{
-    RecoveryResult, TrialData, experiment_certainty_weighted, experiment_deterministic,
-    experiment_identical, experiment_varying_alpha, experiment_varying_preferences, log_likelihood,
-    log_likelihood_learning, parameter_recovery_single, recover_alpha, run_group_simulation,
-    run_single_simulation,
+    RecoveryResult, TrialData, env_seed, experiment_certainty_weighted, experiment_deterministic,
+    experiment_identical, experiment_varying_alpha, experiment_varying_preferences, group_seed,
+    heterogeneity_seed, log_likelihood, log_likelihood_learning, parameter_recovery_single,
+    recover_alpha, run_group_simulation, run_single_simulation, substream,
 };
 
 pub use plotter::ScatterPoint;
@@ -44,24 +45,44 @@ pub struct StateChange {
     pub agent_id: usize,
 }
 
-#[derive(Debug, Clone)]
+/// Validate an arm-probability vector: every entry must lie in `[0, 1]`. The single
+/// source of the 0..=1 check shared by both environment constructors.
+fn validate_probabilities(probabilities: &[f64]) -> Result<(), AifError> {
+    for p in probabilities {
+        if !(0.0..=1.0).contains(p) {
+            return Err(AifError::InvalidProbability(*p));
+        }
+    }
+    Ok(())
+}
+
+// `Clone` is intentionally not derived: `StdRng` is not `Clone` in rand 0.10
+// (cloning an RNG duplicates its stream, which is rarely intended), and no caller
+// clones an environment.
+#[derive(Debug)]
 pub struct BanditEnvironment {
     probabilities: Vec<f64>,
-    rng: ThreadRng,
+    rng: StdRng,
 }
 
 impl BanditEnvironment {
+    /// Validate the arm probabilities and assemble around a supplied RNG. Shared by
+    /// [`new`](Self::new) and [`with_seed`](Self::with_seed) (same shape as
+    /// [`SharedBanditEnvironment::build`]).
+    fn build(probabilities: Vec<f64>, rng: StdRng) -> Result<Self, AifError> {
+        validate_probabilities(&probabilities)?;
+        Ok(Self { probabilities, rng })
+    }
+
     #[allow(clippy::missing_errors_doc)]
     pub fn new(probabilities: Vec<f64>) -> Result<Self, AifError> {
-        for p in &probabilities {
-            if !(0.0..=1.0).contains(p) {
-                return Err(AifError::InvalidProbability(*p));
-            }
-        }
-        Ok(Self {
-            probabilities,
-            rng: rand::rng(),
-        })
+        Self::build(probabilities, StdRng::from_rng(&mut rand::rng()))
+    }
+
+    /// Construct with a fixed RNG seed so the reward draws are reproducible (issue #2).
+    #[allow(clippy::missing_errors_doc)]
+    pub fn with_seed(probabilities: Vec<f64>, seed: u64) -> Result<Self, AifError> {
+        Self::build(probabilities, StdRng::seed_from_u64(seed))
     }
 }
 
@@ -79,7 +100,8 @@ impl Environment for BanditEnvironment {
     }
 }
 
-#[derive(Debug, Clone)]
+// `Clone` intentionally not derived — see [`BanditEnvironment`].
+#[derive(Debug)]
 pub struct SharedBanditEnvironment {
     base_probabilities: Vec<f64>,
     current_probabilities: Vec<f64>,
@@ -87,18 +109,16 @@ pub struct SharedBanditEnvironment {
     agents_acted: Vec<bool>,
     n_agents: usize,
     competitive: bool,
-    rng: ThreadRng,
+    rng: StdRng,
     step_counter: usize,
 }
 
 impl SharedBanditEnvironment {
-    #[allow(clippy::missing_errors_doc)]
-    pub fn new(probabilities: Vec<f64>, n_agents: usize) -> Result<Self, AifError> {
-        for p in &probabilities {
-            if !(0.0..=1.0).contains(p) {
-                return Err(AifError::InvalidProbability(*p));
-            }
-        }
+    /// Validate inputs and assemble the environment around a supplied RNG.
+    /// Shared by [`new`](Self::new) and [`with_seed`](Self::with_seed) so the
+    /// validation lives in exactly one place.
+    fn build(probabilities: Vec<f64>, n_agents: usize, rng: StdRng) -> Result<Self, AifError> {
+        validate_probabilities(&probabilities)?;
         if n_agents == 0 {
             return Err(AifError::InvalidAgentId(0));
         }
@@ -110,9 +130,24 @@ impl SharedBanditEnvironment {
             agents_acted: vec![false; n_agents],
             n_agents,
             competitive: true,
-            rng: rand::rng(),
+            rng,
             step_counter: 0,
         })
+    }
+
+    #[allow(clippy::missing_errors_doc)]
+    pub fn new(probabilities: Vec<f64>, n_agents: usize) -> Result<Self, AifError> {
+        Self::build(probabilities, n_agents, StdRng::from_rng(&mut rand::rng()))
+    }
+
+    /// Construct with a fixed RNG seed so the reward draws are reproducible (issue #2).
+    #[allow(clippy::missing_errors_doc)]
+    pub fn with_seed(
+        probabilities: Vec<f64>,
+        n_agents: usize,
+        seed: u64,
+    ) -> Result<Self, AifError> {
+        Self::build(probabilities, n_agents, StdRng::seed_from_u64(seed))
     }
 
     pub fn set_competitive(&mut self, competitive: bool) {
@@ -199,5 +234,28 @@ impl Environment for SharedBanditEnvironment {
         let (observation, _) =
             <Self as MultiAgentEnvironment>::step(self, 0, action)?;
         Ok(observation)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_seed_reproduces_observation_sequence() -> Result<(), AifError> {
+        // Same seed + same action sequence ⇒ bit-identical Bernoulli reward draws.
+        let actions = [0usize, 1, 2, 0, 1, 2, 0, 0, 1, 2, 2, 1, 0, 1, 2];
+        let mut a = BanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 777)?;
+        let mut b = BanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 777)?;
+        let obs_a: Vec<usize> = actions.iter().map(|&x| a.step(x)).collect::<Result<_, _>>()?;
+        let obs_b: Vec<usize> = actions.iter().map(|&x| b.step(x)).collect::<Result<_, _>>()?;
+        assert_eq!(obs_a, obs_b, "same seed must reproduce the observation sequence");
+
+        // A different seed should diverge on this sequence (sanity, not a guarantee
+        // for every seed pair, but overwhelmingly likely across 15 draws).
+        let mut c = BanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 778)?;
+        let obs_c: Vec<usize> = actions.iter().map(|&x| c.step(x)).collect::<Result<_, _>>()?;
+        assert_ne!(obs_a, obs_c, "distinct seeds should diverge on the reward stream");
+        Ok(())
     }
 }
