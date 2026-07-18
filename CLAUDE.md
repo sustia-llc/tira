@@ -101,7 +101,7 @@ let (data, result) = experiment_certainty_weighted(16, 0.5, 300)?;
 
 These are drawn from §4.1 of the paper and from natural next steps for the codebase.
 
-### 1. MCMC parameter estimation
+### 1. MCMC parameter estimation → tracked as #25
 Replace grid search in `recover_alpha()` with Metropolis-Hastings sampling.
 Returns a full posterior distribution over α (report median as point estimate, like the paper).
 The half-normal(0, 4) prior is already implemented; the likelihood function `log_likelihood()`
