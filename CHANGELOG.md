@@ -40,6 +40,23 @@
 - `SharedBanditEnvironment::with_seed` gains its first caller/test.
 - Test suite 173 → 183.
 
+2026-07-25 (#7 — reproduce binary error accounting + plotter consolidation):
+
+- `bin/reproduce` no longer exits 0 on a thinned figure: the two existing per-run
+  `.ok()`-in-`filter_map` drop sites (Figure 4 recovery reps, per-cell experiment
+  sweeps) now also count drops (`expected − kept`, race-free under rayon regardless
+  of scheduling order) and, if any run was dropped, print a per-figure/per-experiment
+  summary to stderr and return a descriptive `Err` from `main` (nonzero exit).
+  Figures still generate best-effort exactly as before — drops are reported, not
+  turned into early `?` propagation.
+- `crates/reproduce/src/plotter.rs` consolidated per the issue: the binary's live
+  `plot_figure4`/`plot_panel`/`plot_figure5`/`plot_figure6` moved into `plotter.rs`
+  verbatim (replacing the stale, uncalled `plot_parameter_recovery`/`plot_experiments`/
+  `ScatterPoint`/`PanelData` copies, which had zero callers); the binary now only
+  computes data and calls into `reproduce::{plot_figure4, plot_figure5, plot_figure6}`.
+  `#![allow(dead_code)]` removed. Figures byte-identical (sha256-verified against the
+  pre-change baseline for all three PNGs).
+
 2026-07-18, four merges (PRs #26/#27/#28/#31 — issues #2/#25/#29 closed, extensions
 1/2/3 studies run). The `aif` engine is untouched; `aif-v0.11.0` remains the current
 release and downstream pins are unaffected.

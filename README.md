@@ -147,8 +147,8 @@ Environment (BanditEnvironment)
 | `crates/aif/src/coalition.rs` | `competence_efe` + `ObsPrecisionParams` (the coalition-value primitive, opt-in `transition_noise` since 0.6.0), `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory`, `belief_weighted_preference` |
 | `crates/aif/src/communication.rs` | Flume-based inter-agent messaging (for extended scenarios) |
 | `crates/reproduce/src/simulation.rs` | Simulation runner, parameter recovery (grid MAP: `recover_alpha[_learning]`; MCMC: `recover_alpha_mcmc[_learning]`, #25; vector MH `recover_mcmc_vec` + `McmcVecConfig`/`ModelParams`/`log_likelihood_params` with `ProposalMode` JointScale/Covariance proposals, extension 2 / #29+#30), 5 experiment factories taking `&ExperimentOpts` (seed + optional A-learning) |
-| `crates/reproduce/src/plotter.rs` | Plotters-based scatter helpers (pending consolidation with the binary's figure code) |
-| `crates/reproduce/src/bin/reproduce.rs` | Full paper reproduction binary |
+| `crates/reproduce/src/plotter.rs` | Figure rendering for `bin/reproduce.rs` — `plot_figure4`/`plot_figure5`/`plot_figure6` (consolidated per #7; the binary is orchestration-only) |
+| `crates/reproduce/src/bin/reproduce.rs` | Full paper reproduction binary — computes the recovery/experiment data, renders via `plotter.rs`, and (#7) exits nonzero with a stderr summary if any run was dropped |
 | `crates/reproduce/src/bin/extension11.rs` | Free-energy extensivity study (extension 11) |
 | `crates/reproduce/src/bin/extension3.rs` | Individual A-learning vs group-α recovery study (extension 3) |
 | `crates/reproduce/src/bin/extension1.rs` | MCMC (Metropolis-Hastings) α recovery vs grid MAP (extension 1 / #25) |
