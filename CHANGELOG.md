@@ -4,6 +4,22 @@
 
 ### reproduce harness (unversioned; no `aif` engine change, no release required)
 
+2026-07-25 (#30 — extension 2 revisited, identifiability settled):
+
+- `ProposalMode` on `recover_mcmc_vec`: `JointScale` (default, the #29 sampler —
+  bit-identical, scalar/extension-1 draw order test-pinned) vs new `Covariance` —
+  Haario-style adaptive-covariance RW with global scaling, sampled in
+  **log/logit-transformed** space with the transform's log-Jacobian applied in-kernel
+  (per-coordinate reflection is only symmetric for diagonal proposals), frozen at
+  burn-in end; nalgebra Cholesky, no new dependencies.
+- `bin/extension2` reruns the study as two matched arms + a Q2 4× probe, with
+  pooled-draw product medians and guard-pinned findings: **(α,γ) partially
+  identifiable** (product α·γ within 5% in all cells; factors prior-shaped),
+  **(α,p) genuinely degenerate** (probe near-converges onto tight-but-wrong
+  marginals), **(η,ω) not sampler-limited**. Report regenerated
+  (`docs/extension2-multiparam.md`); runtime ~57 s → ~3 min.
+- Test suite 167 → 173.
+
 2026-07-18, four merges (PRs #26/#27/#28/#31 — issues #2/#25/#29 closed, extensions
 1/2/3 studies run). The `aif` engine is untouched; `aif-v0.11.0` remains the current
 release and downstream pins are unaffected.
