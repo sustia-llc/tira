@@ -35,14 +35,26 @@ impl TestEnvironment {
     }
 }
 
+/// Competitive two-agent communication loop. Both agents carry a UNIFORM observation
+/// model (A = [0.5, 0.5, 0.5]), so no arm is preferred a priori — the assertable
+/// behavioural property is that each agent explores the whole arm set rather than
+/// collapsing onto one arm (the sibling `test_cooperative_communication` asserts the
+/// stronger arm-preference property, which its non-uniform A matrices make available).
+///
+/// Seeded (issue #8): the env uses `with_seed` and both base agents are `reseed`ed, so
+/// the whole loop is reproducible; previously it asserted only that 30 actions were
+/// recorded. Seeds checked: 2026 → agent1 [9, 9, 12] / agent2 [14, 9, 7];
+/// 815 → agent1 [14, 13, 3] / agent2 [12, 7, 11].
 #[test]
 fn test_communicating_agents() -> Result<(), AifError> {
+    const SEED: u64 = 2026;
     let n_agents = 2;
     let n_bandits = 3;
     let mut test_env = TestEnvironment::new(n_agents);
-    let mut bandit_env = SharedBanditEnvironment::new(vec![0.8, 0.4, 0.6], n_agents)?;
+    let mut bandit_env =
+        SharedBanditEnvironment::with_seed(vec![0.8, 0.4, 0.6], n_agents, SEED)?;
 
-    let base_agent1 = POMDPAgent::new(
+    let mut base_agent1 = POMDPAgent::new(
         n_bandits,
         Some(vec![0.5, 0.5, 0.5]),
         None,
@@ -51,8 +63,9 @@ fn test_communicating_agents() -> Result<(), AifError> {
         8.0,
         false,
     )?;
+    base_agent1.reseed(SEED + 1);
 
-    let base_agent2 = POMDPAgent::new(
+    let mut base_agent2 = POMDPAgent::new(
         n_bandits,
         Some(vec![0.5, 0.5, 0.5]),
         None,
@@ -61,6 +74,7 @@ fn test_communicating_agents() -> Result<(), AifError> {
         8.0,
         false,
     )?;
+    base_agent2.reseed(SEED + 2);
 
     let mut agent1 = CommunicatingPOMDPAgent::new(base_agent1, 0, n_bandits, true, true, false, 3);
     let mut agent2 =
@@ -163,6 +177,29 @@ fn test_communicating_agents() -> Result<(), AifError> {
     // Both agents acted 30 times total
     assert_eq!(test_env.actions[0].len(), 30);
     assert_eq!(test_env.actions[1].len(), 30);
+
+    // Every recorded action is a valid arm index.
+    for (id, actions) in test_env.actions.iter().enumerate() {
+        assert!(
+            actions.iter().all(|&a| a < n_bandits),
+            "agent {id} produced an out-of-range action: {actions:?}"
+        );
+    }
+
+    // Uniform A ⇒ no arm is preferred, so neither agent may collapse onto a single arm;
+    // both must exercise the full arm set over 30 competitive rounds.
+    for (id, counts) in [(0usize, &agent1_actions), (1usize, &agent2_actions)] {
+        assert_eq!(counts.iter().sum::<usize>(), 30, "agent {id} count total");
+        assert!(
+            counts.iter().all(|&c| c > 0),
+            "agent {id} has a uniform observation model and must explore every arm: {counts:?}"
+        );
+        let max = *counts.iter().max().expect("3 arms ⇒ non-empty");
+        assert!(
+            max < 30,
+            "agent {id} must not collapse onto one arm under a uniform A: {counts:?}"
+        );
+    }
 
     Ok(())
 }

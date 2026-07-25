@@ -1774,9 +1774,12 @@ mod tests {
                 best = (a, ll);
             }
         }
+        // Tightened (issue #8) from ±0.35 to ±0.20 around the true 0.5: the seeded run
+        // measures an argmax of 0.60, so this leaves a 0.10 margin either side. See the
+        // regeneration protocol below before touching it.
         assert!(
-            (best.0 - 0.5).abs() <= 0.35,
-            "LL grid argmax should sit near true α=0.5, got {:.3}",
+            (best.0 - 0.5).abs() <= 0.20,
+            "LL grid argmax should sit near true α=0.5 (measured 0.60), got {:.3}",
             best.0
         );
         Ok(())
@@ -1834,22 +1837,46 @@ mod tests {
         // Exp 1 (Fig 5A): with identical internal α the group α tracks the identity line
         // (group α ≈ individual α). Seeded (issue #2) → a single reproducible run in a
         // band around the true 0.5 (kept modest since exact goldens on sampling code are
-        // brittle across rand_distr versions).
+        // brittle across rand_distr versions). Tightened (issue #8) from 0.25..=0.85 to
+        // ±0.15 around the measured 0.500 — which lands exactly on the identity line.
         let (_, r) = experiment_identical(8, 0.5, 250, &ExperimentOpts::new(substream(SEED, 1)))?;
+        println!("Exp1: n=8, true α=0.5, group α={:.3}", r.estimated_alpha);
         assert!(
-            (0.25..=0.85).contains(&r.estimated_alpha),
+            (0.35..=0.65).contains(&r.estimated_alpha),
             "Exp1 group α should track the identity near 0.5, got {:.3}",
             r.estimated_alpha
         );
         Ok(())
     }
 
+    /// Assert the invariants every factory's recovered α must satisfy: finite and
+    /// inside the `recover_alpha` grid `[0.00, 5.00]`. Shared by the four
+    /// per-experiment smoke tests below so the grid contract is stated once.
+    fn assert_recovered_alpha_in_grid(label: &str, seed: u64, alpha: f64) {
+        assert!(alpha.is_finite(), "{label} (seed {seed}): recovered α must be finite, got {alpha}");
+        assert!(
+            (0.0..=5.0).contains(&alpha),
+            "{label} (seed {seed}): recovered α must lie in the recover_alpha grid [0, 5], got {alpha:.3}"
+        );
+    }
+
     #[test]
     fn test_experiment_varying_alpha_runs() -> Result<(), AifError> {
-        let (data, result) = experiment_varying_alpha(8, 0.5, 200, &ExperimentOpts::new(20260204))?;
+        // Exp 2 (Fig 5B): Dirichlet-varying internal α. Group α is pulled BELOW the
+        // mean (sub-linear aggregation). Seeded ⇒ one reproducible value; the band is
+        // ±0.15 around the measured 0.310 (see the regeneration protocol below —
+        // tighten around a re-measured value, never widen to force green).
+        const SEED: u64 = 20260204;
+        let (data, result) = experiment_varying_alpha(8, 0.5, 200, &ExperimentOpts::new(SEED))?;
         assert_eq!(data.len(), 200);
         println!(
             "Exp2: n=8, mean α=0.5, group α={:.3}",
+            result.estimated_alpha
+        );
+        assert_recovered_alpha_in_grid("Exp2", SEED, result.estimated_alpha);
+        assert!(
+            (0.16..=0.46).contains(&result.estimated_alpha),
+            "Exp2 (seed {SEED}) group α should sit near the measured 0.310, got {:.3}",
             result.estimated_alpha
         );
         Ok(())
@@ -1857,10 +1884,20 @@ mod tests {
 
     #[test]
     fn test_experiment_deterministic_runs() -> Result<(), AifError> {
-        let (data, result) = experiment_deterministic(8, 0.5, 200, &ExperimentOpts::new(20260205))?;
+        // Exp 3 (Fig 5C): deterministic (majority) voting inflates the recovered α far
+        // above the members' mean — the group reads as a much higher-precision agent.
+        // Band is ±0.15 around the measured 1.300.
+        const SEED: u64 = 20260205;
+        let (data, result) = experiment_deterministic(8, 0.5, 200, &ExperimentOpts::new(SEED))?;
         assert_eq!(data.len(), 200);
         println!(
             "Exp3: n=8, mean α=0.5 (det), group α={:.3}",
+            result.estimated_alpha
+        );
+        assert_recovered_alpha_in_grid("Exp3", SEED, result.estimated_alpha);
+        assert!(
+            (1.15..=1.45).contains(&result.estimated_alpha),
+            "Exp3 (seed {SEED}) group α should sit near the measured 1.300 (super-linear inflation), got {:.3}",
             result.estimated_alpha
         );
         Ok(())
@@ -1868,10 +1905,20 @@ mod tests {
 
     #[test]
     fn test_experiment_varying_preferences_runs() -> Result<(), AifError> {
-        let (data, result) = experiment_varying_preferences(8, 0.5, 200, &ExperimentOpts::new(20260206))?;
+        // Exp 4 (Fig 5D): Beta(0.8, 0.8) conflicting preferences crush the recovered α
+        // toward 0 — members pull in opposite directions, so the blanket stream reads as
+        // near-random. Band is measured 0.040 + 0.15 (floored at the grid's 0.0 edge).
+        const SEED: u64 = 20260206;
+        let (data, result) = experiment_varying_preferences(8, 0.5, 200, &ExperimentOpts::new(SEED))?;
         assert_eq!(data.len(), 200);
         println!(
             "Exp4: n=8, α=0.5 (varying prefs), group α={:.3}",
+            result.estimated_alpha
+        );
+        assert_recovered_alpha_in_grid("Exp4", SEED, result.estimated_alpha);
+        assert!(
+            (0.0..=0.19).contains(&result.estimated_alpha),
+            "Exp4 (seed {SEED}) group α should be crushed toward 0 (measured 0.040), got {:.3}",
             result.estimated_alpha
         );
         Ok(())
@@ -1879,11 +1926,83 @@ mod tests {
 
     #[test]
     fn test_experiment_certainty_weighted_runs() -> Result<(), AifError> {
-        let (data, result) = experiment_certainty_weighted(8, 0.5, 200, &ExperimentOpts::new(20260207))?;
+        // Exp 5 / Fig 6 (extension 5): certainty-weighted mixing of the same
+        // Dirichlet-varying αs as Exp 2. Band is ±0.15 around the measured 0.290.
+        const SEED: u64 = 20260207;
+        let (data, result) = experiment_certainty_weighted(8, 0.5, 200, &ExperimentOpts::new(SEED))?;
         assert_eq!(data.len(), 200);
         println!(
             "Exp5-CW: n=8, mean α=0.5 (certainty-weighted), group α={:.3}",
             result.estimated_alpha
+        );
+        assert_recovered_alpha_in_grid("Exp5-CW", SEED, result.estimated_alpha);
+        assert!(
+            (0.14..=0.44).contains(&result.estimated_alpha),
+            "Exp5-CW (seed {SEED}) group α should sit near the measured 0.290, got {:.3}",
+            result.estimated_alpha
+        );
+        Ok(())
+    }
+
+    /// Figure-5 **shape ordering** across experiments (issue #8): at one shared seed and
+    /// matched settings (n = 16, mean α = 0.5, 300 trials), the paper's three aggregation
+    /// regimes order the recovered group α as
+    ///
+    ///   Exp 4 (conflicting preferences, crushed)
+    ///     < Exp 2 (varying α, sub-linear)
+    ///       < Exp 3 (deterministic voting, super-linear inflation).
+    ///
+    /// This is the panel-level claim the four per-experiment tests above cannot make
+    /// individually (they each fix a different seed). One shared seed means the three arms
+    /// are a matched triple: identical env / heterogeneity / builder streams, differing
+    /// only in the aggregation regime under test.
+    ///
+    /// Seeds checked while writing this test — the ordering held at ALL of them, with the
+    /// gaps far larger than the spread, so the claim is not seed-shopped:
+    ///   2026     → 0.010 < 0.260 < 1.350   (chosen: the harness `MASTER_SEED`)
+    ///   4242     → 0.000 < 0.240 < 1.350
+    ///   815      → 0.110 < 0.300 < 1.350
+    ///   20260210 → 0.110 < 0.310 < 1.350
+    #[test]
+    fn test_experiment_shape_ordering_seeded() -> Result<(), AifError> {
+        const SEED: u64 = 2026;
+        const N: usize = 16;
+        const MEAN_ALPHA: f64 = 0.5;
+        const N_TRIALS: usize = 300;
+
+        let (_, exp2) = experiment_varying_alpha(N, MEAN_ALPHA, N_TRIALS, &ExperimentOpts::new(SEED))?;
+        let (_, exp3) = experiment_deterministic(N, MEAN_ALPHA, N_TRIALS, &ExperimentOpts::new(SEED))?;
+        let (_, exp4) =
+            experiment_varying_preferences(N, MEAN_ALPHA, N_TRIALS, &ExperimentOpts::new(SEED))?;
+
+        println!(
+            "Fig5 ordering (seed {SEED}): exp4={:.3} < exp2={:.3} < exp3={:.3}",
+            exp4.estimated_alpha, exp2.estimated_alpha, exp3.estimated_alpha
+        );
+
+        assert!(
+            exp4.estimated_alpha < exp2.estimated_alpha,
+            "Exp4 (conflicting prefs) must recover a LOWER α than Exp2 (varying α): {:.3} vs {:.3}",
+            exp4.estimated_alpha,
+            exp2.estimated_alpha
+        );
+        assert!(
+            exp2.estimated_alpha < exp3.estimated_alpha,
+            "Exp2 (varying α) must recover a LOWER α than Exp3 (deterministic voting): {:.3} vs {:.3}",
+            exp2.estimated_alpha,
+            exp3.estimated_alpha
+        );
+        // Exp3's inflation is above the members' mean while Exp2/Exp4 sit below it —
+        // the qualitative split the ordering encodes, asserted directly.
+        assert!(
+            exp3.estimated_alpha > MEAN_ALPHA,
+            "Exp3 must inflate above the mean α={MEAN_ALPHA}, got {:.3}",
+            exp3.estimated_alpha
+        );
+        assert!(
+            exp2.estimated_alpha < MEAN_ALPHA,
+            "Exp2 must sit below the mean α={MEAN_ALPHA}, got {:.3}",
+            exp2.estimated_alpha
         );
         Ok(())
     }
@@ -2037,12 +2156,41 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(20260208);
         let alphas = dirichlet_alphas(100, 0.5, &mut rng);
         assert_eq!(alphas.len(), 100);
+
+        // The sample mean is an exact IDENTITY, not a statistical property: Dirichlet
+        // weights sum to 1, and each α_i = w_i · n · mean, so Σ α_i / n ≡ mean for EVERY
+        // draw. Asserted at 1e-9 (floating-point summation slack only) to pin that
+        // identity — the old `< 0.15` band read as a distributional claim it never made.
         let mean: f64 = alphas.iter().sum::<f64>() / 100.0;
-        // Dirichlet weights sum to 1, so n*mean*sum(weights) = n*mean
         assert!(
-            (mean - 0.5).abs() < 0.15,
-            "Mean of Dirichlet-constructed alphas should be near 0.5, got {mean:.3}"
+            (mean - 0.5).abs() < 1e-9,
+            "Dirichlet-constructed α mean is an exact identity (= the target), got {mean:.12}"
         );
+
+        // The real content of the generator is the DISPERSION it induces (§2.4
+        // Experiment 2: heterogeneous internal precisions). Measured at this seed:
+        // sd = 0.4261, min = 0.0102, max = 2.1469. The floor is set well under the
+        // measured sd; a degenerate generator returning `vec![mean; n]` would fail it.
+        let var: f64 = alphas.iter().map(|a| (a - mean).powi(2)).sum::<f64>() / 100.0;
+        let sd = var.sqrt();
+        let min = alphas.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = alphas.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        println!("Dirichlet αs: mean={mean:.9} sd={sd:.4} min={min:.4} max={max:.4}");
+        assert!(
+            sd > 0.25,
+            "Dirichlet αs must be genuinely dispersed (measured sd 0.4261), got {sd:.4}"
+        );
+        assert!(min < max, "Dirichlet αs must not be degenerate: min={min:.4} max={max:.4}");
+        assert!(
+            min < 0.5 && max > 0.5,
+            "the dispersion must straddle the target mean: min={min:.4} max={max:.4}"
+        );
+        assert!(alphas.iter().all(|a| a.is_finite() && *a > 0.0), "αs must be finite and positive");
+
+        // Early-return path (n < 2): no Dirichlet draw at all, just the target repeated.
+        let mut rng0 = StdRng::seed_from_u64(20260208);
+        assert_eq!(dirichlet_alphas(0, 0.5, &mut rng0), Vec::<f64>::new());
+        assert_eq!(dirichlet_alphas(1, 0.5, &mut rng0), vec![0.5]);
     }
 
     #[test]
@@ -2055,6 +2203,23 @@ mod tests {
             assert!((p[0] + p[1] - 1.0).abs() < 1e-10, "Prefs should sum to 1");
             assert!(p[0] > 0.0 && p[0] < 1.0);
         }
+
+        // Beta(0.8, 0.8) is U-shaped: draws concentrate near BOTH ends, which is what
+        // makes Experiment 4's preferences genuinely conflicting. Assert that spread
+        // rather than only the shape. Measured at this seed: min = 0.0630,
+        // max = 0.9805, with 7 draws < 0.35 and 6 > 0.65.
+        let ps: Vec<f64> = prefs.iter().map(|p| p[0]).collect();
+        let min = ps.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = ps.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        println!("Beta(0.8,0.8) prefs: min={min:.4} max={max:.4}");
+        assert!(
+            min < 0.35,
+            "Beta(0.8,0.8) must produce a low-end draw (measured min 0.0630), got {min:.4}"
+        );
+        assert!(
+            max > 0.65,
+            "Beta(0.8,0.8) must produce a high-end draw (measured max 0.9805), got {max:.4}"
+        );
     }
 
     // ----- Stage B (tira #13): learning-aware replay -----

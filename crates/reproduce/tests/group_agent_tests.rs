@@ -1,5 +1,5 @@
 use reproduce::{
-    Agent, BanditEnvironment, Environment, GroupAgentBuilder, AifError,
+    Agent, BanditEnvironment, Environment, GroupAgentBuilder, AifError, env_seed, group_seed,
 };
 
 /// Experiment 1 setup: identical agents, verify group behaves coherently.
@@ -135,33 +135,64 @@ fn test_experiment4_conflicting_preferences() -> Result<(), AifError> {
     Ok(())
 }
 
-/// Group agent should work with varying alpha values (Experiment 2).
+/// Experiment 2 setup: heterogeneous internal α (§2.4). Despite the precision spread,
+/// the group still resolves to the best arm — α-heterogeneity changes *how sharply* the
+/// group acts, not *what* it prefers.
+///
+/// Seeded (issue #8) so the counts are reproducible; the previous version asserted only
+/// that the histogram summed to 200, which is true of any run whatsoever. Seeds checked:
+/// 2026 → [170, 13, 17], 815 → [175, 18, 7], 4242 → [169, 16, 15] — arm 0 dominates in
+/// every case.
 #[test]
 fn test_experiment2_varying_alpha() -> Result<(), AifError> {
-    let mut env = BanditEnvironment::new(vec![0.8, 0.2, 0.2])?;
+    const SEED: u64 = 2026;
+    let mut env = BanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], env_seed(SEED))?;
 
     let alphas = vec![0.1, 0.3, 0.5, 0.7, 0.9, 0.2, 0.4, 0.6];
     let mut group = GroupAgentBuilder::new(3)
         .n_internal(8)
         .observation_probs(vec![0.8, 0.2, 0.2])
         .preferences(vec![0.7, 0.3])
+        .seed(group_seed(SEED))
         .build_varying_alpha(&alphas)?;
+
+    // The αs really are heterogeneous (the premise of Experiment 2), and the builder
+    // threads each one through to its own internal agent.
+    let min_alpha = alphas.iter().copied().fold(f64::INFINITY, f64::min);
+    let max_alpha = alphas.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    assert!(
+        min_alpha < max_alpha,
+        "Experiment 2 requires heterogeneous α: min={min_alpha} max={max_alpha}"
+    );
+    for (i, agent) in group.internal_agents().iter().enumerate() {
+        assert!(
+            (agent.alpha() - alphas[i]).abs() < 1e-12,
+            "internal agent {i} must carry α={}, got {}",
+            alphas[i],
+            agent.alpha()
+        );
+    }
 
     let mut prev_obs = 0;
     let mut action_counts = vec![0usize; 3];
     for _ in 0..200 {
         let a = group.act(prev_obs)?;
+        assert!(a < 3, "action must be a valid bandit index, got {a}");
         action_counts[a] += 1;
         prev_obs = env.step(a)?;
     }
 
-    println!("Varying alpha: {action_counts:?}");
+    println!("Varying alpha (seed {SEED}): {action_counts:?}");
 
-    // Group should still function and produce valid actions
     assert_eq!(
         action_counts.iter().sum::<usize>(),
         200,
         "Should have exactly 200 total actions"
+    );
+    // The real claim: the group still prefers the best arm, strictly over both others.
+    assert!(
+        action_counts[0] > action_counts[1] && action_counts[0] > action_counts[2],
+        "α-heterogeneous group should still prefer bandit 0: {action_counts:?}"
     );
     Ok(())
 }
