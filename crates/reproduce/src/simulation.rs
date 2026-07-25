@@ -1,6 +1,6 @@
 use aif::{Agent, AgentParams, GenerativeModel, GroupAgent, GroupAgentBuilder, AifError, POMDPAgent};
 use crate::{BanditEnvironment, Environment};
-use nalgebra::DMatrix;
+use nalgebra::{Cholesky, DMatrix};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use rand_distr::multi::Dirichlet;
@@ -437,11 +437,21 @@ fn reflect(x: f64, lo: f64, hi: f64) -> f64 {
 /// `lo = 0.01`. Bounds where the likelihood is defined *at* the boundary (α, γ) may use
 /// `lo = 0.0`. `hi = f64::INFINITY` is the only permitted infinite bound; `lo`, `initial_sd`,
 /// and `init_spread` must be finite and positive (validated by [`McmcVecConfig::new`]).
+///
+/// The contract binds [`ProposalMode::JointScale`], whose reflected proposal lands *on* a
+/// bound routinely (that is what reflection does). [`ProposalMode::Covariance`] samples in
+/// log/logit-transformed space whose image is the **open** interval `(lo, hi)`, so a bound
+/// is reachable only through floating-point saturation of `exp`/`σ` at `|u| ≳ 37`, where the
+/// log-Jacobian penalty (`≈ −|u|`) makes the state effectively unvisitable. The epsilon
+/// inset therefore remains the safe choice for both modes.
 #[derive(Debug, Clone, Copy)]
 pub struct McmcDim {
-    /// Initial proposal SD for this dimension. Adapted by a **jointly-scaled** (not
-    /// per-dimension) global factor during burn-in — the σ *ratios* between dimensions
-    /// stay frozen at these initial values (see [`recover_mcmc_vec`]).
+    /// Initial proposal SD for this dimension. Under [`ProposalMode::JointScale`] it is
+    /// adapted by a **jointly-scaled** (not per-dimension) global factor during burn-in —
+    /// the σ *ratios* between dimensions stay frozen at these initial values (see
+    /// [`recover_mcmc_vec`]). Under [`ProposalMode::Covariance`] it seeds the diagonal
+    /// proposal covariance (in *transformed* space) used until enough history accumulates
+    /// for the empirical covariance.
     pub initial_sd: f64,
     /// Reflective lower bound (finite).
     pub lo: f64,
@@ -451,11 +461,45 @@ pub struct McmcDim {
     pub init_spread: f64,
 }
 
+/// Proposal geometry for the vector Metropolis-Hastings kernel ([`recover_mcmc_vec`]).
+///
+/// The two modes differ in whether the proposal can *follow* a correlated ridge. Both
+/// freeze their tuning at burn-in end, so the sampling phase is plain (non-adaptive) MH
+/// with detailed balance intact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProposalMode {
+    /// **Default** (the #29 behavior): a joint *diagonal*-Gaussian random walk in original
+    /// θ space, each dimension reflected into its `[lo, hi]` bounds, with a single global
+    /// scale adapted during burn-in (σ *ratios* frozen at the `initial_sd` ratios).
+    /// Reflection is symmetric per coordinate, so plain MH acceptance is exact. Cheap and
+    /// adequate for near-spherical posteriors; it **cannot** follow the anti-correlated
+    /// ridges extension 2 found — diagonal steps must shrink to the ridge's *narrow* width,
+    /// making traversal of its long axis a slow random walk.
+    #[default]
+    JointScale,
+    /// Haario-style **adaptive-covariance** random walk (Haario, Saksman & Tamminen 2001;
+    /// global scaling after Andrieu & Thoms 2008), the #30 answer to correlated ridges:
+    /// the proposal covariance is the *empirical* covariance of the chain's own history, so
+    /// steps align with the ridge instead of across it.
+    ///
+    /// Per-coordinate reflection is only symmetric for a **diagonal** proposal — an
+    /// off-diagonal covariance folded through `reflect` would break proposal symmetry and
+    /// silently invalidate plain MH acceptance. So this mode does not reflect at all: it
+    /// samples in an **unconstrained transformed space** (`ln(x − lo)` for `hi = +∞`, logit
+    /// on `x ∈ (lo, hi)` for finite bounds) and adds the transform's log-Jacobian to the
+    /// caller's θ-space log-posterior. The Gaussian random walk is symmetric *there*, so
+    /// acceptance stays the plain MH ratio, and the bounds become effectively unreachable
+    /// (see [`McmcDim`] for the exact floating-point caveat).
+    Covariance,
+}
+
 /// Configuration for the vector Metropolis-Hastings recovery ([`recover_mcmc_vec`]).
 ///
 /// Seed is **mandatory** (post-#2); chain `k` seeds from the dedicated MCMC role
 /// `substream(mcmc_base_seed(seed), k)`. `dims` gives one [`McmcDim`] per recovered
 /// parameter (its length is the θ dimensionality the caller's log-posterior must accept).
+/// `proposal` selects the proposal geometry ([`ProposalMode::JointScale`] by default;
+/// [`ProposalMode::Covariance`] for correlated ridges — #30).
 /// `#[non_exhaustive]`; build with [`new`](Self::new) + the `with_*` setters.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -465,11 +509,13 @@ pub struct McmcVecConfig {
     pub n_samples: usize,
     pub burn_in: usize,
     pub dims: Vec<McmcDim>,
+    pub proposal: ProposalMode,
 }
 
 impl McmcVecConfig {
     /// New config over `dims` (mandatory seed; defaults 4 chains, 2000 samples, 500
-    /// burn-in). Rejects empty `dims`, `lo ≥ hi`, or non-positive `initial_sd`.
+    /// burn-in, [`ProposalMode::JointScale`]). Rejects empty `dims`, `lo ≥ hi`, or
+    /// non-positive `initial_sd`.
     #[allow(clippy::missing_errors_doc)]
     pub fn new(seed: u64, dims: Vec<McmcDim>) -> Result<Self, AifError> {
         if dims.is_empty() {
@@ -491,7 +537,14 @@ impl McmcVecConfig {
                 ));
             }
         }
-        Ok(Self { seed, n_chains: 4, n_samples: 2000, burn_in: 500, dims })
+        Ok(Self {
+            seed,
+            n_chains: 4,
+            n_samples: 2000,
+            burn_in: 500,
+            dims,
+            proposal: ProposalMode::JointScale,
+        })
     }
 
     #[must_use]
@@ -511,6 +564,13 @@ impl McmcVecConfig {
         self.burn_in = burn_in;
         self
     }
+
+    /// Select the proposal geometry (see [`ProposalMode`]).
+    #[must_use]
+    pub fn with_proposal(mut self, proposal: ProposalMode) -> Self {
+        self.proposal = proposal;
+        self
+    }
 }
 
 /// Posterior summary for one recovered dimension.
@@ -518,6 +578,11 @@ impl McmcVecConfig {
 pub struct DimResult {
     pub median: f64,
     pub r_hat: f64,
+    /// Mean frozen per-dimension proposal scale across chains (a burn-in-tuning
+    /// diagnostic). **The space depends on the mode**: under
+    /// [`ProposalMode::JointScale`] it is the σ of the θ-space random walk; under
+    /// [`ProposalMode::Covariance`] it is `λ·sqrt(Σ_reg[d][d])` in the *transformed*
+    /// (log / logit) space, so it is not comparable across modes or to a θ-space SD.
     pub adapted_sd: f64,
 }
 
@@ -572,8 +637,13 @@ struct VecChainOutput {
 /// `1/(i+1)^0.6`, target [`ADAPT_TARGET`]) is added to **every** dimension's `log(σ_d)`,
 /// so only the global proposal scale adapts — the σ *ratios* stay frozen at the
 /// `initial_sd` ratios. Adaptation freezes at burn-in end; plain MH thereafter (detailed
-/// balance intact). A genuinely per-dimension or covariance-adapted proposal is tracked as
-/// #30. At `dims.len() == 1` this reduces bit-for-bit to the extension-1 scalar chain.
+/// balance intact). At `dims.len() == 1` this reduces bit-for-bit to the extension-1
+/// scalar chain.
+///
+/// This is the [`ProposalMode::JointScale`] chain (the default). The correlated-ridge
+/// alternative — Haario adaptive covariance in log/logit-transformed space (#30) — lives in
+/// [`vec_run_chain_cov`] behind [`ProposalMode::Covariance`]; see [`ProposalMode`] for why
+/// a correlated proposal cannot reuse the reflection used here.
 ///
 /// The kernel **propagates** a likelihood `Err` (it does not reject-and-resample) — hence
 /// the epsilon-lo contract on [`McmcDim`].
@@ -646,11 +716,290 @@ where
     Ok(VecChainOutput { samples, accepts, adapted_sd: sd })
 }
 
+// --- Covariance-adapted proposal (#30) -------------------------------------------------
+
+/// Ridge added to the empirical proposal covariance before factorization, keeping it
+/// strictly positive-definite while the chain history is still rank-deficient or nearly
+/// collinear (a perfectly stuck chain has a singular empirical covariance).
+const COV_RIDGE: f64 = 1e-6;
+
+/// Numerically stable `ln σ(u)` (`σ` = logistic). For `u ≥ 0` the direct
+/// `−ln(1 + e^{−u})` never overflows; for `u < 0` the algebraically equal
+/// `u − ln(1 + e^{u})` is used instead so the exponential stays bounded.
+#[must_use]
+fn ln_sigmoid(u: f64) -> f64 {
+    if u >= 0.0 {
+        -(-u).exp().ln_1p()
+    } else {
+        u - u.exp().ln_1p()
+    }
+}
+
+/// Numerically stable logistic `σ(u)`, split at 0 for the same reason as [`ln_sigmoid`].
+#[must_use]
+fn sigmoid(u: f64) -> f64 {
+    if u >= 0.0 {
+        1.0 / (1.0 + (-u).exp())
+    } else {
+        let e = u.exp();
+        e / (1.0 + e)
+    }
+}
+
+/// Map one dimension from the unconstrained sampling space `u` back to θ space
+/// ([`ProposalMode::Covariance`]): `lo + e^u` for `hi = +∞`, `lo + (hi − lo)·σ(u)` for
+/// finite bounds. The image is the **open** interval `(lo, hi)` in exact arithmetic; in f64
+/// a bound is returned only once `exp`/`σ` saturates at `|u| ≳ 37`, which the log-Jacobian
+/// (`≈ −|u|` there) makes effectively unreachable — see [`McmcDim`]'s epsilon-lo contract.
+#[must_use]
+fn cov_inverse(u: f64, lo: f64, hi: f64) -> f64 {
+    if hi.is_finite() {
+        lo + (hi - lo) * sigmoid(u)
+    } else {
+        lo + u.exp()
+    }
+}
+
+/// Map one dimension from θ space into the unconstrained sampling space (inverse of
+/// [`cov_inverse`]): `ln(x − lo)` for `hi = +∞`, `logit((x − lo)/(hi − lo))` for finite
+/// bounds. Requires `x` strictly inside `(lo, hi)` — the caller clamps the init draw.
+#[must_use]
+fn cov_forward(x: f64, lo: f64, hi: f64) -> f64 {
+    if hi.is_finite() {
+        let t = (x - lo) / (hi - lo);
+        (t / (1.0 - t)).ln()
+    } else {
+        (x - lo).ln()
+    }
+}
+
+/// Log-Jacobian `ln|dx/du|` of [`cov_inverse`] for one dimension: `u` for `hi = +∞`,
+/// `ln(hi − lo) + ln σ(u) + ln(1 − σ(u))` for finite bounds (evaluated through
+/// [`ln_sigmoid`], using `ln(1 − σ(u)) = ln σ(−u)`).
+///
+/// Adding `Σ_d logJ_d` to the caller's θ-space log-posterior makes the u-space target the
+/// correct pull-back, so a Gaussian random walk in `u` samples the intended θ posterior.
+#[must_use]
+fn cov_log_jacobian(u: f64, lo: f64, hi: f64) -> f64 {
+    if hi.is_finite() {
+        (hi - lo).ln() + ln_sigmoid(u) + ln_sigmoid(-u)
+    } else {
+        u
+    }
+}
+
+/// Symmetrize `cov` and add the [`COV_RIDGE`] ridge, yielding the `Σ_reg` the proposal is
+/// built from (and whose diagonal `DimResult::adapted_sd` reports).
+///
+/// Symmetrization matters because the Welford rank-1 accumulation is symmetric in *exact*
+/// arithmetic only — rounding in the running-mean update can leave a last-bit asymmetry.
+fn cov_regularize(cov: &DMatrix<f64>) -> DMatrix<f64> {
+    let mut reg = (cov + cov.transpose()) * 0.5;
+    for d in 0..reg.nrows() {
+        reg[(d, d)] += COV_RIDGE;
+    }
+    reg
+}
+
+/// Lower Cholesky factor of `λ²·Σ_reg` (`Σ_reg` from [`cov_regularize`]), retrying once
+/// with a `10³×` inflated ridge if the first factorization fails. Errors (rather than
+/// unwrapping) if even the inflated ridge cannot produce a positive-definite matrix.
+fn cov_proposal_factor(reg: &DMatrix<f64>, lambda: f64) -> Result<DMatrix<f64>, AifError> {
+    let n = reg.nrows();
+    let scale = lambda * lambda;
+    if let Some(chol) = Cholesky::new(reg * scale) {
+        return Ok(chol.l());
+    }
+    let mut retry = reg.clone();
+    for d in 0..n {
+        retry[(d, d)] += COV_RIDGE * 1e3;
+    }
+    Cholesky::new(retry * scale).map(|c| c.l()).ok_or_else(|| {
+        AifError::InvalidDistribution(format!(
+            "covariance proposal factorization failed: {n}-dim proposal covariance is not \
+             positive-definite even with a {:e} ridge",
+            COV_RIDGE * 1e3
+        ))
+    })
+}
+
+/// Run one vector MH chain with a **Haario adaptive-covariance** proposal (#30), the
+/// [`ProposalMode::Covariance`] counterpart of [`vec_run_chain`].
+///
+/// The chain lives in the unconstrained space `u` ([`cov_forward`] / [`cov_inverse`]) and
+/// targets `lp_u(u) = logpost(x(u)) + Σ_d logJ_d(u_d)` — the caller's log-posterior stays
+/// in θ space, the Jacobian lives entirely here. Because the random walk is Gaussian in
+/// `u` (no reflection), the proposal is symmetric and acceptance is the plain MH ratio.
+///
+/// Burn-in tuning, following Haario et al. (2001) with the Andrieu–Thoms global scale:
+/// - `λ` starts at `2.38/√n` (the Roberts–Rosenthal optimal-scaling factor) and adapts as
+///   `ln λ += (i+1)^-0.6 · (accepted − ADAPT_TARGET)` — the same gain schedule and target
+///   as [`vec_run_chain`]. (0.234 is the *high-dimensional* asymptote; at the n ≤ 4 dims
+///   this kernel is used for, [`ADAPT_TARGET`]'s 0.35 is nearer optimal.)
+/// - The empirical mean/covariance of the chain's own `u` history accumulate by Welford
+///   rank-1 updates every burn-in iteration. Until `2n` history points exist the proposal
+///   covariance is the seed diagonal `diag(initial_sd_d²)`; thereafter it is the empirical
+///   covariance. Either way it passes through [`cov_regularize`] (symmetrize + ridge) to
+///   give the `Σ_reg` the factor is built from.
+/// - The factor `L = chol(λ²·Σ_reg)` is recomputed each burn-in iteration: at n ≤ 4 the
+///   O(n³) factorization is noise next to one log-posterior evaluation (which replays a
+///   whole simulation in the study callers).
+///
+/// Both `λ` and `Σ_reg` **freeze** at burn-in end, so the sampling phase is plain MH with a
+/// fixed proposal (detailed balance intact). `adapted_sd` reports the frozen per-dimension
+/// `λ·√(Σ_reg[d][d])` — a *transformed*-space scale (see [`DimResult::adapted_sd`]).
+///
+/// Like [`vec_run_chain`] this **propagates** a log-posterior `Err`; unlike it, the bounds
+/// are effectively unreachable (see [`cov_inverse`]), so a likelihood that is undefined only
+/// *at* `lo`/`hi` is in practice never probed there.
+fn vec_run_chain_cov<F>(
+    chain_idx: usize,
+    config: &McmcVecConfig,
+    logpost: &F,
+) -> Result<VecChainOutput, AifError>
+where
+    F: Fn(&[f64]) -> Result<f64, AifError>,
+{
+    let std_normal =
+        Normal::new(0.0_f64, 1.0).map_err(|e| AifError::InvalidDistribution(e.to_string()))?;
+    let mut rng = StdRng::seed_from_u64(substream(mcmc_base_seed(config.seed), chain_idx as u64));
+    let n = config.dims.len();
+
+    // Overdispersed init: the same reflected `N(0, init_spread)` draw per dim as the
+    // JointScale path, then nudged strictly inside (lo, hi) so the transform is finite.
+    // The clamp only ever fires on the measure-zero exact-boundary draw.
+    let mut cur_x = vec![0.0_f64; n];
+    let mut cur_u = vec![0.0_f64; n];
+    for (d, dim) in config.dims.iter().enumerate() {
+        let raw = reflect(dim.init_spread * std_normal.sample(&mut rng), dim.lo, dim.hi);
+        let scale = if dim.hi.is_finite() {
+            (dim.hi - dim.lo).max(dim.lo.abs()).max(1.0)
+        } else {
+            dim.lo.abs().max(1.0)
+        };
+        let eps = 1e-12 * scale;
+        cur_x[d] = if dim.hi.is_finite() {
+            raw.clamp(dim.lo + eps, dim.hi - eps)
+        } else {
+            raw.max(dim.lo + eps)
+        };
+        cur_u[d] = cov_forward(cur_x[d], dim.lo, dim.hi);
+    }
+
+    // Target in u-space: caller's θ-space log-posterior + the transform's log-Jacobian.
+    let jacobian = |u: &[f64]| -> f64 {
+        u.iter()
+            .zip(&config.dims)
+            .map(|(&ud, dim)| cov_log_jacobian(ud, dim.lo, dim.hi))
+            .sum()
+    };
+    let mut cur_lp = logpost(&cur_x)? + jacobian(&cur_u);
+
+    let mut ln_lambda = (2.38 / (n as f64).sqrt()).ln();
+    // Welford running mean + scatter (M2) of the u-history; cov = M2 / (count − 1).
+    let mut mean = vec![0.0_f64; n];
+    let mut m2 = DMatrix::<f64>::zeros(n, n);
+    let mut count = 0usize;
+    let seed_reg = cov_regularize(&DMatrix::from_diagonal(&nalgebra::DVector::from_iterator(
+        n,
+        config.dims.iter().map(|d| d.initial_sd * d.initial_sd),
+    )));
+
+    let mut prop_u = vec![0.0_f64; n];
+    let mut prop_x = vec![0.0_f64; n];
+    let mut z = vec![0.0_f64; n];
+    // Seeded here so a `burn_in == 0` config still has a well-defined frozen proposal (the
+    // seed diagonal at the initial λ); the burn-in loop overwrites both every iteration.
+    let mut cov_reg = seed_reg.clone();
+    let mut factor = cov_proposal_factor(&cov_reg, ln_lambda.exp())?;
+
+    for i in 0..config.burn_in {
+        // Proposal covariance: seed diagonal until 2n history points, then empirical.
+        cov_reg = if count < 2 * n {
+            seed_reg.clone()
+        } else {
+            cov_regularize(&(&m2 / (count as f64 - 1.0)))
+        };
+        let lambda = ln_lambda.exp();
+        factor = cov_proposal_factor(&cov_reg, lambda)?;
+
+        for zi in z.iter_mut() {
+            *zi = std_normal.sample(&mut rng);
+        }
+        for d in 0..n {
+            let step: f64 = (0..=d).map(|k| factor[(d, k)] * z[k]).sum();
+            prop_u[d] = cur_u[d] + step;
+            prop_x[d] = cov_inverse(prop_u[d], config.dims[d].lo, config.dims[d].hi);
+        }
+        let prop_lp = logpost(&prop_x)? + jacobian(&prop_u);
+        // Same short-circuited accept as the JointScale path: the uniform is drawn only
+        // when the proposal is worse.
+        let accepted = prop_lp >= cur_lp || rng.random::<f64>() < (prop_lp - cur_lp).exp();
+        if accepted {
+            cur_u.copy_from_slice(&prop_u);
+            cur_x.copy_from_slice(&prop_x);
+            cur_lp = prop_lp;
+        }
+
+        // Welford rank-1 update with the post-accept-or-reject state.
+        count += 1;
+        let cf = count as f64;
+        let delta: Vec<f64> = cur_u.iter().zip(&mean).map(|(&u, &m)| u - m).collect();
+        for (m, dl) in mean.iter_mut().zip(&delta) {
+            *m += dl / cf;
+        }
+        let delta2: Vec<f64> = cur_u.iter().zip(&mean).map(|(&u, &m)| u - m).collect();
+        for r in 0..n {
+            for c in 0..n {
+                m2[(r, c)] += delta[r] * delta2[c];
+            }
+        }
+
+        // Andrieu-Thoms global scaling on the same Robbins-Monro schedule as the joint path.
+        let gain = 1.0 / ((i + 1) as f64).powf(0.6);
+        ln_lambda += gain * (f64::from(u8::from(accepted)) - ADAPT_TARGET);
+    }
+
+    // Frozen proposal: λ and Σ_reg stop moving ⇒ plain MH from here on. The reported scale
+    // is the u-space per-dim σ of that frozen proposal (`.max(0.0)` is defensive only —
+    // Σ_reg's diagonal is ridge-positive by construction).
+    let lambda = ln_lambda.exp();
+    let adapted_sd: Vec<f64> = (0..n).map(|d| lambda * cov_reg[(d, d)].max(0.0).sqrt()).collect();
+    let mut samples = Vec::with_capacity(config.n_samples);
+    let mut accepts = 0usize;
+    for _ in 0..config.n_samples {
+        for zi in z.iter_mut() {
+            *zi = std_normal.sample(&mut rng);
+        }
+        for d in 0..n {
+            let step: f64 = (0..=d).map(|k| factor[(d, k)] * z[k]).sum();
+            prop_u[d] = cur_u[d] + step;
+            prop_x[d] = cov_inverse(prop_u[d], config.dims[d].lo, config.dims[d].hi);
+        }
+        let prop_lp = logpost(&prop_x)? + jacobian(&prop_u);
+        let accepted = prop_lp >= cur_lp || rng.random::<f64>() < (prop_lp - cur_lp).exp();
+        if accepted {
+            cur_u.copy_from_slice(&prop_u);
+            cur_x.copy_from_slice(&prop_x);
+            cur_lp = prop_lp;
+            accepts += 1;
+        }
+        // Push the x-space state carried alongside cur_u — never a re-transform, so the
+        // reported samples cannot drift from the state the chain actually accepted.
+        samples.push(cur_x.clone());
+    }
+
+    Ok(VecChainOutput { samples, accepts, adapted_sd })
+}
+
 /// Vector Metropolis-Hastings recovery (extension 2 / #29): the parameter-agnostic kernel.
 /// The caller composes the **full log-posterior** closure over the parameter vector
 /// (likelihood + per-dimension priors — e.g. via [`half_normal_log_prior_sd`]), exactly the
 /// #25 seam generalized to θ. Chains run in parallel (each seeded ⇒ order-independent,
 /// bit-identical). The scalar [`recover_alpha_mcmc`] is this at `dims.len() == 1`.
+///
+/// [`McmcVecConfig::proposal`] selects the per-chain proposal: [`ProposalMode::JointScale`]
+/// (default, `vec_run_chain`) or [`ProposalMode::Covariance`] (`vec_run_chain_cov`, #30).
 #[allow(clippy::missing_errors_doc)]
 pub fn recover_mcmc_vec<F>(logpost: F, config: &McmcVecConfig) -> Result<McmcVecResult, AifError>
 where
@@ -658,7 +1007,10 @@ where
 {
     let outputs: Vec<VecChainOutput> = (0..config.n_chains)
         .into_par_iter()
-        .map(|chain_idx| vec_run_chain(chain_idx, config, &logpost))
+        .map(|chain_idx| match config.proposal {
+            ProposalMode::JointScale => vec_run_chain(chain_idx, config, &logpost),
+            ProposalMode::Covariance => vec_run_chain_cov(chain_idx, config, &logpost),
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     let n_dims = config.dims.len();
@@ -691,7 +1043,9 @@ where
 
 /// Build the dim-1 [`McmcVecConfig`] the scalar α recovery delegates through. Bounds
 /// `[0, ∞)` and init spread `PRIOR_SD` make the reflection reduce to the extension-1
-/// `abs`, so the dim-1 kernel is bit-identical to the pre-#29 scalar kernel.
+/// `abs`, so the dim-1 kernel is bit-identical to the pre-#29 scalar kernel. The proposal
+/// mode is therefore pinned to [`ProposalMode::JointScale`] — the scalar α path's
+/// byte-identity contract; #30's covariance mode is opt-in through [`McmcVecConfig`] only.
 fn scalar_to_vec_config(config: &McmcConfig) -> McmcVecConfig {
     McmcVecConfig {
         seed: config.seed,
@@ -704,6 +1058,7 @@ fn scalar_to_vec_config(config: &McmcConfig) -> McmcVecConfig {
             hi: f64::INFINITY,
             init_spread: PRIOR_SD,
         }],
+        proposal: ProposalMode::JointScale,
     }
 }
 
@@ -2154,5 +2509,188 @@ mod tests {
             assert!((g - w).abs() < 1e-9, "dim-1 draw order changed at sample {i}: {g} != {w}");
         }
         Ok(())
+    }
+
+    // --- Covariance-adapted proposal (#30) ---------------------------------------------
+    //
+    // All analytic targets (no simulation replay), so these stay fast and every assertion
+    // is a deterministic function of the pinned seeds.
+
+    /// Standard-normal quantile at 3/4, i.e. the half-normal median in units of σ.
+    const PROBIT_075: f64 = 0.674_489_750_196_081_7;
+
+    /// A fully-seeded covariance-mode config over `dims`.
+    fn cov_config(seed: u64, dims: Vec<McmcDim>) -> McmcVecConfig {
+        McmcVecConfig::new(seed, dims)
+            .expect("valid test dims")
+            .with_proposal(ProposalMode::Covariance)
+    }
+
+    /// The additive proposal mode defaults to the pre-#30 behavior.
+    #[test]
+    fn test_proposal_mode_default_is_joint_scale() {
+        let dims = vec![McmcDim { initial_sd: 0.3, lo: 0.0, hi: f64::INFINITY, init_spread: 1.0 }];
+        let cfg = McmcVecConfig::new(1, dims).expect("valid dims");
+        assert_eq!(cfg.proposal, ProposalMode::JointScale, "default must stay JointScale");
+        assert_eq!(ProposalMode::default(), ProposalMode::JointScale);
+        assert_eq!(
+            cfg.with_proposal(ProposalMode::Covariance).proposal,
+            ProposalMode::Covariance,
+            "with_proposal must set the mode"
+        );
+    }
+
+    /// Covariance mode is as reproducible as the JointScale path: same seed ⇒ identical
+    /// chains and medians; a different seed diverges.
+    #[test]
+    fn test_covariance_mode_deterministic() -> Result<(), AifError> {
+        // 2-D correlated Gaussian in (ln θ₀, ln θ₁), ρ = 0.8. Written in θ space (the
+        // −ln θ terms) as the kernel's contract requires.
+        let logpost = |t: &[f64]| -> Result<f64, AifError> {
+            Ok(log_bivariate_lognormal(t, 0.8))
+        };
+        let dims = vec![
+            McmcDim { initial_sd: 0.4, lo: 0.0, hi: f64::INFINITY, init_spread: 1.5 },
+            McmcDim { initial_sd: 0.4, lo: 0.0, hi: f64::INFINITY, init_spread: 1.5 },
+        ];
+        let cfg = cov_config(31, dims.clone()).with_chains(2).with_burn_in(150).with_samples(300);
+        let a = recover_mcmc_vec(logpost, &cfg)?;
+        let b = recover_mcmc_vec(logpost, &cfg)?;
+        assert_eq!(a.chains, b.chains, "same seed must reproduce every sample");
+        for (da, db) in a.dims.iter().zip(&b.dims) {
+            assert_eq!(da.median, db.median, "medians must be bit-identical");
+            assert_eq!(da.adapted_sd, db.adapted_sd, "frozen scales must be bit-identical");
+        }
+        let other =
+            cov_config(32, dims).with_chains(2).with_burn_in(150).with_samples(300);
+        let c = recover_mcmc_vec(logpost, &other)?;
+        assert!(a.chains != c.chains, "a different seed should diverge");
+        Ok(())
+    }
+
+    /// **Jacobian regression** for the `hi = +∞` (log) transform: sampling a half-normal(4)
+    /// through `u = ln θ` must reproduce its analytic median `4·Φ⁻¹(3/4)`. A missing or
+    /// wrong log-Jacobian tilts the whole density by a factor of θ and shifts this median.
+    #[test]
+    fn test_covariance_dim1_halfnormal_matches_theory() -> Result<(), AifError> {
+        let dims =
+            vec![McmcDim { initial_sd: 1.0, lo: 0.0, hi: f64::INFINITY, init_spread: PRIOR_SD }];
+        let res = recover_mcmc_vec(
+            |t: &[f64]| Ok(half_normal_log_prior_sd(t[0], PRIOR_SD)),
+            &cov_config(30_001, dims).with_burn_in(1000).with_samples(5000),
+        )?;
+        assert!(res.converged(), "half-normal target should mix: r_hat = {}", res.dims[0].r_hat);
+        let want = PRIOR_SD * PROBIT_075;
+        let got = res.dims[0].median;
+        assert!(
+            (got - want).abs() < 0.15,
+            "half-normal(4) median should be ≈ {want:.4}, got {got:.4} (Jacobian regression)"
+        );
+        Ok(())
+    }
+
+    /// **Jacobian regression** for the finite-bounds (logit) transform: a *flat* θ-space
+    /// log-posterior on `(0.2, 0.9)` must sample the uniform, i.e. median at the midpoint —
+    /// which only holds if the kernel adds the logit log-Jacobian. Samples also never
+    /// touch the bounds (the transform makes them unreachable).
+    #[test]
+    fn test_covariance_finite_bounds_uniform_median() -> Result<(), AifError> {
+        let (lo, hi) = (0.2, 0.9);
+        let dims = vec![McmcDim { initial_sd: 1.0, lo, hi, init_spread: 0.3 }];
+        let res = recover_mcmc_vec(
+            |_t: &[f64]| Ok(0.0),
+            &cov_config(30_002, dims).with_burn_in(1000).with_samples(5000),
+        )?;
+        assert!(res.converged(), "uniform target should mix: r_hat = {}", res.dims[0].r_hat);
+        let got = res.dims[0].median;
+        assert!(
+            (got - 0.55).abs() < 0.03,
+            "uniform(0.2, 0.9) median should be ≈ 0.55, got {got:.4} (Jacobian regression)"
+        );
+        for chain in &res.chains {
+            for theta in chain {
+                assert!(
+                    theta[0] > lo && theta[0] < hi,
+                    "covariance mode must stay strictly inside ({lo}, {hi}): {}",
+                    theta[0]
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The #30 headline regression: on a sharp anti-... *co*-correlated ridge (ρ = 0.99 in
+    /// log space) the covariance proposal mixes and recovers both marginals, while the
+    /// jointly-scaled diagonal proposal — identical config, identical seeds, identical
+    /// budget — does not converge. This reproduces extension 2's diagnosis (the confound is
+    /// the *proposal geometry*, not the budget) and pins the fix.
+    ///
+    /// **The seeds are part of the pin**: with fixed seeds both verdicts are deterministic,
+    /// so the JointScale non-convergence assertion is exact rather than probabilistic. Do
+    /// not re-seed without re-checking both arms.
+    #[test]
+    fn test_covariance_mixes_on_ridge_where_jointscale_does_not() -> Result<(), AifError> {
+        const RHO: f64 = 0.99;
+        let logpost = |t: &[f64]| -> Result<f64, AifError> { Ok(log_bivariate_lognormal(t, RHO)) };
+        let dims = vec![
+            McmcDim { initial_sd: 0.3, lo: 0.0, hi: f64::INFINITY, init_spread: 2.0 },
+            McmcDim { initial_sd: 0.3, lo: 0.0, hi: f64::INFINITY, init_spread: 2.0 },
+        ];
+        // Matched budget for both arms — only `proposal` differs.
+        let base = McmcVecConfig::new(30_003, dims)
+            .expect("valid dims")
+            .with_chains(4)
+            .with_burn_in(1500)
+            .with_samples(3000);
+
+        let cov = recover_mcmc_vec(logpost, &base.clone().with_proposal(ProposalMode::Covariance))?;
+        assert!(
+            cov.converged(),
+            "covariance mode should mix on the ρ={RHO} ridge: r_hat = {:?}",
+            cov.dims.iter().map(|d| d.r_hat).collect::<Vec<_>>()
+        );
+        // Lognormal(0, 1) median = e⁰ = 1 in both dimensions.
+        for (d, dr) in cov.dims.iter().enumerate() {
+            assert!(
+                (dr.median - 1.0).abs() < 0.25,
+                "dim {d} median should be ≈ 1.0, got {:.4}",
+                dr.median
+            );
+        }
+
+        let joint = recover_mcmc_vec(logpost, &base.with_proposal(ProposalMode::JointScale))?;
+        assert!(
+            !joint.converged(),
+            "JointScale is expected to FAIL on this ridge at a matched budget (#29's \
+             finding); r_hat = {:?}",
+            joint.dims.iter().map(|d| d.r_hat).collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    /// The scalar α path keeps its JointScale byte-identity contract (guards the draw-order
+    /// pin from the other side: no covariance mode can leak into `recover_alpha_mcmc`).
+    #[test]
+    fn test_covariance_dim1_scalar_config_unaffected() {
+        let cfg = scalar_to_vec_config(&McmcConfig::new(7));
+        assert_eq!(
+            cfg.proposal,
+            ProposalMode::JointScale,
+            "the scalar α path must stay on the pinned JointScale kernel"
+        );
+    }
+
+    /// θ-space log-density of a bivariate **lognormal**: `(ln θ₀, ln θ₁)` standard normal
+    /// with correlation `rho`. The `−ln θ_d` terms are the change-of-variable factor that
+    /// makes this a genuine θ-space density (dropping them would target a different
+    /// distribution), and the kernel's own log-transform Jacobian cancels them exactly —
+    /// which is the point of the covariance-mode contract.
+    fn log_bivariate_lognormal(theta: &[f64], rho: f64) -> f64 {
+        if theta.iter().any(|&x| !x.is_finite() || x <= 0.0) {
+            return f64::NEG_INFINITY;
+        }
+        let (l0, l1) = (theta[0].ln(), theta[1].ln());
+        let q = (l0 * l0 - 2.0 * rho * l0 * l1 + l1 * l1) / (2.0 * (1.0 - rho * rho));
+        -q - l0 - l1
     }
 }

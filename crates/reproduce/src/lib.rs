@@ -15,7 +15,7 @@ mod simulation;
 pub use simulation::{
     BANDIT_PROBS, DimResult, EXT3_INITIAL_PRECISION, ExperimentOpts, LearningParams, McmcConfig,
     McmcDim, McmcResult, McmcVecConfig, McmcVecResult, ModelParams, PREFERENCES, PRIOR_SD,
-    R_HAT_THRESHOLD,
+    ProposalMode, R_HAT_THRESHOLD,
     RecoveryResult, TrialData, env_seed, experiment_certainty_weighted, experiment_deterministic,
     experiment_identical, experiment_varying_alpha, experiment_varying_preferences, group_seed,
     generate_params_data, half_normal_log_prior_sd, heterogeneity_seed, log_likelihood,
