@@ -18,12 +18,16 @@ fn uniform_index(rng: &mut StdRng, n: usize) -> usize {
 /// `H = −Σ p ln p` is the Shannon entropy in nats.
 ///
 /// Entries at or below `1e-15` contribute nothing (the `0 · ln 0 = 0` convention,
-/// with the threshold also keeping denormals out of `ln`). For a finite
+/// with the threshold also keeping denormals out of `ln`). For a **normalized**
 /// distribution over `n` actions the weight is bounded: a delta gives `H = 0` ⇒
 /// `w = 1`, and the uniform distribution gives `H = ln n` ⇒ `w = 1/n`, so
-/// `w ∈ [1/n, 1]` — the bound the zero-total-weight fallback in
-/// [`VotingAgent::aggregate_weighted`] relies on. A `NaN` entry poisons the sum and
-/// yields a `NaN` weight, which that fallback also handles.
+/// `w ∈ [1/n, 1]`. Inputs are not required to normalize, and unnormalized entries
+/// can drive `H` high enough that `w` underflows the `1e-15` total-weight guard —
+/// the reachable route into [`VotingAgent::aggregate_weighted`]'s uniform fallback.
+/// A `NaN` entry does **not** poison the weight: `NaN > 1e-15` is false, so it
+/// contributes `0.0` and the weight stays finite; the `NaN` instead propagates into
+/// the mixture and is rejected downstream by `WeightedIndex`
+/// (`AifError::Weight`) — pinned by the zero-total-weight fallback test.
 fn confidence_weight(dist: &[f64]) -> f64 {
     let entropy: f64 = dist
         .iter()

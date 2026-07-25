@@ -1,6 +1,7 @@
 use reproduce::{
     CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel, Message, MessageContent,
-    MultiAgentEnvironment, AifError, POMDPAgent, SharedBanditEnvironment,
+    MultiAgentEnvironment, AifError, POMDPAgent, SharedBanditEnvironment, env_seed, group_seed,
+    substream,
 };
 
 struct TestEnvironment {
@@ -43,8 +44,10 @@ impl TestEnvironment {
 ///
 /// Seeded (issue #8): the env uses `with_seed` and both base agents are `reseed`ed, so
 /// the whole loop is reproducible; previously it asserted only that 30 actions were
-/// recorded. Seeds checked: 2026 → agent1 [9, 9, 12] / agent2 [14, 9, 7];
-/// 815 → agent1 [14, 13, 3] / agent2 [12, 7, 11].
+/// recorded. Seeds derive through the #2 role helpers (env = `env_seed(SEED)`,
+/// agent i = `substream(group_seed(SEED), i)`) for consistency with the sibling
+/// matched-seed tests — PR #34 review finding. Arm-coverage assertions verified to
+/// hold at SEED = 2026 and 815 under this derivation.
 #[test]
 fn test_communicating_agents() -> Result<(), AifError> {
     const SEED: u64 = 2026;
@@ -52,7 +55,7 @@ fn test_communicating_agents() -> Result<(), AifError> {
     let n_bandits = 3;
     let mut test_env = TestEnvironment::new(n_agents);
     let mut bandit_env =
-        SharedBanditEnvironment::with_seed(vec![0.8, 0.4, 0.6], n_agents, SEED)?;
+        SharedBanditEnvironment::with_seed(vec![0.8, 0.4, 0.6], n_agents, env_seed(SEED))?;
 
     let mut base_agent1 = POMDPAgent::new(
         n_bandits,
@@ -63,7 +66,7 @@ fn test_communicating_agents() -> Result<(), AifError> {
         8.0,
         false,
     )?;
-    base_agent1.reseed(SEED + 1);
+    base_agent1.reseed(substream(group_seed(SEED), 1));
 
     let mut base_agent2 = POMDPAgent::new(
         n_bandits,
@@ -74,7 +77,7 @@ fn test_communicating_agents() -> Result<(), AifError> {
         8.0,
         false,
     )?;
-    base_agent2.reseed(SEED + 2);
+    base_agent2.reseed(substream(group_seed(SEED), 2));
 
     let mut agent1 = CommunicatingPOMDPAgent::new(base_agent1, 0, n_bandits, true, true, false, 3);
     let mut agent2 =
