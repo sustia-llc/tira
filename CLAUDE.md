@@ -155,8 +155,9 @@ constrain one temperature, not two. **(α, p): not marginally identifiable, CLOS
 (negative)** — a 4× budget probe near-converges (worst R-hat 1.081) onto tight-but-wrong
 marginals (rec p ≈ 0.36/0.50 vs true 0.8); the degeneracy is genuine and non-multiplicative.
 **(η, ω): weakly identifiable and NOT sampler-limited** — covariance mode does not help
-(worst R-hat 46); the pathology is likelihood structure (ω → 1 boundary), beyond the RW-MH
-family. **β₀/ψ are analytically excluded**: deterministic B ⇒ B† uniform ⇒ F_π
+(worst R-hat 46); the pathology is likelihood structure (ω → 1 boundary), unfixed by
+either proposal geometry tested (diagonal, Haario-adaptive; within-Gibbs/tempered RW
+untested). **β₀/ψ are analytically excluded**: deterministic B ⇒ B† uniform ⇒ F_π
 policy-constant ⇒ the γ/β loop is provably inert (test-pinned in aif) — they need a
 stochastic-B environment, out of scope. All findings guard-pinned in the binary
 (assert-before-print; α·γ ±15% band, arm contrast, probe tight-but-wrong pin).

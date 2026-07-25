@@ -30,7 +30,7 @@ posterior-level answers:
   genuine and non-multiplicative (α·p is +32/+61% off).
 - **(η, ω): weakly identifiable — not sampler-limited.** The covariance proposal does not
   help (worst R-hat 46); the pathology is likelihood structure (ω → 1 boundary regime),
-  out of reach of the whole random-walk MH family.
+  unfixed by either proposal geometry tested (within-Gibbs/tempered RW variants untested).
 
 β₀/ψ remain analytically excluded (inert γ/β loop on deterministic B — see below).
 
@@ -156,7 +156,7 @@ _Numbers only; interpretation follows below._
 
 **Q2 — genuine degeneracy, not budget.** At the shared budget the Covariance arm improves R-hat (2.87 → 1.60 worst) without converging (20%); the 4× probe near-converges (worst R-hat 1.081, 60% past the gate) onto **tight-but-wrong** marginals — rec p 0.363/0.497 (IQRs ≤ 0.04) vs true 0.8, α inflated to 1.10/1.70 — and the product α·p is *not* the identified combination (+61%/+32% off at 4×). More budget sharpens the wrong answer rather than finding the right one: the (α, p) posterior is a curved ridge whose mass sits away from the truth marginals under these priors. **(α, p): CLOSED as not marginally identifiable on this fixture** — the identified functional is some non-product curve (plausibly the good-arm choice probability that α and p jointly determine); characterizing it is future work.
 
-**Q3 — (η, ω) is not sampler-limited.** Covariance mode does not help (worst R-hat 46 vs 19; converged 35% vs 40%) — itself informative: the pathology is likelihood structure (near-flat directions with an ω → 1 boundary regime; the ω = 1.0 rows mix worst, R-hat IQRs to ~90), not proposal geometry, and no product-like invariant appears (η·ω errors −1% to −97%). Weak identifiability stands, now with evidence it is not fixable within the random-walk MH family.
+**Q3 — (η, ω) is not sampler-limited.** Covariance mode does not help (worst R-hat 46 vs 19; converged 35% vs 40%) — itself informative: the pathology is likelihood structure (near-flat directions with an ω → 1 boundary regime; the ω = 1.0 rows mix worst, R-hat IQRs to ~90), not proposal geometry, and no product-like invariant appears (η·ω errors −1% to −97%). Weak identifiability stands, now with evidence it is not fixed by either proposal geometry tested here (diagonal and Haario-adaptive-covariance); within-Gibbs or tempered RW variants remain untested.
 
 **Excluded — β₀/ψ (precision dynamics).** These are *unidentifiable* on the paper's MAB: deterministic B ⇒ transpose-normalized B† is uniform ⇒ the variational free energy `F_π` is policy-**constant** ⇒ the Smith Table-2 γ/β update is provably inert (test-pinned in aif). No amount of data recovers a parameter that does not move the likelihood; recovery would need a stochastic-B environment. Out of scope, noted for future work.
 

@@ -440,10 +440,12 @@ fn reflect(x: f64, lo: f64, hi: f64) -> f64 {
 ///
 /// The contract binds [`ProposalMode::JointScale`], whose reflected proposal lands *on* a
 /// bound routinely (that is what reflection does). [`ProposalMode::Covariance`] samples in
-/// log/logit-transformed space whose image is the **open** interval `(lo, hi)`, so a bound
-/// is reachable only through floating-point saturation of `exp`/`σ` at `|u| ≳ 37`, where the
-/// log-Jacobian penalty (`≈ −|u|`) makes the state effectively unvisitable. The epsilon
-/// inset therefore remains the safe choice for both modes.
+/// log/logit-transformed space whose image is the **open** interval `(lo, hi)`, so a bound is
+/// reachable only through floating-point saturation, and the threshold differs by branch:
+/// with finite bounds `σ(u)` saturates to 0/1 at `|u| ≳ 37`, while for `hi = +∞` the `exp`
+/// branch returns exactly `lo` only once `e^u` underflows to 0, at `u ≲ −745` (`hi` itself is
+/// unreachable). In both branches the log-Jacobian penalty (`≈ −|u|` there) makes such states
+/// effectively unvisitable. The epsilon inset therefore remains the safe choice for both modes.
 #[derive(Debug, Clone, Copy)]
 pub struct McmcDim {
     /// Initial proposal SD for this dimension. Under [`ProposalMode::JointScale`] it is
@@ -748,9 +750,11 @@ fn sigmoid(u: f64) -> f64 {
 
 /// Map one dimension from the unconstrained sampling space `u` back to θ space
 /// ([`ProposalMode::Covariance`]): `lo + e^u` for `hi = +∞`, `lo + (hi − lo)·σ(u)` for
-/// finite bounds. The image is the **open** interval `(lo, hi)` in exact arithmetic; in f64
-/// a bound is returned only once `exp`/`σ` saturates at `|u| ≳ 37`, which the log-Jacobian
-/// (`≈ −|u|` there) makes effectively unreachable — see [`McmcDim`]'s epsilon-lo contract.
+/// finite bounds. The image is the **open** interval `(lo, hi)` in exact arithmetic; in f64 a
+/// bound is returned only on saturation, per branch: the finite-bounds `σ(u)` flattens to 0/1
+/// at `|u| ≳ 37`, whereas the `hi = +∞` branch yields exactly `lo` only when `e^u` underflows
+/// to 0 at `u ≲ −745` (and never reaches `hi`). Either way the log-Jacobian (`≈ −|u|` there)
+/// makes those states effectively unreachable — see [`McmcDim`]'s epsilon-lo contract.
 #[must_use]
 fn cov_inverse(u: f64, lo: f64, hi: f64) -> f64 {
     if hi.is_finite() {
@@ -789,7 +793,8 @@ fn cov_log_jacobian(u: f64, lo: f64, hi: f64) -> f64 {
 }
 
 /// Symmetrize `cov` and add the [`COV_RIDGE`] ridge, yielding the `Σ_reg` the proposal is
-/// built from (and whose diagonal `DimResult::adapted_sd` reports).
+/// built from (`DimResult::adapted_sd` reports `λ·√(Σ_reg[d][d])`, read off the frozen
+/// Cholesky factor's row norms — see [`vec_run_chain_cov`]).
 ///
 /// Symmetrization matters because the Welford rank-1 accumulation is symmetric in *exact*
 /// arithmetic only — rounding in the running-mean update can leave a last-bit asymmetry.
@@ -846,8 +851,13 @@ fn cov_proposal_factor(reg: &DMatrix<f64>, lambda: f64) -> Result<DMatrix<f64>, 
 ///   whole simulation in the study callers).
 ///
 /// Both `λ` and `Σ_reg` **freeze** at burn-in end, so the sampling phase is plain MH with a
-/// fixed proposal (detailed balance intact). `adapted_sd` reports the frozen per-dimension
-/// `λ·√(Σ_reg[d][d])` — a *transformed*-space scale (see [`DimResult::adapted_sd`]).
+/// fixed proposal (detailed balance intact). `adapted_sd` is read off **the frozen factor
+/// itself** — per dimension, the row norm `√(Σ_k L[d][k]²)`, i.e. `√((L·Lᵀ)[d][d])`, which by
+/// construction is the `λ·√(Σ_reg[d][d])` of the proposal actually used for sampling. Taking
+/// it from `L` rather than from the loop variables is what makes that claim exact: `ln λ`
+/// receives one final Robbins-Monro increment *after* the last factor is built, so a
+/// post-loop `ln_lambda.exp()` would be one increment ahead of the frozen proposal. It is a
+/// *transformed*-space scale (see [`DimResult::adapted_sd`]).
 ///
 /// Like [`vec_run_chain`] this **propagates** a log-posterior `Err`; unlike it, the bounds
 /// are effectively unreachable (see [`cov_inverse`]), so a likelihood that is undefined only
@@ -909,13 +919,14 @@ where
     let mut prop_x = vec![0.0_f64; n];
     let mut z = vec![0.0_f64; n];
     // Seeded here so a `burn_in == 0` config still has a well-defined frozen proposal (the
-    // seed diagonal at the initial λ); the burn-in loop overwrites both every iteration.
-    let mut cov_reg = seed_reg.clone();
-    let mut factor = cov_proposal_factor(&cov_reg, ln_lambda.exp())?;
+    // seed diagonal at the initial λ); the burn-in loop overwrites it every iteration.
+    // `factor` is the ONLY proposal state that outlives the loop — `Σ_reg` and `λ` are
+    // per-iteration locals, so nothing downstream can read a version the sampler never used.
+    let mut factor = cov_proposal_factor(&seed_reg, ln_lambda.exp())?;
 
     for i in 0..config.burn_in {
         // Proposal covariance: seed diagonal until 2n history points, then empirical.
-        cov_reg = if count < 2 * n {
+        let cov_reg = if count < 2 * n {
             seed_reg.clone()
         } else {
             cov_regularize(&(&m2 / (count as f64 - 1.0)))
@@ -960,11 +971,16 @@ where
         ln_lambda += gain * (f64::from(u8::from(accepted)) - ADAPT_TARGET);
     }
 
-    // Frozen proposal: λ and Σ_reg stop moving ⇒ plain MH from here on. The reported scale
-    // is the u-space per-dim σ of that frozen proposal (`.max(0.0)` is defensive only —
-    // Σ_reg's diagonal is ridge-positive by construction).
-    let lambda = ln_lambda.exp();
-    let adapted_sd: Vec<f64> = (0..n).map(|d| lambda * cov_reg[(d, d)].max(0.0).sqrt()).collect();
+    // Frozen proposal: λ and Σ_reg stop moving ⇒ plain MH from here on. Read the reported
+    // u-space per-dim σ off `factor` itself — row norm `√(Σ_k L[d][k]²)` = `√((L·Lᵀ)[d][d])`
+    // = `λ·√(Σ_reg[d][d])` for the λ/Σ_reg actually baked into the sampling proposal. (`L` is
+    // lower-triangular, so row `d` has nonzeros only in columns `0..=d`.) Recomputing from
+    // `ln_lambda` here would instead report the λ *after* the loop's final Robbins-Monro
+    // increment, which no proposal ever used. With `burn_in == 0` this is the seed diagonal
+    // at the initial λ — still exactly the frozen proposal.
+    let adapted_sd: Vec<f64> = (0..n)
+        .map(|d| (0..=d).map(|k| factor[(d, k)] * factor[(d, k)]).sum::<f64>().sqrt())
+        .collect();
     let mut samples = Vec::with_capacity(config.n_samples);
     let mut accepts = 0usize;
     for _ in 0..config.n_samples {

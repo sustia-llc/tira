@@ -416,7 +416,9 @@ fn print_report(q1: &Arms, q2: &Arms, q3: &Arms, q2_probe: &[CellResult]) {
     //      every cell (measured devs −1.8%/−1.2%/−3.3%/−4.8%) — even in cells failing the
     //      R-hat gate, because unmixed chains still sit ON the ridge. Q2 probe: near-converged
     //      (worst R-hat 1.081) onto tight-but-WRONG marginals (rec p ≈ 0.36/0.50 vs true 0.8)
-    //      — the genuine-degeneracy pin. Tolerances carry ≥ 3× measured headroom.
+    //      — the genuine-degeneracy pin. The α·γ product guard carries >3× measured headroom
+    //      (±15% band vs a 4.8% worst measured deviation); the remaining pins sit deliberately
+    //      snug (~1.2–2× from their measured values) so a drifted finding trips them.
     for c in &q1.covariance {
         let truth = c.t0 * c.t1;
         let rel = (c.m01.0 / truth - 1.0).abs();
@@ -592,7 +594,8 @@ fn print_report(q1: &Arms, q2: &Arms, q3: &Arms, q2_probe: &[CellResult]) {
          structure (near-flat directions with an ω → 1 boundary regime; the ω = 1.0 rows mix \
          worst, R-hat IQRs to ~90), not proposal geometry, and no product-like invariant \
          appears (η·ω errors −1% to −97%). Weak identifiability stands, now with evidence it \
-         is not fixable within the random-walk MH family."
+         is not fixed by either proposal geometry tested here (diagonal and \
+         Haario-adaptive-covariance); within-Gibbs or tempered RW variants remain untested."
     );
     println!();
     println!(
