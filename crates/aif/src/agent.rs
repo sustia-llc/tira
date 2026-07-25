@@ -3391,6 +3391,77 @@ mod tests {
         Ok(())
     }
 
+    /// Executable regression for the documented depth-1 deviation (issue #8;
+    /// `docs/aif-coverage.md`, "Policy length 2").
+    ///
+    /// The paper uses length-2 policies; every experiment construction site in this repo
+    /// uses `new()` ⇒ depth 1. The deviation is documented as *provably* immaterial on
+    /// the MAB: B is deterministic (arm `u` sends all mass to state `u` regardless of the
+    /// current state), so the step-2 term of a policy's value depends only on its step-2
+    /// action — the step-1 action contributes an identical additive constant to every
+    /// step-2 continuation. Marginalizing the policy posterior back to actions therefore
+    /// leaves the depth-1 action distribution unchanged.
+    ///
+    /// "Provably" had no test. This pins it: two agents with identical MAB
+    /// parameterization (differing ONLY in `policy_depth`) are driven through the same
+    /// observation/action replay path used by `log_likelihood`, and their action-
+    /// probability vectors must agree to 1e-12 at every step.
+    #[test]
+    fn test_depth1_depth2_action_marginal_equivalence_mab() -> Result<(), AifError> {
+        const TOL: f64 = 1e-12;
+        const ALPHA: f64 = 0.5;
+        const GAMMA: f64 = 16.0;
+
+        let build = |depth: usize| {
+            POMDPAgent::with_params(
+                3,
+                Some(vec![0.8, 0.2, 0.2]), // BANDIT_PROBS
+                None,
+                vec![0.7, 0.3], // canonical C
+                None,           // uniform D
+                ALPHA,
+                GAMMA,
+                depth,
+                false,
+            )
+        };
+        let mut depth1 = build(1)?;
+        let mut depth2 = build(2)?;
+        assert_eq!(depth1.e_vector.len(), 3, "depth 1 ⇒ 3 policies (uniform E)");
+        assert_eq!(depth2.e_vector.len(), 9, "depth 2 ⇒ 3² policies (uniform E)");
+
+        // Mixed observations and a mixed action script — the same replay path
+        // (`action_probabilities` + `record_action`) that recovery drives.
+        let obs_script = [0usize, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1];
+        let act_script = [0usize, 2, 1, 0, 0, 2, 1, 1, 2, 0, 1, 2];
+
+        for (t, (&obs, &action)) in obs_script.iter().zip(act_script.iter()).enumerate() {
+            let p1 = depth1.action_probabilities(obs);
+            let p2 = depth2.action_probabilities(obs);
+            assert_eq!(p1.len(), 3);
+            assert_eq!(p2.len(), 3, "the depth-2 marginal is still over 3 actions");
+            for a in 0..3 {
+                assert!(
+                    (p1[a] - p2[a]).abs() < TOL,
+                    "step {t}, action {a}: depth-1 and depth-2 action marginals must agree \
+                     under deterministic B — got {:.17} vs {:.17}",
+                    p1[a],
+                    p2[a]
+                );
+            }
+            // Sanity: a real distribution, not two matching degenerate vectors.
+            let sum: f64 = p1.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-9, "step {t}: action marginal must normalize, got {sum}");
+            assert!(
+                p1.iter().any(|&p| p > 0.05) && p1.iter().any(|&p| p < 0.5),
+                "step {t}: the marginal must be non-degenerate, got {p1:?}"
+            );
+            depth1.record_action(action);
+            depth2.record_action(action);
+        }
+        Ok(())
+    }
+
     // ----- Stage A (tira #12): generalized generative model -----
 
     /// Deterministic MAB transition matrices (one per arm), as `new` builds them.

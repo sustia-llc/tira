@@ -14,6 +14,24 @@ fn uniform_index(rng: &mut StdRng, n: usize) -> usize {
         .sample(rng)
 }
 
+/// Confidence weight of one agent's action distribution: `w = exp(−H)`, where
+/// `H = −Σ p ln p` is the Shannon entropy in nats.
+///
+/// Entries at or below `1e-15` contribute nothing (the `0 · ln 0 = 0` convention,
+/// with the threshold also keeping denormals out of `ln`). For a finite
+/// distribution over `n` actions the weight is bounded: a delta gives `H = 0` ⇒
+/// `w = 1`, and the uniform distribution gives `H = ln n` ⇒ `w = 1/n`, so
+/// `w ∈ [1/n, 1]` — the bound the zero-total-weight fallback in
+/// [`VotingAgent::aggregate_weighted`] relies on. A `NaN` entry poisons the sum and
+/// yields a `NaN` weight, which that fallback also handles.
+fn confidence_weight(dist: &[f64]) -> f64 {
+    let entropy: f64 = dist
+        .iter()
+        .map(|&p| if p > 1e-15 { -p * p.ln() } else { 0.0 })
+        .sum();
+    (-entropy).exp()
+}
+
 /// How the active agent aggregates internal agent outputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VotingMode {
@@ -143,12 +161,8 @@ impl VotingAgent {
         let mut total_weight = 0.0f64;
 
         for dist in distributions {
-            // Confidence = exp(-H) where H = -Σ p ln p
-            let entropy: f64 = dist
-                .iter()
-                .map(|&p| if p > 1e-15 { -p * p.ln() } else { 0.0 })
-                .sum();
-            let weight = (-entropy).exp();
+            // Confidence = exp(-H) where H = -Σ p ln p; see `confidence_weight`.
+            let weight = confidence_weight(dist.as_slice());
 
             for (a, &p) in dist.iter().enumerate() {
                 mixture[a] += weight * p;
@@ -161,11 +175,18 @@ impl VotingAgent {
                 *p /= total_weight;
             }
         } else {
-            // Reachable for empty `distributions` OR when any distribution contains NaN.
-            // For non-empty FINITE input each weight w_i = exp(-H(P_i)) >= exp(-ln n) = 1/n > 0,
-            // so total_weight >= 1/n > 0. Empty input leaves total_weight == 0; and a NaN entry
-            // poisons its entropy (NaN weight → NaN total_weight, and `NaN > 1e-15` is false).
-            // Either way, fall back to a uniform action distribution.
+            // Reachable two ways (both covered by
+            // `test_aggregate_weighted_zero_total_weight_falls_back_to_uniform`):
+            //   1. Empty `distributions` — the loop never runs, so total_weight stays 0.
+            //   2. Entropies large enough that Σ exp(-H_i) underflows the threshold. For a
+            //      NORMALIZED distribution over n actions H <= ln n, so w_i >= 1/n and this
+            //      needs an astronomically large n; but the inputs are not required to
+            //      normalize, and e.g. 100 entries of 0.5 give H = 34.66 ⇒ w = 8.9e-16.
+            // NOT reachable via NaN: the `p > 1e-15` guard in `confidence_weight` is false
+            // for NaN, so a NaN entry contributes 0.0 to the entropy and the weight stays
+            // finite. Such an entry instead propagates into `mixture` and is rejected by
+            // `WeightedIndex` as `AifError::Weight(InvalidWeight)` — pinned by the same test.
+            // (An earlier version of this comment claimed NaN poisoned the weight; it does not.)
             for p in &mut mixture {
                 *p = 1.0 / self.n_actions as f64;
             }
@@ -520,6 +541,272 @@ mod tests {
     #[should_panic(expected = "n_actions > 0")]
     fn test_voting_agent_zero_actions_panics() {
         let _ = VotingAgent::new(0, VotingMode::Probabilistic);
+    }
+
+    /// `confidence_weight` was extracted out of `aggregate_weighted` (issue #8) and MUST
+    /// stay bit-identical to the expression it replaced — the CW mixture, and every
+    /// seeded CW action stream downstream of it, depends on the exact `f64`. This pins
+    /// the extracted helper against a verbatim copy of the pre-extraction inline
+    /// expression, compared on raw bits (not a tolerance) across a spread of shapes
+    /// including the threshold and NaN edges.
+    #[test]
+    fn test_confidence_weight_matches_inline_expression_bitwise() {
+        fn inline(dist: &[f64]) -> f64 {
+            let entropy: f64 = dist
+                .iter()
+                .map(|&p| if p > 1e-15 { -p * p.ln() } else { 0.0 })
+                .sum();
+            (-entropy).exp()
+        }
+
+        let cases: Vec<Vec<f64>> = vec![
+            vec![0.61, 0.13, 0.26],
+            vec![0.9, 0.05, 0.05],
+            vec![1.0, 0.0, 0.0],
+            vec![1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
+            vec![0.5, 0.5],
+            vec![0.5, 0.25, 0.25],
+            vec![0.7, 0.2, 0.1, 0.0],
+            vec![1e-16, 1.0 - 1e-16],      // straddles the 1e-15 guard
+            vec![1e-14, 1.0 - 1e-14],      // just above the guard
+            vec![f64::NAN, 0.5, 0.5],      // NaN fails `p > 1e-15` in both versions
+            vec![0.5; 100],                // the total-weight underflow fixture
+        ];
+        for case in &cases {
+            let a = confidence_weight(case);
+            let b = inline(case);
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "extraction must be bit-identical for {case:?}: helper {a:?} vs inline {b:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "n_actions > 0")]
+    fn test_voting_agent_with_seed_zero_actions_panics() {
+        // `with_seed` carries the same n_actions > 0 precondition as `new` — the
+        // invariant the `uniform_index` expect() relies on.
+        let _ = VotingAgent::with_seed(0, VotingMode::Probabilistic, 42);
+    }
+
+    // ----- Numeric pins for the certainty-weighted mixture (issue #8) -----
+
+    /// Hand-computed closed forms for `w = exp(−H)`, `H = −Σ p ln p` (nats):
+    ///   delta   [1, 0, 0]          → H = 0                    → w = 1
+    ///   uniform [1/3, 1/3, 1/3]    → H = ln 3                 → w = 1/3
+    ///   skewed  [0.5, 0.25, 0.25]  → H = ½ln2 + 2·¼ln4
+    ///                                 = ½ln2 + ln2 = 1.5·ln 2 → w = 2^(−3/2)
+    /// The delta case also exercises the `p > 1e-15` guard (the two zero entries are
+    /// skipped rather than evaluating `ln 0 = −∞`).
+    #[test]
+    fn test_confidence_weight_closed_forms() {
+        const TOL: f64 = 1e-12;
+
+        let delta = confidence_weight(&[1.0, 0.0, 0.0]);
+        assert!(
+            (delta - 1.0).abs() < TOL,
+            "delta distribution: H = 0 ⇒ w = 1, got {delta:.17}"
+        );
+
+        let uniform = confidence_weight(&[1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]);
+        assert!(
+            (uniform - 1.0 / 3.0).abs() < TOL,
+            "uniform over 3: H = ln 3 ⇒ w = 1/3, got {uniform:.17}"
+        );
+
+        let skewed = confidence_weight(&[0.5, 0.25, 0.25]);
+        let expected = 2.0_f64.powf(-1.5); // = 0.353553390593273762...
+        assert!(
+            (skewed - expected).abs() < TOL,
+            "[0.5, 0.25, 0.25]: H = 1.5·ln 2 ⇒ w = 2^(−3/2) = {expected:.17}, got {skewed:.17}"
+        );
+
+        // Uniform over 2 is the other exactly-representable anchor: H = ln 2 ⇒ w = 1/2.
+        let half = confidence_weight(&[0.5, 0.5]);
+        assert!(
+            (half - 0.5).abs() < TOL,
+            "uniform over 2: H = ln 2 ⇒ w = 1/2, got {half:.17}"
+        );
+
+        // Monotonicity of the weight in confidence: sharper ⇒ heavier.
+        assert!(
+            confidence_weight(&[0.9, 0.05, 0.05]) > confidence_weight(&[0.4, 0.3, 0.3]),
+            "a sharper distribution must earn a larger confidence weight"
+        );
+    }
+
+    /// Full `aggregate_weighted` mixture pinned by hand for 2 agents × 2 actions.
+    ///
+    /// Agent A = [0.5, 0.5] → H = ln 2   ⇒ w_A = 1/2 (exact)
+    /// Agent B = [1.0, 0.0] → H = 0      ⇒ w_B = 1   (exact)
+    ///
+    /// Unnormalized mixture: [½·½ + 1·1, ½·½ + 1·0] = [1.25, 0.25]
+    /// Total weight        : ½ + 1 = 1.5
+    /// Normalized mixture  : [1.25/1.5, 0.25/1.5] = [5/6, 1/6]
+    ///
+    /// Note the naive UNWEIGHTED average would be [0.75, 0.25] — 5/6 ≠ 3/4, so this
+    /// pins the confidence weighting itself, not just the mixing arithmetic.
+    ///
+    /// The mixture is never returned (only a sample from it), so it is pinned two ways:
+    /// its argmax via a `Deterministic` direct call, and its mass via the empirical
+    /// frequency of a *seeded* sampler (deterministic, not a statistical tolerance).
+    #[test]
+    fn test_aggregate_weighted_mixture_hand_computed() -> Result<(), AifError> {
+        const TOL: f64 = 1e-12;
+        let agent_a = DVector::from_vec(vec![0.5, 0.5]);
+        let agent_b = DVector::from_vec(vec![1.0, 0.0]);
+
+        // The two weights the mixture is built from, pinned against their closed forms.
+        let w_a = confidence_weight(agent_a.as_slice());
+        let w_b = confidence_weight(agent_b.as_slice());
+        assert!((w_a - 0.5).abs() < TOL, "w_A = 1/2, got {w_a:.17}");
+        assert!((w_b - 1.0).abs() < TOL, "w_B = 1, got {w_b:.17}");
+
+        let total = w_a + w_b;
+        let expected = [
+            (w_a * 0.5 + w_b * 1.0) / total,
+            (w_a * 0.5 + w_b * 0.0) / total,
+        ];
+        assert!((expected[0] - 5.0 / 6.0).abs() < TOL, "mixture[0] = 5/6, got {:.17}", expected[0]);
+        assert!((expected[1] - 1.0 / 6.0).abs() < TOL, "mixture[1] = 1/6, got {:.17}", expected[1]);
+
+        let distributions = vec![agent_a, agent_b];
+
+        // (1) argmax: the Deterministic branch returns the mixture's unique maximum.
+        let mut det = VotingAgent::with_seed(2, VotingMode::Deterministic, 7);
+        for _ in 0..20 {
+            assert_eq!(
+                det.aggregate_weighted(&distributions)?,
+                0,
+                "mixture [5/6, 1/6] must resolve to action 0 under Deterministic"
+            );
+        }
+
+        // (2) mass: a seeded CW sampler's frequency is a fixed number, not a random one;
+        // over 20_000 draws it must land on 5/6 within sampling noise.
+        let mut cw = VotingAgent::with_seed(2, VotingMode::CertaintyWeighted, 7);
+        const DRAWS: usize = 20_000;
+        let mut counts = [0usize; 2];
+        for _ in 0..DRAWS {
+            counts[cw.aggregate_weighted(&distributions)?] += 1;
+        }
+        let freq0 = counts[0] as f64 / DRAWS as f64;
+        println!("CW mixture pin: expected {:.6}, sampled {freq0:.6}", expected[0]);
+        assert!(
+            (freq0 - expected[0]).abs() < 0.01,
+            "seeded CW sampling must reproduce the 5/6 mixture mass, got {freq0:.6} ({counts:?})"
+        );
+        Ok(())
+    }
+
+    // ----- VotingAgent edge paths (issue #8) -----
+
+    #[test]
+    fn test_aggregate_rejects_out_of_range_vote() {
+        let mut voter = VotingAgent::with_seed(3, VotingMode::Probabilistic, 11);
+        // Vote 3 is out of range for n_actions = 3; the error carries the offending vote.
+        let err = voter.aggregate(&[0, 1, 3]);
+        assert!(
+            matches!(err, Err(AifError::InvalidAction(3))),
+            "out-of-range vote must yield InvalidAction(3), got {err:?}"
+        );
+
+        // Deterministic mode takes the same early-return path (the check precedes the
+        // mode branch), and the payload is the FIRST offending vote.
+        let mut det = VotingAgent::with_seed(3, VotingMode::Deterministic, 11);
+        let err = det.aggregate(&[0, 7, 9]);
+        assert!(
+            matches!(err, Err(AifError::InvalidAction(7))),
+            "the payload must be the first offending vote, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_empty_votes_falls_back_to_uniform() -> Result<(), AifError> {
+        // No votes ⇒ all counts zero ⇒ the `counts.iter().all(|&c| c == 0)` branch
+        // returns a uniform random action rather than erroring (WeightedIndex would
+        // reject an all-zero weight vector).
+        let mut voter = VotingAgent::with_seed(3, VotingMode::Probabilistic, 2026);
+        let mut counts = [0usize; 3];
+        for _ in 0..600 {
+            let action = voter.aggregate(&[])?;
+            assert!(action < 3, "uniform fallback must stay in range, got {action}");
+            counts[action] += 1;
+        }
+        // Seeded, so these counts are fixed; every action must be reachable and the
+        // spread must look uniform (each ≈ 200 of 600).
+        println!("empty-vote uniform fallback: {counts:?}");
+        assert!(
+            counts.iter().all(|&c| c > 150),
+            "the fallback must be uniform over all actions, got {counts:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_aggregate_weighted_zero_total_weight_falls_back_to_uniform() -> Result<(), AifError> {
+        // Path 1: empty input ⇒ total_weight stays 0 ⇒ uniform mixture.
+        let mut voter = VotingAgent::with_seed(3, VotingMode::CertaintyWeighted, 99);
+        let mut counts = [0usize; 3];
+        for _ in 0..600 {
+            let action = voter.aggregate_weighted(&[])?;
+            assert!(action < 3, "empty-input fallback must stay in range, got {action}");
+            counts[action] += 1;
+        }
+        println!("empty-distribution uniform fallback: {counts:?}");
+        assert!(
+            counts.iter().all(|&c| c > 150),
+            "the empty-input fallback must be uniform, got {counts:?}"
+        );
+
+        // Path 2: entropies large enough that the total weight underflows the threshold.
+        // Inputs are NOT required to be normalized, so 100 entries of 0.5 give
+        // H = 100 · (−0.5·ln 0.5) = 34.657 ⇒ w = exp(−34.657) = 8.88e-16 ≤ 1e-15, and the
+        // single-agent total falls under the guard. This is the only non-empty way to
+        // reach the fallback (a normalized distribution over n actions has H ≤ ln n, so
+        // w ≥ 1/n).
+        const N_WIDE: usize = 100;
+        let wide = vec![DVector::from_element(N_WIDE, 0.5)];
+        assert!(
+            confidence_weight(wide[0].as_slice()) <= 1e-15,
+            "the wide fixture must underflow the total-weight guard, got {}",
+            confidence_weight(wide[0].as_slice())
+        );
+        let mut wide_voter = VotingAgent::with_seed(N_WIDE, VotingMode::CertaintyWeighted, 99);
+        let mut seen = [false; N_WIDE];
+        for _ in 0..2000 {
+            let action = wide_voter.aggregate_weighted(&wide)?;
+            assert!(action < N_WIDE, "underflow fallback must stay in range, got {action}");
+            seen[action] = true;
+        }
+        assert!(
+            seen.iter().all(|&s| s),
+            "the underflow fallback must sample uniformly over all {N_WIDE} actions"
+        );
+
+        // NOT a fallback path: a NaN entry. `confidence_weight`'s `p > 1e-15` guard is
+        // FALSE for NaN, so the NaN contributes 0.0 to the entropy and the weight stays
+        // finite (here exactly exp(−ln 2) = 0.5 from the two 0.5 entries) — the total
+        // weight is never NaN. The NaN instead propagates into the mixture, where
+        // `WeightedIndex` rejects it. Pinned so the fallback's reachability comment stays
+        // honest: this used to be documented as a uniform-fallback case, and it is not.
+        let poisoned = vec![
+            DVector::from_vec(vec![0.6, 0.2, 0.2]),
+            DVector::from_vec(vec![f64::NAN, 0.5, 0.5]),
+        ];
+        assert!(
+            (confidence_weight(poisoned[1].as_slice()) - 0.5).abs() < 1e-12,
+            "a NaN entry must NOT poison the weight; the guard drops it"
+        );
+        let mut nan_voter = VotingAgent::with_seed(3, VotingMode::CertaintyWeighted, 99);
+        let err = nan_voter.aggregate_weighted(&poisoned);
+        assert!(
+            matches!(err, Err(AifError::Weight(_))),
+            "a NaN entry must surface as a WeightedIndex error, got {err:?}"
+        );
+        Ok(())
     }
 
     #[test]

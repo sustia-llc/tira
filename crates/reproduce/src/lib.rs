@@ -334,4 +334,55 @@ mod tests {
         assert_ne!(obs_a, obs_c, "distinct seeds should diverge on the reward stream");
         Ok(())
     }
+
+    /// Multi-agent counterpart of the test above (issue #8): `SharedBanditEnvironment`
+    /// carries the same seeded-RNG contract as `BanditEnvironment`, and until now had no
+    /// caller at all. A fixed two-agent action script replayed under the same seed must
+    /// reproduce both the observation and the reward stream bit-for-bit; a different seed
+    /// must diverge.
+    ///
+    /// The script gives the two agents DISTINCT arms every round — the environment is
+    /// competitive by default, so a collision would return `ResourceConflict` and the
+    /// draw ordering (hence the comparison) would depend on error handling instead of the
+    /// RNG. Each round both agents act, which advances the round via `next_round`.
+    #[test]
+    fn shared_with_seed_reproduces_observation_and_reward_sequences() -> Result<(), AifError> {
+        // (agent 0 arm, agent 1 arm) per round — never equal.
+        const SCRIPT: [(usize, usize); 8] =
+            [(0, 1), (1, 2), (2, 0), (0, 2), (1, 0), (2, 1), (0, 1), (1, 2)];
+
+        fn run(seed: u64) -> Result<(Vec<usize>, Vec<bool>), AifError> {
+            let mut env = SharedBanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 2, seed)?;
+            let mut obs = Vec::with_capacity(SCRIPT.len() * 2);
+            let mut rewards = Vec::with_capacity(SCRIPT.len() * 2);
+            for &(a0, a1) in &SCRIPT {
+                for (agent_id, action) in [(0usize, a0), (1usize, a1)] {
+                    let (o, change) = <SharedBanditEnvironment as MultiAgentEnvironment>::step(
+                        &mut env, agent_id, action,
+                    )?;
+                    obs.push(o);
+                    rewards.push(change.expect("shared env always reports a StateChange").reward_obtained);
+                }
+            }
+            assert_eq!(env.rounds(), SCRIPT.len(), "every round must complete (both agents acted)");
+            Ok((obs, rewards))
+        }
+
+        let (obs_a, rew_a) = run(4242)?;
+        let (obs_b, rew_b) = run(4242)?;
+        assert_eq!(obs_a, obs_b, "same seed must reproduce the shared observation sequence");
+        assert_eq!(rew_a, rew_b, "same seed must reproduce the shared reward sequence");
+
+        // Sanity: the stream is not degenerate (all draws identical would make the
+        // equality above vacuous).
+        assert!(
+            obs_a.iter().any(|&o| o != obs_a[0]),
+            "the seeded observation stream should contain both outcomes: {obs_a:?}"
+        );
+
+        // A different seed must diverge over these 16 draws.
+        let (obs_c, _) = run(4243)?;
+        assert_ne!(obs_a, obs_c, "distinct seeds should diverge on the shared reward stream");
+        Ok(())
+    }
 }

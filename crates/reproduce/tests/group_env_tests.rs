@@ -1,7 +1,23 @@
 // Tests from aif/src/group.rs that require BanditEnvironment (lives in reproduce).
 use reproduce::{
-    Agent, BanditEnvironment, Environment, GroupAgentBuilder, AifError, VotingMode,
+    Agent, BanditEnvironment, Environment, GroupAgentBuilder, AifError, VotingMode, env_seed,
+    group_seed,
 };
+
+/// Shannon entropy (nats) of an action-count histogram — the concentration measure used
+/// by the certainty-weighting test below. Lower = more concentrated.
+fn count_entropy(counts: &[usize]) -> f64 {
+    let total: usize = counts.iter().sum();
+    assert!(total > 0, "entropy of an empty histogram is undefined");
+    counts
+        .iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / total as f64;
+            -p * p.ln()
+        })
+        .sum()
+}
 
 #[test]
 fn test_group_agent_certainty_weighted_mode() -> Result<(), AifError> {
@@ -33,10 +49,29 @@ fn test_group_agent_certainty_weighted_mode() -> Result<(), AifError> {
     Ok(())
 }
 
+/// Under CONFLICTING preferences, certainty-weighted voting is less noisy than simple
+/// probabilistic voting: confident members dominate the mixture instead of each casting
+/// one equal discrete vote, so the group's action histogram is more concentrated.
+///
+/// Matched-pair design (issue #8, mirroring `simulation.rs`'s Figure-6 assertion): both
+/// arms are built from the SAME seed and each gets its OWN identically seeded environment,
+/// so the two runs differ only in voting mode. (The previous version shared one entropy-
+/// seeded environment sequentially — the CW arm continued the simple arm's reward stream,
+/// so the two were neither matched nor reproducible, and the computed histograms were
+/// never actually compared.)
+///
+/// Seeds checked while writing this test — CW was strictly more concentrated at all of
+/// them, by a wide margin:
+///   2026     → simple max  98, CW max 125   (chosen)
+///   7        → simple max 108, CW max 134
+///   815      → simple max  96, CW max 133
+///   4242     → simple max  85, CW max 123
+///   20260211 → simple max  98, CW max 136
 #[test]
 fn test_certainty_weighted_conflicting_prefs_less_noisy_than_simple() -> Result<(), AifError>
 {
-    let mut env = BanditEnvironment::new(vec![0.8, 0.2, 0.2])?;
+    const SEED: u64 = 2026;
+    const N_TRIALS: usize = 200;
 
     // Conflicting preferences: half prefer obs1, half prefer obs2
     let n = 8;
@@ -50,45 +85,53 @@ fn test_certainty_weighted_conflicting_prefs_less_noisy_than_simple() -> Result<
         })
         .collect();
 
-    // Simple voting
-    let mut simple = GroupAgentBuilder::new(3)
-        .n_internal(n)
-        .observation_probs(vec![0.8, 0.2, 0.2])
-        .alpha(0.5)
-        .build_varying_preferences(&pref_sets)?;
+    let run = |certainty_weighted: bool| -> Result<Vec<usize>, AifError> {
+        let mut builder = GroupAgentBuilder::new(3)
+            .n_internal(n)
+            .observation_probs(vec![0.8, 0.2, 0.2])
+            .alpha(0.5)
+            .seed(group_seed(SEED));
+        if certainty_weighted {
+            builder = builder.certainty_weighted(true);
+        }
+        let mut group = builder.build_varying_preferences(&pref_sets)?;
+        let mut env = BanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], env_seed(SEED))?;
+        let mut obs = 0;
+        let mut counts = vec![0usize; 3];
+        for _ in 0..N_TRIALS {
+            let a = group.act(obs)?;
+            counts[a] += 1;
+            obs = env.step(a)?;
+        }
+        Ok(counts)
+    };
 
-    // Certainty-weighted voting
-    let mut cw = GroupAgentBuilder::new(3)
-        .n_internal(n)
-        .observation_probs(vec![0.8, 0.2, 0.2])
-        .alpha(0.5)
-        .certainty_weighted(true)
-        .build_varying_preferences(&pref_sets)?;
-
-    let n_trials = 200;
-
-    let mut simple_obs = 0;
-    let mut simple_counts = vec![0usize; 3];
-    for _ in 0..n_trials {
-        let a = simple.act(simple_obs)?;
-        simple_counts[a] += 1;
-        simple_obs = env.step(a)?;
-    }
-
-    let mut cw_obs = 0;
-    let mut cw_counts = vec![0usize; 3];
-    for _ in 0..n_trials {
-        let a = cw.act(cw_obs)?;
-        cw_counts[a] += 1;
-        cw_obs = env.step(a)?;
-    }
+    let simple_counts = run(false)?;
+    let cw_counts = run(true)?;
 
     println!("Simple voting (conflicting prefs): {simple_counts:?}");
     println!("CW voting (conflicting prefs):     {cw_counts:?}");
 
-    // Both should produce valid results
-    assert_eq!(simple_counts.iter().sum::<usize>(), n_trials);
-    assert_eq!(cw_counts.iter().sum::<usize>(), n_trials);
+    assert_eq!(simple_counts.iter().sum::<usize>(), N_TRIALS);
+    assert_eq!(cw_counts.iter().sum::<usize>(), N_TRIALS);
+
+    // The named property, two ways: modal mass and histogram entropy.
+    let simple_max = *simple_counts.iter().max().expect("3 actions ⇒ non-empty");
+    let cw_max = *cw_counts.iter().max().expect("3 actions ⇒ non-empty");
+    assert!(
+        cw_max >= simple_max,
+        "CW voting must be at least as concentrated as simple voting (seed {SEED}): \
+         CW max {cw_max} {cw_counts:?} vs simple max {simple_max} {simple_counts:?}"
+    );
+
+    let simple_h = count_entropy(&simple_counts);
+    let cw_h = count_entropy(&cw_counts);
+    println!("action-count entropy: simple={simple_h:.4} nats, CW={cw_h:.4} nats");
+    assert!(
+        cw_h <= simple_h,
+        "CW voting must not be noisier than simple voting (seed {SEED}): \
+         CW H={cw_h:.4} vs simple H={simple_h:.4}"
+    );
     Ok(())
 }
 

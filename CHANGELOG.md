@@ -20,6 +20,26 @@
   (`docs/extension2-multiparam.md`); runtime ~57 s → ~3 min.
 - Test suite 167 → 173.
 
+2026-07-25 (#8 — test debt):
+
+- Experiment smoke tests assert finite/in-grid/seeded-banded recovered α; new
+  `test_experiment_shape_ordering_seeded` pins the Fig-5 shape ordering
+  (Exp4 < Exp2 < Exp3, checked at 4 seeds). Residual bands tightened per the
+  seed-regeneration protocol (LL argmax ±0.35 → ±0.20; Exp1 0.25..0.85 → 0.35..0.65).
+- Tautological integration tests made behavioral (CW-vs-simple concentration on
+  matched seeds; experiment-2 heterogeneity; communicating-agents ranges).
+- CW confidence weight extracted (`confidence_weight`, bit-identical — verified on
+  `to_bits`) and numerically pinned (closed forms; 2×2 mixture [5/6, 1/6]).
+- Dirichlet/Beta generator tests assert dispersion instead of by-construction means.
+- `VotingAgent` edge paths tested (out-of-range vote, empty-votes fallback,
+  zero-total-weight underflow fallback, `with_seed` zero-actions panic). The
+  false NaN-reachability comment corrected: NaN input surfaces as
+  `AifError::Weight`, never the uniform fallback (behavior unchanged, now pinned).
+- New `test_depth1_depth2_action_marginal_equivalence_mab` — executable regression
+  for the depth-1 policy deviation documented in aif-coverage (holds, <1e-12).
+- `SharedBanditEnvironment::with_seed` gains its first caller/test.
+- Test suite 173 → 183.
+
 2026-07-18, four merges (PRs #26/#27/#28/#31 — issues #2/#25/#29 closed, extensions
 1/2/3 studies run). The `aif` engine is untouched; `aif-v0.11.0` remains the current
 release and downstream pins are unaffected.
