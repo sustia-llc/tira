@@ -125,10 +125,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  Experiment 4 (Varying preferences): {exp4_dropped} dropped");
         eprintln!("  Experiment 5 (Certainty-weighted voting): {exp5_dropped} dropped");
         eprintln!("  Total: {total_dropped} run(s) dropped — figures above are thinned, not failed outright");
-        return Err(format!(
-            "{total_dropped} run(s) failed and were dropped from the figures (see per-run errors above)"
-        )
-        .into());
+        // Terse on purpose — the runtime prints this Err after the summary block
+        // above, so anything longer would duplicate it (PR #35 review observation).
+        return Err(format!("{total_dropped} dropped run(s); see summary above").into());
     }
 
     Ok(())
