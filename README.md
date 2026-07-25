@@ -105,16 +105,18 @@ issue #25 and unblocks Extension 2
 
 ### Extension 2 — multi-parameter recovery (study, no figure)
 
-Can we recover γ, the A-matrix contents, or the learning rates *jointly* with α? **On this
-MAB a componentwise-scaled diagonal random-walk MH cannot** — the (α, γ) and (α, good-arm p)
-posteriors are strongly anti-correlated ridges (pooled r ≈ −0.72 and −0.82; a sampler-path
-magnitude — sign robust) that this sampler does not mix (R-hat ≫ 1.05), so the marginals are
-not recovered. The non-convergence is structural to the diagonal proposal, not budget;
-**identifiability proper on the MAB stays open** — a ridge-following sampler (covariance-adapted
-/ reparameterized / NUTS, follow-up #30) could recover them or prove non-identifiability. This
-is why the single-α studies fix every other parameter. Learning rates (η, ω) are only weakly
-identifiable; β₀/ψ are analytically excluded (deterministic B ⇒ inert γ/β loop; needs a
-stochastic-B environment). Full tables and the vector-MH details:
+Can we recover γ, the A-matrix contents, or the learning rates *jointly* with α? The study
+runs two matched sampler arms. The #29 diagonal random-walk arm cannot mix on the strongly
+anti-correlated (α, γ) and (α, good-arm p) ridges (R-hat ≫ 1.05, structural to that
+proposal). The #30 covariance-adapted arm (Haario-style adaptive covariance in
+log/logit-transformed space) **settles identifiability per joint**: (α, γ) is *partially*
+identifiable — the product α·γ is recovered within 5% in every cell while the individual
+factors stay prior-shaped (the behavioral stream constrains one temperature, not two);
+(α, p) is *genuinely degenerate* — a 4× budget probe near-converges onto tight-but-wrong
+marginals (rec p ≈ 0.36/0.50 vs true 0.8); (η, ω) stays weakly identifiable and is not
+sampler-limited. This is why the single-α studies fix every other parameter. β₀/ψ are
+analytically excluded (deterministic B ⇒ inert γ/β loop; needs a stochastic-B environment).
+Full tables and the two-arm details:
 [extension2-multiparam.md](docs/extension2-multiparam.md); run with
 `cargo run --release -p reproduce --bin extension2`.
 
@@ -144,13 +146,13 @@ Environment (BanditEnvironment)
 | `crates/aif/src/group.rs` | VotingMode, GroupAgent, VotingAgent (discrete + certainty-weighted), GroupAgentBuilder |
 | `crates/aif/src/coalition.rs` | `competence_efe` + `ObsPrecisionParams` (the coalition-value primitive, opt-in `transition_noise` since 0.6.0), `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory`, `belief_weighted_preference` |
 | `crates/aif/src/communication.rs` | Flume-based inter-agent messaging (for extended scenarios) |
-| `crates/reproduce/src/simulation.rs` | Simulation runner, parameter recovery (grid MAP: `recover_alpha[_learning]`; MCMC: `recover_alpha_mcmc[_learning]`, #25; vector MH `recover_mcmc_vec` + `McmcVecConfig`/`ModelParams`/`log_likelihood_params`, extension 2 / #29), 5 experiment factories taking `&ExperimentOpts` (seed + optional A-learning) |
+| `crates/reproduce/src/simulation.rs` | Simulation runner, parameter recovery (grid MAP: `recover_alpha[_learning]`; MCMC: `recover_alpha_mcmc[_learning]`, #25; vector MH `recover_mcmc_vec` + `McmcVecConfig`/`ModelParams`/`log_likelihood_params` with `ProposalMode` JointScale/Covariance proposals, extension 2 / #29+#30), 5 experiment factories taking `&ExperimentOpts` (seed + optional A-learning) |
 | `crates/reproduce/src/plotter.rs` | Plotters-based scatter helpers (pending consolidation with the binary's figure code) |
 | `crates/reproduce/src/bin/reproduce.rs` | Full paper reproduction binary |
 | `crates/reproduce/src/bin/extension11.rs` | Free-energy extensivity study (extension 11) |
 | `crates/reproduce/src/bin/extension3.rs` | Individual A-learning vs group-α recovery study (extension 3) |
 | `crates/reproduce/src/bin/extension1.rs` | MCMC (Metropolis-Hastings) α recovery vs grid MAP (extension 1 / #25) |
-| `crates/reproduce/src/bin/extension2.rs` | Joint multi-parameter recovery: (α,γ)/(α,p)/(η,ω) confound study (extension 2 / #29) |
+| `crates/reproduce/src/bin/extension2.rs` | Joint multi-parameter recovery: (α,γ)/(α,p)/(η,ω) two-arm identifiability study (extension 2 / #29+#30) |
 
 ## Usage
 

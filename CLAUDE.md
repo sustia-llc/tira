@@ -24,8 +24,10 @@ Use these when working on matrix-heavy extensions (continuous state-space models
 ## Project state
 
 All 5 paper implementation phases complete. Extensions done: **1** (MCMC α recovery,
-#25), **2** (multi-parameter recovery study, #29 — confound-dominated; identifiability
-open → #30), **3** (learning-group study), **5** (certainty-weighted voting), **11**
+#25), **2** (multi-parameter recovery, #29 study + #30 covariance-sampler revisit —
+identifiability settled per joint: **α·γ identified** (factors prior-shaped), (α,p)
+**genuinely degenerate**, (η,ω) weakly identifiable and not sampler-limited), **3**
+(learning-group study), **5** (certainty-weighted voting), **11**
 (extensivity study). Four paper experiments reproduced (Figures 4-5) plus CW comparison
 (Figure 6); figures byte-reproducible since #2 (mandatory-seed harness).
 Now a **Cargo workspace** (`crates/aif` engine + `crates/reproduce` harness) serving as
@@ -49,7 +51,7 @@ learned per-bit precisions + novelty at fixed γ, no precision dynamics) beat th
 magnitude arm 0.4406 vs 0.2720 out-of-sample, the first arm to do so; arm choice is
 now koalisi #54 (cost-quality tradeoff)).
 
-- **167 tests** (166 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
+- **173 tests** (172 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
 - `cargo run --release -p reproduce --bin reproduce` — full reproduction in ~30s
 
 ## Module map
@@ -65,7 +67,7 @@ is the paper-reproduction harness and depends on `aif`.
 | `crates/aif/src/communication.rs` | `CommunicationChannel` (flume), `Message`, `MessageContent`, `CommunicatingPOMDPAgent` — used by multi-agent tests, not by the group-agent pipeline |
 | `crates/aif/src/lib.rs` | `AifError` (0.10.0: `InvalidLength { expected, got }` for length/dimension mismatches; `InvalidAction` retained for genuine out-of-range actions/votes), re-exports of the engine + coalition surface |
 | `crates/reproduce/src/lib.rs` | `BanditEnvironment`, `SharedBanditEnvironment` (with `agents_acted` tracking) — both `StdRng`-backed since issue #2: `new()` = entropy, `with_seed(…, seed)` = deterministic, NOT `Clone` (rand 0.10 removed `Clone` from `StdRng`; nothing cloned them) — `Environment`/`MultiAgentEnvironment` traits, re-exports from `aif` + simulation (incl. `substream`/`heterogeneity_seed`/`group_seed`/`env_seed`) |
-| `crates/reproduce/src/simulation.rs` | `run_group_simulation()`, `run_single_simulation()`, `log_likelihood()`, `log_likelihood_learning()` (0.8.0 — replay that relearns A), `recover_alpha()` + `recover_alpha_learning()` (grid MAP, half-normal prior, shared loop `recover_alpha_with` + `half_normal_log_prior`), `recover_alpha_mcmc()` + `recover_alpha_mcmc_learning()` (extension 1 / #25 — Metropolis-Hastings, rayon-parallel chains each seeded from a dedicated `mcmc_base_seed`/`MCMC_STREAM` role — no collision with data-gen streams; `McmcConfig` mandatory-seed `#[non_exhaustive]` + `McmcResult` median/r_hat/acceptance_rate/adapted_sd/chains + `converged()` vs pub `R_HAT_THRESHOLD`; reflected-at-0 symmetric RW with burn-in Robbins-Monro proposal adaptation frozen for sampling; same objective as grid MAP via `half_normal_log_prior`). **Extension 2 / #29** vector-generalizes it: `recover_mcmc_vec` + `McmcVecConfig`/`McmcDim`/`McmcVecResult` (reflected per-dim bounds — hi=+∞ only permitted infinity, epsilon-lo contract; **joint diagonal-Gaussian** proposal with **jointly-scaled** global adaptation, σ ratios frozen — NOT per-dim/covariance, follow-up #30; per-dim R-hat, `converged()`, `.correlation`) — scalar `recover_alpha_mcmc` is the bit-identical dim-1 case (draw order pinned by a test); `ModelParams`/`log_likelihood_params` (generalized likelihood: `with_params` α/γ/p, `from_model`+`AgentParams` η/ω) + `generate_params_data`, experiment factories for 5 experiments + `parameter_recovery_single` — all take a trailing `opts: &ExperimentOpts` (issue #2 + extension 3). `#[non_exhaustive] ExperimentOpts { seed: u64, learn_a: Option<Vec<f64>> }`: **seed is mandatory** — the entropy arm was dropped post-#2 review (a default seed would silently correlate unrelated runs; want fresh draws → generate + log a seed), so there is no `Default` impl. `seed` → bit-reproducible via splitmix64 `substream` role streams (0 = heterogeneity draw, 1 = group builder, 2 = env — pub helpers `heterogeneity_seed`/`group_seed`/`env_seed`; substream is avalanche-mixed because the builder derives internal streams at small offsets of its seed); `learn_a: Some(pA)` ⇒ `learn_a(true).initial_precision(pA)` (extension 3; length-checked vs n_bandits → `InvalidLength`). Ctors `ExperimentOpts::new(seed)` + `.with_learn_a(pA)` setter. Canonical config is now pub — `BANDIT_PROBS`/`PREFERENCES`/`EXT3_INITIAL_PRECISION`/`PRIOR_SD` and the `stats::{percentile,median_iqr,median,mean,pearson}` + `run_sweep` (cell×rep seeded sweep) helpers are shared by the study binaries. `dirichlet_alphas(rng)`, `beta_preferences(rng)`; seeded tests incl. bit-reproducibility, anti-collision guard, matched-seed best-2-of-3 CW-faithfulness, learning-aware recovery/fit-vs-misspec, and precision-length rejection |
+| `crates/reproduce/src/simulation.rs` | `run_group_simulation()`, `run_single_simulation()`, `log_likelihood()`, `log_likelihood_learning()` (0.8.0 — replay that relearns A), `recover_alpha()` + `recover_alpha_learning()` (grid MAP, half-normal prior, shared loop `recover_alpha_with` + `half_normal_log_prior`), `recover_alpha_mcmc()` + `recover_alpha_mcmc_learning()` (extension 1 / #25 — Metropolis-Hastings, rayon-parallel chains each seeded from a dedicated `mcmc_base_seed`/`MCMC_STREAM` role — no collision with data-gen streams; `McmcConfig` mandatory-seed `#[non_exhaustive]` + `McmcResult` median/r_hat/acceptance_rate/adapted_sd/chains + `converged()` vs pub `R_HAT_THRESHOLD`; reflected-at-0 symmetric RW with burn-in Robbins-Monro proposal adaptation frozen for sampling; same objective as grid MAP via `half_normal_log_prior`). **Extension 2 / #29+#30** vector-generalizes it: `recover_mcmc_vec` + `McmcVecConfig`/`McmcDim`/`McmcVecResult` (hi=+∞ only permitted infinity, epsilon-lo contract; per-dim R-hat, `converged()`, `.correlation`) with mode-selected proposal `ProposalMode` (0.5.0-reproduce / #30): `JointScale` default = **joint diagonal-Gaussian** reflected into bounds, **jointly-scaled** adaptation with frozen σ ratios (the #29 sampler); `Covariance` = Haario-style **adaptive-covariance** RW with global scaling in **log/logit-transformed** space, log-Jacobian in-kernel (reflection is only symmetric for diagonal proposals — the correlated mode transforms instead of reflecting), frozen at burn-in end — scalar `recover_alpha_mcmc` is the bit-identical JointScale dim-1 case (draw order pinned by a test); `ModelParams`/`log_likelihood_params` (generalized likelihood: `with_params` α/γ/p, `from_model`+`AgentParams` η/ω) + `generate_params_data`, experiment factories for 5 experiments + `parameter_recovery_single` — all take a trailing `opts: &ExperimentOpts` (issue #2 + extension 3). `#[non_exhaustive] ExperimentOpts { seed: u64, learn_a: Option<Vec<f64>> }`: **seed is mandatory** — the entropy arm was dropped post-#2 review (a default seed would silently correlate unrelated runs; want fresh draws → generate + log a seed), so there is no `Default` impl. `seed` → bit-reproducible via splitmix64 `substream` role streams (0 = heterogeneity draw, 1 = group builder, 2 = env — pub helpers `heterogeneity_seed`/`group_seed`/`env_seed`; substream is avalanche-mixed because the builder derives internal streams at small offsets of its seed); `learn_a: Some(pA)` ⇒ `learn_a(true).initial_precision(pA)` (extension 3; length-checked vs n_bandits → `InvalidLength`). Ctors `ExperimentOpts::new(seed)` + `.with_learn_a(pA)` setter. Canonical config is now pub — `BANDIT_PROBS`/`PREFERENCES`/`EXT3_INITIAL_PRECISION`/`PRIOR_SD` and the `stats::{percentile,median_iqr,median,mean,pearson}` + `run_sweep` (cell×rep seeded sweep) helpers are shared by the study binaries. `dirichlet_alphas(rng)`, `beta_preferences(rng)`; seeded tests incl. bit-reproducibility, anti-collision guard, matched-seed best-2-of-3 CW-faithfulness, learning-aware recovery/fit-vs-misspec, and precision-length rejection |
 | `crates/reproduce/src/plotter.rs` | `plotters`-based scatter/panel helpers — currently unused by the binary (which carries its own copies); consolidation tracked in issues |
 | `crates/reproduce/src/bin/reproduce.rs` | Full reproduction: parameter recovery (Fig 4) + 4 paper experiments (Fig 5) + CW extension (Fig 6), rayon-parallelized, refactored with `run_experiment()` + `plot_panel()` helpers |
 
@@ -132,32 +134,42 @@ burn_in/proposal_sd`; mandatory seed, per-chain `substream(mcmc_base_seed(seed),
 `log_likelihood + half_normal_log_prior`, the same objective as the grid MAP), and
 `crates/reproduce/src/bin/extension1.rs`.
 
-### 2. Recover additional parameters ✅ STUDY RUN (closed by #29)
+### 2. Recover additional parameters ✅ STUDY RUN (#29) + REVISITED (#30 — identifiability settled)
 Joint MCMC recovery of parameters beyond α (γ, A-matrix contents, learning rates). Run the
-study: `cargo run --release -p reproduce --bin extension2` (~57 s; report
-`docs/extension2-multiparam.md`).
+study: `cargo run --release -p reproduce --bin extension2` (~3 min — two matched sampler
+arms + a Q2 4× probe; report `docs/extension2-multiparam.md`).
 
-**Finding**: a **componentwise-scaled diagonal RW MH cannot recover these joints on this
-fixture**. (α, γ) and (α, good-arm p) are strongly anti-correlated **ridges** (pooled r ≈ −0.71
-and −0.82 — a *sampler-path* magnitude over unconverged chains; sign robust, magnitude not a
-posterior quantity) and this sampler does not converge (R-hat ≫ 1.05 at the shipped 4×(1000+
-2000) budget), so the marginals are NOT recovered. The non-convergence is structural to THIS
-proposal (diagonal steps, frozen σ ratios, step off the ridge), not budget — **identifiability
-proper on the MAB stays OPEN**; a ridge-following sampler (covariance-adapted / reparameterized
-/ NUTS — follow-up #30) could recover them or prove non-identifiability. This is why the
-single-α studies fix every other parameter. (η, ω) are only weakly identifiable (they share the
-pA update). **β₀/ψ are analytically excluded**: deterministic B ⇒ B† uniform ⇒ F_π
-policy-constant ⇒ the γ/β loop is provably inert (test-pinned in aif) — they need a stochastic-B
-environment, out of scope.
+**#29 finding (stands, as the JointScale arm)**: a **componentwise-scaled diagonal RW MH
+cannot recover these joints on this fixture**. (α, γ) and (α, good-arm p) are strongly
+anti-correlated **ridges** and that sampler does not converge on them (R-hat ≫ 1.05) —
+structural to that proposal (diagonal steps, frozen σ ratios, step off the ridge), not
+budget. This is why the single-α studies fix every other parameter.
+
+**#30 finding (the revisit — identifiability per joint)**: the `ProposalMode::Covariance`
+sampler (Haario-style adaptive covariance in log/logit space) converts the sampler-scoped
+negative into posterior-level answers. **(α, γ): partially identifiable, CLOSED** — the
+covariance arm mixes (worst R-hat 16.4 → 1.46, conv 5% → 60%) and the pooled-draw median
+of the **product α·γ is within 5% of truth in all four cells** (even the unconverged ones
+— chains sit *on* the ridge), while the factor marginals stay prior-shaped: the data
+constrain one temperature, not two. **(α, p): not marginally identifiable, CLOSED
+(negative)** — a 4× budget probe near-converges (worst R-hat 1.081) onto tight-but-wrong
+marginals (rec p ≈ 0.36/0.50 vs true 0.8); the degeneracy is genuine and non-multiplicative.
+**(η, ω): weakly identifiable and NOT sampler-limited** — covariance mode does not help
+(worst R-hat 46); the pathology is likelihood structure (ω → 1 boundary), unfixed by
+either proposal geometry tested (diagonal, Haario-adaptive; within-Gibbs/tempered RW
+untested). **β₀/ψ are analytically excluded**: deterministic B ⇒ B† uniform ⇒ F_π
+policy-constant ⇒ the γ/β loop is provably inert (test-pinned in aif) — they need a
+stochastic-B environment, out of scope. All findings guard-pinned in the binary
+(assert-before-print; α·γ ±15% band, arm contrast, probe tight-but-wrong pin).
 
 **Implemented in**: the vector MH kernel `recover_mcmc_vec` + `McmcVecConfig`/`McmcDim`/
-`McmcVecResult` (reflected per-dim bounds, joint diagonal-Gaussian proposal, jointly-scaled
-adaptation with frozen σ ratios (#30 for covariance/per-dim), per-dim R-hat, `converged()`,
-`.correlation(i,j)`) — the #25 scalar kernel is now its dim-1 case (bit-identical, draw order
-pinned by a test);
+`McmcVecResult` + `ProposalMode` (`JointScale` default — reflected diagonal proposal,
+jointly-scaled adaptation; `Covariance` — #30, adaptive covariance + global scale in
+transformed space, in-kernel Jacobian, nalgebra Cholesky) — the #25 scalar kernel is the
+JointScale dim-1 case (bit-identical, draw order pinned by a test);
 `ModelParams`/`LearningParams` + `log_likelihood_params` (generalized likelihood via
 `with_params` for α/γ/p and `from_model`+`AgentParams` for η/ω) + `generate_params_data`; and
-`crates/reproduce/src/bin/extension2.rs`.
+`crates/reproduce/src/bin/extension2.rs` (matched arms, Q2 probe, product-median columns).
 
 **Where** (historical): generalize `log_likelihood()` to a parameter vector;
 `POMDPAgent::with_params()` supplies γ, `from_model` supplies η/ω.
