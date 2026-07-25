@@ -25,7 +25,7 @@ pub use simulation::{
     run_group_simulation, run_single_simulation, run_sweep, single_agent_data, substream,
 };
 
-pub use plotter::ScatterPoint;
+pub use plotter::{plot_figure4, plot_figure5, plot_figure6};
 
 /// Small summary-statistics helpers shared by the study binaries (extension3,
 /// extension11) so the percentile/median/IQR conventions live in one place.

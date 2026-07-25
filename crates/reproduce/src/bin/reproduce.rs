@@ -1,7 +1,8 @@
 use reproduce::{
     experiment_certainty_weighted, experiment_deterministic, experiment_identical,
-    experiment_varying_alpha, experiment_varying_preferences, parameter_recovery_single, substream,
-    AifError, ExperimentOpts, RecoveryResult, TrialData,
+    experiment_varying_alpha, experiment_varying_preferences, parameter_recovery_single,
+    plot_figure4, plot_figure5, plot_figure6, substream, AifError, ExperimentOpts, RecoveryResult,
+    TrialData,
 };
 use rayon::prelude::*;
 use std::time::Instant;
@@ -56,6 +57,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  true={true_a:.2}  recovered={est_a:.3}");
     }
 
+    // Deterministic seeds ⇒ every one of `true_alphas.len() * 5` calls is expected to
+    // succeed; a dropped point is a genuine failure, not RNG luck. `filter_map` yields
+    // exactly one output per success regardless of rayon scheduling order, so
+    // `expected - recovery_points.len()` is a race-free drop count (issue #7).
+    let fig4_expected = true_alphas.len() * 5;
+    let fig4_dropped = fig4_expected - recovery_points.len();
+
     // -----------------------------------------------------------------------
     // Figure 5: Four simulation experiments (§3.2)
     // -----------------------------------------------------------------------
@@ -67,13 +75,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // stream index 55 is retired and must not be reused (see Figure 6 below).
     let exp2_base = substream(MASTER_SEED, 52);
 
-    let exp1_results = run_experiment("Experiment 1: Identical agents", &n_agents_list, &alpha_steps, n_trials, substream(MASTER_SEED, 51), experiment_identical);
+    let (exp1_results, exp1_dropped) = run_experiment("Experiment 1: Identical agents", &n_agents_list, &alpha_steps, n_trials, substream(MASTER_SEED, 51), experiment_identical);
 
-    let exp2_results = run_experiment("Experiment 2: Varying alphas", &n_agents_list, &alpha_steps, n_trials, exp2_base, experiment_varying_alpha);
+    let (exp2_results, exp2_dropped) = run_experiment("Experiment 2: Varying alphas", &n_agents_list, &alpha_steps, n_trials, exp2_base, experiment_varying_alpha);
 
-    let exp3_results = run_experiment("Experiment 3: Deterministic voting", &n_agents_list, &alpha_steps, n_trials, substream(MASTER_SEED, 53), experiment_deterministic);
+    let (exp3_results, exp3_dropped) = run_experiment("Experiment 3: Deterministic voting", &n_agents_list, &alpha_steps, n_trials, substream(MASTER_SEED, 53), experiment_deterministic);
 
-    let exp4_results = run_experiment("Experiment 4: Varying preferences", &n_agents_list, &alpha_steps, n_trials, substream(MASTER_SEED, 54), experiment_varying_preferences);
+    let (exp4_results, exp4_dropped) = run_experiment("Experiment 4: Varying preferences", &n_agents_list, &alpha_steps, n_trials, substream(MASTER_SEED, 54), experiment_varying_preferences);
 
     // -----------------------------------------------------------------------
     // Figure 6: Extension — Certainty-weighted voting vs simple voting
@@ -82,7 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // cell draws the *same* Dirichlet alphas, the *same* internal-agent streams, and the
     // *same* environment as its Experiment-2 counterpart — the two panels differ only in
     // voting mode (probabilistic vs certainty-weighted), isolating the aggregation effect.
-    let exp5_results = run_experiment("Experiment 5: Certainty-weighted voting", &n_agents_list, &alpha_steps, n_trials, exp2_base, experiment_certainty_weighted);
+    let (exp5_results, exp5_dropped) = run_experiment("Experiment 5: Certainty-weighted voting", &n_agents_list, &alpha_steps, n_trials, exp2_base, experiment_certainty_weighted);
 
     // -----------------------------------------------------------------------
     // Generate plots
@@ -100,6 +108,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  plots/figure5_experiments.png");
     println!("  plots/figure6_certainty_weighted.png");
 
+    // -----------------------------------------------------------------------
+    // Drop accounting (issue #7): the figures above are already generated
+    // best-effort — a failed run must not silently thin a figure without the
+    // caller knowing. Every dropped point/cell was already logged to stderr as it
+    // happened (above); this is the run-level summary + nonzero exit.
+    // -----------------------------------------------------------------------
+    let total_dropped =
+        fig4_dropped + exp1_dropped + exp2_dropped + exp3_dropped + exp4_dropped + exp5_dropped;
+    if total_dropped > 0 {
+        eprintln!("\n=== Dropped run summary ===");
+        eprintln!("  Figure 4 (parameter recovery): {fig4_dropped} of {fig4_expected} dropped");
+        eprintln!("  Experiment 1 (Identical agents): {exp1_dropped} dropped");
+        eprintln!("  Experiment 2 (Varying alphas): {exp2_dropped} dropped");
+        eprintln!("  Experiment 3 (Deterministic voting): {exp3_dropped} dropped");
+        eprintln!("  Experiment 4 (Varying preferences): {exp4_dropped} dropped");
+        eprintln!("  Experiment 5 (Certainty-weighted voting): {exp5_dropped} dropped");
+        eprintln!("  Total: {total_dropped} run(s) dropped — figures above are thinned, not failed outright");
+        return Err(format!(
+            "{total_dropped} run(s) failed and were dropped from the figures (see per-run errors above)"
+        )
+        .into());
+    }
+
     Ok(())
 }
 
@@ -108,6 +139,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// `base_seed` anchors this sweep's reproducible seeds: each (agent-count index,
 /// α-step index) cell gets `substream(substream(base_seed, group_idx), alpha_idx)`,
 /// so results are independent of rayon scheduling order (issue #2).
+///
+/// Returns `(results, dropped)`: every one of `n_agents_list.len() * alpha_steps.len()`
+/// cells is expected to succeed (seeds are deterministic), so `dropped` — computed as
+/// `expected - results.len()` — is a race-free failure count regardless of rayon
+/// scheduling order (issue #7).
 fn run_experiment<F>(
     name: &str,
     n_agents_list: &[usize; 4],
@@ -115,7 +151,7 @@ fn run_experiment<F>(
     n_trials: usize,
     base_seed: u64,
     experiment_fn: F,
-) -> Vec<(f64, f64, usize)>
+) -> (Vec<(f64, f64, usize)>, usize)
 where
     F: Fn(usize, f64, usize, &ExperimentOpts) -> Result<(TrialData, RecoveryResult), AifError>
         + Sync
@@ -133,7 +169,8 @@ where
                 .filter_map(move |(alpha_idx, &alpha)| {
                     // Fixed-A (learning off) — the figures are the paper's non-learning
                     // baseline. Deterministic seeds ⇒ a dropped cell is a genuine failure,
-                    // not RNG luck; log before thinning the figure. Fuller fix is issue #7.
+                    // not RNG luck; log before thinning the figure. Run-level accounting
+                    // (issue #7) happens at the call site via the returned drop count.
                     let opts = ExperimentOpts::new(cell_seed(base_seed, group_idx, alpha_idx));
                     f(n, alpha, n_trials, &opts)
                         .inspect_err(|e| {
@@ -149,165 +186,8 @@ where
     for &(a, g, gi) in &results {
         println!("  n={:3}  α={a:.2}  group_α={g:.3}", n_agents_list[gi]);
     }
-    results
-}
 
-// ---------------------------------------------------------------------------
-// Plotting
-// ---------------------------------------------------------------------------
-
-fn plot_figure4(points: &[(f64, f64)]) -> Result<(), Box<dyn std::error::Error>> {
-    use plotters::prelude::*;
-
-    let root = BitMapBackend::new("plots/figure4_recovery.png", (800, 700)).into_drawing_area();
-    root.fill(&WHITE)?;
-
-    let mut chart = ChartBuilder::on(&root)
-        .caption("Parameter recovery for α", ("sans-serif", 28))
-        .margin(20)
-        .x_label_area_size(40)
-        .y_label_area_size(50)
-        .build_cartesian_2d(0.0..2.2, 0.0..5.0)?;
-
-    chart
-        .configure_mesh()
-        .x_desc("True α")
-        .y_desc("Inferred α")
-        .draw()?;
-
-    chart.draw_series(LineSeries::new(
-        [(0.0, 0.0), (2.2, 2.2)],
-        ShapeStyle::from(RGBColor(180, 180, 180)).stroke_width(1),
-    ))?;
-
-    chart.draw_series(points.iter().map(|&(x, y)| {
-        Circle::new((x, y), 3, ShapeStyle::from(RGBColor(50, 100, 180)).filled())
-    }))?;
-
-    root.present()?;
-    Ok(())
-}
-
-const COLORS: [plotters::style::RGBColor; 4] = [
-    plotters::style::RGBColor(220, 50, 50),
-    plotters::style::RGBColor(50, 100, 200),
-    plotters::style::RGBColor(200, 180, 50),
-    plotters::style::RGBColor(50, 160, 80),
-];
-const LABELS: [&str; 4] = ["4 agents", "8 agents", "16 agents", "100 agents"];
-
-fn plot_panel(
-    area: &plotters::prelude::DrawingArea<plotters::prelude::BitMapBackend<'_>, plotters::coord::Shift>,
-    title: &str,
-    data: &[(f64, f64, usize)],
-    show_legend: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use plotters::prelude::*;
-
-    let y_max = data
-        .iter()
-        .map(|&(_, y, _)| y)
-        .fold(1.5_f64, f64::max)
-        .min(5.0);
-
-    let mut chart = ChartBuilder::on(area)
-        .caption(title, ("sans-serif", 20))
-        .margin(10)
-        .x_label_area_size(35)
-        .y_label_area_size(45)
-        .build_cartesian_2d(0.0..1.1, 0.0..y_max)?;
-
-    chart
-        .configure_mesh()
-        .x_desc("(Mean of) internal α")
-        .y_desc("Inferred group α")
-        .draw()?;
-
-    chart.draw_series(LineSeries::new(
-        [(0.0, 0.0), (1.1, 1.1)],
-        ShapeStyle::from(RGBColor(180, 180, 180)).stroke_width(1),
-    ))?;
-
-    for gi in 0..4 {
-        let group_pts: Vec<(f64, f64)> = data
-            .iter()
-            .filter(|&&(_, _, g)| g == gi)
-            .map(|&(x, y, _)| (x, y))
-            .collect();
-
-        if group_pts.is_empty() {
-            continue;
-        }
-
-        let color = COLORS[gi];
-        chart
-            .draw_series(
-                group_pts
-                    .iter()
-                    .map(|&(x, y)| Circle::new((x, y), 4, ShapeStyle::from(color).filled())),
-            )?
-            .label(LABELS[gi])
-            .legend(move |(x, y)| Circle::new((x, y), 4, ShapeStyle::from(color).filled()));
-    }
-
-    if show_legend {
-        chart
-            .configure_series_labels()
-            .position(SeriesLabelPosition::UpperLeft)
-            .background_style(WHITE.mix(0.8))
-            .border_style(BLACK)
-            .draw()?;
-    }
-
-    Ok(())
-}
-
-fn plot_figure5(
-    exp1: &[(f64, f64, usize)],
-    exp2: &[(f64, f64, usize)],
-    exp3: &[(f64, f64, usize)],
-    exp4: &[(f64, f64, usize)],
-) -> Result<(), Box<dyn std::error::Error>> {
-    use plotters::prelude::*;
-
-    let root =
-        BitMapBackend::new("plots/figure5_experiments.png", (1200, 1000)).into_drawing_area();
-    root.fill(&WHITE)?;
-
-    let areas = root.split_evenly((2, 2));
-    let titles = [
-        "A) Simple group",
-        "B) Varying alphas",
-        "C) Deterministic votes",
-        "D) Varying preferences",
-    ];
-    let datasets: [&[(f64, f64, usize)]; 4] = [exp1, exp2, exp3, exp4];
-
-    for (idx, area) in areas.iter().enumerate() {
-        plot_panel(area, titles[idx], datasets[idx], idx == 0)?;
-    }
-
-    root.present()?;
-    Ok(())
-}
-
-/// Figure 6: Simple probabilistic voting (Exp 2) vs certainty-weighted voting (Exp 5).
-/// Side-by-side comparison — same Dirichlet-constructed varying α, different aggregation.
-fn plot_figure6(
-    exp2: &[(f64, f64, usize)],
-    exp5: &[(f64, f64, usize)],
-) -> Result<(), Box<dyn std::error::Error>> {
-    use plotters::prelude::*;
-
-    let root =
-        BitMapBackend::new("plots/figure6_certainty_weighted.png", (1200, 500)).into_drawing_area();
-    root.fill(&WHITE)?;
-
-    let areas = root.split_evenly((1, 2));
-
-    plot_panel(&areas[0], "A) Simple voting (Exp 2)", exp2, true)?;
-    plot_panel(&areas[1], "B) Certainty-weighted voting", exp5, false)?;
-
-    root.present()?;
-    Ok(())
+    let expected = n_agents_list.len() * alpha_steps.len();
+    let dropped = expected - results.len();
+    (results, dropped)
 }
