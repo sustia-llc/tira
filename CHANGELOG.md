@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### aif 0.12.0 (manifest bumped 2026-07-25; tag pending — cut at the Phase-3 release point)
+
+- Workspace-level `[workspace.package]` inheritance for `edition`/`license`/`repository`
+  (both crate manifests now use `edition.workspace = true` etc.); `version` and
+  `description` deliberately stay per-crate (aif 0.11.0, reproduce 0.5.0 — versions and
+  descriptions differ, so inheriting them would be wrong — a deliberate deviation from
+  issue #9's literal "version" mention, already owner-surfaced).
+- `serde` is now an optional, default-off feature (`features = ["serde"]`) gating the
+  `Serialize`/`Deserialize` derives on the `communication` module's message types
+  (`Message`, `MessageContent`, `InfoRequestType`); default builds no longer pull in
+  serde at all.
+
 ### reproduce harness (unversioned; no `aif` engine change, no release required)
 
 2026-07-25 (#30 — extension 2 revisited, identifiability settled):

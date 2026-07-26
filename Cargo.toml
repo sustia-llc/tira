@@ -2,6 +2,11 @@
 resolver = "3"
 members = ["crates/aif", "crates/reproduce"]
 
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sustia-llc/tira"
+
 [workspace.dependencies]
 nalgebra = "0.35"
 rand = { version = "0.10", features = ["sys_rng", "thread_rng"] }
