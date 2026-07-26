@@ -251,7 +251,7 @@ the decision surface.
 | plotters | Figure generation |
 | flume | Inter-agent message channels |
 | thiserror | Error types |
-| serde | Trial data serialization |
+| serde | Trial data serialization (`reproduce`; in `aif` an optional default-off feature gating the communication-type derives) |
 
 ## License
 

@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-### aif (unreleased — lands in the next tag)
+### aif 0.12.0 (manifest bumped 2026-07-25; tag pending — cut at the Phase-3 release point)
 
 - Workspace-level `[workspace.package]` inheritance for `edition`/`license`/`repository`
   (both crate manifests now use `edition.workspace = true` etc.); `version` and
