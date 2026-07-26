@@ -39,6 +39,10 @@
 //!
 //! Run: `cargo run --release -p reproduce --bin extension2`.
 
+// See the crate-level note in `reproduce/src/lib.rs`: every cast is a `usize as f64` on a
+// cell/rep count, all far below 2^53 (issue #11 pedantic burn-down).
+#![allow(clippy::cast_precision_loss)]
+
 use reproduce::stats::{mean, median, median_iqr};
 use reproduce::{
     AifError, LearningParams, McmcDim, McmcVecConfig, ModelParams, PRIOR_SD, ProposalMode,
@@ -91,7 +95,7 @@ struct RunMetrics {
     converged: bool,
 }
 
-/// Generate at `gen`, then jointly recover 2 params under `decode` (θ → ModelParams) and
+/// Generate at `gen`, then jointly recover 2 params under `decode` (θ → `ModelParams`) and
 /// `priors` (θ → log-prior), at the shared `seed` (generation uses the group/env stream,
 /// MCMC uses the dedicated MCMC stream — no collision).
 ///
@@ -135,8 +139,8 @@ where
     })
 }
 
-/// Q1: joint (α, γ). α prior half-normal(0, PRIOR_SD); γ prior half-normal(0, 32) —
-/// scale-appropriate for the default 16. γ's `lo` is an epsilon (0.01), per the McmcDim
+/// Q1: joint (α, γ). α prior half-normal(0, `PRIOR_SD`); γ prior half-normal(0, 32) —
+/// scale-appropriate for the default 16. γ's `lo` is an epsilon (0.01), per the `McmcDim`
 /// contract (the kernel propagates likelihood Errs rather than rejecting boundary proposals).
 fn q1_rep(
     alpha_t: f64,

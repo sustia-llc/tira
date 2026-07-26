@@ -70,6 +70,9 @@ pub struct CommunicationChannel {
 }
 
 impl CommunicationChannel {
+    /// Build a channel with one unbounded sender/receiver pair per agent
+    /// (`0..n_agents`).
+    #[must_use]
     pub fn new(n_agents: usize) -> Self {
         let mut senders = HashMap::new();
         let mut receivers = HashMap::new();

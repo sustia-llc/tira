@@ -96,7 +96,7 @@ pub fn run_single_simulation(
 ///
 /// Creates a fresh agent with the specified α (and the paper's standard A matrix
 /// for the given `observation_probs`), replays the observation sequence, and
-/// sums ln P(action_t | obs_t, α) at each timestep.
+/// sums `ln P(action_t | obs_t, α)` at each timestep.
 #[allow(clippy::missing_errors_doc)]
 pub fn log_likelihood(
     data: &TrialData,
@@ -862,6 +862,12 @@ fn cov_proposal_factor(reg: &DMatrix<f64>, lambda: f64) -> Result<DMatrix<f64>, 
 /// Like [`vec_run_chain`] this **propagates** a log-posterior `Err`; unlike it, the bounds
 /// are effectively unreachable (see [`cov_inverse`]), so a likelihood that is undefined only
 /// *at* `lo`/`hi` is in practice never probed there.
+// One Metropolis-Hastings chain start-to-finish: init draw, burn-in with covariance
+// adaptation, freeze, then sampling. The phases share a long list of live scalars
+// (`ln_lambda`, running mean/covariance, the frozen `factor`, accept counters) whose
+// update *order* is the draw-order contract pinned by tests, so extracting phases into
+// helpers would move state across a function boundary for no reader benefit.
+#[allow(clippy::too_many_lines)]
 fn vec_run_chain_cov<F>(
     chain_idx: usize,
     config: &McmcVecConfig,
@@ -934,7 +940,7 @@ where
         let lambda = ln_lambda.exp();
         factor = cov_proposal_factor(&cov_reg, lambda)?;
 
-        for zi in z.iter_mut() {
+        for zi in &mut z {
             *zi = std_normal.sample(&mut rng);
         }
         for d in 0..n {
@@ -984,7 +990,7 @@ where
     let mut samples = Vec::with_capacity(config.n_samples);
     let mut accepts = 0usize;
     for _ in 0..config.n_samples {
-        for zi in z.iter_mut() {
+        for zi in &mut z {
             *zi = std_normal.sample(&mut rng);
         }
         for d in 0..n {
@@ -1241,7 +1247,7 @@ fn score_replay(model: &mut POMDPAgent, data: &TrialData) -> f64 {
 /// Build a fresh agent at `params` — fixed-A via `with_params` (α/γ/good-arm p), or
 /// A-learning via `from_model` + `AgentParams` (adds η/ω). Shared by
 /// [`log_likelihood_params`] (recovery) and [`generate_params_data`] (generation) so both
-/// use the identical construction. Learning precision is length-checked against n_bandits.
+/// use the identical construction. Learning precision is length-checked against `n_bandits`.
 /// The preferences `C` are fixed at the paper's [`PREFERENCES`] (only α/γ/p/η/ω vary).
 fn build_params_agent(params: &ModelParams) -> Result<POMDPAgent, AifError> {
     let obs_probs = params.obs_probs();
@@ -1740,7 +1746,7 @@ mod tests {
         // Seeded (issue #2) so the grid argmax is a fixed value; the band around the
         // true α is kept modest rather than a brittle exact golden, because
         // distribution-sampling results can shift across rand_distr versions.
-        const SEED: u64 = 20260201;
+        const SEED: u64 = 20_260_201;
         let mut agent = POMDPAgent::new(
             3,
             Some(BANDIT_PROBS.to_vec()),
@@ -1791,7 +1797,7 @@ mod tests {
         // Seeded (issue #2) so the band can be tightened to ±0.25 with 300 trials. Each
         // case gets its OWN seed (substream by case index) so the three checks are
         // decorrelated realizations rather than three views of one lucky stream.
-        const SEED: u64 = 20260202;
+        const SEED: u64 = 20_260_202;
         for (case_idx, &true_alpha) in [0.2_f64, 0.5].iter().enumerate() {
             let r = parameter_recovery_single(true_alpha, 300, &ExperimentOpts::new(substream(SEED, case_idx as u64)))?;
             println!("true α={true_alpha}, recovered α={:.3}", r.estimated_alpha);
@@ -1826,7 +1832,7 @@ mod tests {
         // Distinct seeds for the two runs: a shared seed would make the n=8 group's first
         // 4 internal agents bit-identical to the n=4 group (the builder derives agent i at
         // s₁+1+i), so the two checks would not be independent.
-        const SEED: u64 = 20260203;
+        const SEED: u64 = 20_260_203;
         let (data, result) = experiment_identical(4, 0.5, 200, &ExperimentOpts::new(substream(SEED, 0)))?;
         assert_eq!(data.len(), 200);
         println!(
@@ -1866,7 +1872,7 @@ mod tests {
         // mean (sub-linear aggregation). Seeded ⇒ one reproducible value; the band is
         // ±0.15 around the measured 0.310 (see the regeneration protocol below —
         // tighten around a re-measured value, never widen to force green).
-        const SEED: u64 = 20260204;
+        const SEED: u64 = 20_260_204;
         let (data, result) = experiment_varying_alpha(8, 0.5, 200, &ExperimentOpts::new(SEED))?;
         assert_eq!(data.len(), 200);
         println!(
@@ -1887,7 +1893,7 @@ mod tests {
         // Exp 3 (Fig 5C): deterministic (majority) voting inflates the recovered α far
         // above the members' mean — the group reads as a much higher-precision agent.
         // Band is ±0.15 around the measured 1.300.
-        const SEED: u64 = 20260205;
+        const SEED: u64 = 20_260_205;
         let (data, result) = experiment_deterministic(8, 0.5, 200, &ExperimentOpts::new(SEED))?;
         assert_eq!(data.len(), 200);
         println!(
@@ -1908,7 +1914,7 @@ mod tests {
         // Exp 4 (Fig 5D): Beta(0.8, 0.8) conflicting preferences crush the recovered α
         // toward 0 — members pull in opposite directions, so the blanket stream reads as
         // near-random. Band is measured 0.040 + 0.15 (floored at the grid's 0.0 edge).
-        const SEED: u64 = 20260206;
+        const SEED: u64 = 20_260_206;
         let (data, result) = experiment_varying_preferences(8, 0.5, 200, &ExperimentOpts::new(SEED))?;
         assert_eq!(data.len(), 200);
         println!(
@@ -1928,7 +1934,7 @@ mod tests {
     fn test_experiment_certainty_weighted_runs() -> Result<(), AifError> {
         // Exp 5 / Fig 6 (extension 5): certainty-weighted mixing of the same
         // Dirichlet-varying αs as Exp 2. Band is ±0.15 around the measured 0.290.
-        const SEED: u64 = 20260207;
+        const SEED: u64 = 20_260_207;
         let (data, result) = experiment_certainty_weighted(8, 0.5, 200, &ExperimentOpts::new(SEED))?;
         assert_eq!(data.len(), 200);
         println!(
@@ -2021,6 +2027,9 @@ mod tests {
     /// same seed reproduces the full blanket stream and the recovered α, while a
     /// different seed diverges within the first trials.
     #[test]
+    // Bit-reproducibility is the contract under test; an epsilon comparison would pass
+    // even if seed threading had drifted, which is exactly the failure being guarded.
+    #[allow(clippy::float_cmp)]
     fn test_seeded_runs_are_bit_reproducible() -> Result<(), AifError> {
         let (d1, r1) = experiment_varying_alpha(8, 0.5, 300, &ExperimentOpts::new(4242))?;
         let (d2, r2) = experiment_varying_alpha(8, 0.5, 300, &ExperimentOpts::new(4242))?;
@@ -2055,7 +2064,7 @@ mod tests {
     /// changing the seed triple.
     #[test]
     fn test_certainty_weighted_more_faithful_than_probabilistic() -> Result<(), AifError> {
-        const SEEDS: [u64; 3] = [7, 20260601, 815];
+        const SEEDS: [u64; 3] = [7, 20_260_601, 815];
         const MEAN_ALPHA: f64 = 0.5;
         const N: usize = 16;
         const N_TRIALS: usize = 300;
@@ -2153,7 +2162,7 @@ mod tests {
 
     #[test]
     fn test_dirichlet_alphas_mean() {
-        let mut rng = StdRng::seed_from_u64(20260208);
+        let mut rng = StdRng::seed_from_u64(20_260_208);
         let alphas = dirichlet_alphas(100, 0.5, &mut rng);
         assert_eq!(alphas.len(), 100);
 
@@ -2188,14 +2197,14 @@ mod tests {
         assert!(alphas.iter().all(|a| a.is_finite() && *a > 0.0), "αs must be finite and positive");
 
         // Early-return path (n < 2): no Dirichlet draw at all, just the target repeated.
-        let mut rng0 = StdRng::seed_from_u64(20260208);
+        let mut rng0 = StdRng::seed_from_u64(20_260_208);
         assert_eq!(dirichlet_alphas(0, 0.5, &mut rng0), Vec::<f64>::new());
         assert_eq!(dirichlet_alphas(1, 0.5, &mut rng0), vec![0.5]);
     }
 
     #[test]
     fn test_beta_preferences_valid() {
-        let mut rng = StdRng::seed_from_u64(20260209);
+        let mut rng = StdRng::seed_from_u64(20_260_209);
         let prefs = beta_preferences(20, &mut rng);
         assert_eq!(prefs.len(), 20);
         for p in &prefs {
@@ -2330,7 +2339,7 @@ mod tests {
     /// above before retuning the seed, trial count, or band.
     #[test]
     fn test_recover_alpha_learning_recovers_true_alpha() -> Result<(), AifError> {
-        const SEED: u64 = 20260301;
+        const SEED: u64 = 20_260_301;
         // Reuse the exact generating pipeline (build seeded learn_a agent → roll out env).
         let data = single_agent_data(
             0.5,
@@ -2357,7 +2366,7 @@ mod tests {
     /// [`ExperimentOpts`].) At `SEED`/150 trials the fit margin is ≈ 0.74 nats (strict).
     #[test]
     fn test_learning_aware_recovery_fits_better_than_misspecified() -> Result<(), AifError> {
-        const SEED: u64 = 20260302;
+        const SEED: u64 = 20_260_302;
         let (data, misspec) = experiment_identical(
             8,
             0.5,
@@ -2379,7 +2388,7 @@ mod tests {
         Ok(())
     }
 
-    /// A learning precision vector whose length ≠ n_bandits is rejected up front with
+    /// A learning precision vector whose length ≠ `n_bandits` is rejected up front with
     /// `InvalidLength` (rather than silently padded/truncated by `POMDPAgent::new`).
     #[test]
     fn test_wrong_length_learning_precision_rejected() {
@@ -2419,6 +2428,7 @@ mod tests {
 
     /// Same config ⇒ bit-identical posterior (samples + median); a different seed diverges.
     #[test]
+    #[allow(clippy::float_cmp)] // Bit-identical posterior is the contract; see above.
     fn test_mcmc_deterministic() -> Result<(), AifError> {
         let data = single_agent_data(0.5, 60, &ExperimentOpts::new(1234))?;
         let a = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &test_mcmc_config(77))?;
@@ -2436,7 +2446,7 @@ mod tests {
     /// (R-hat ≈ 1.01).
     #[test]
     fn test_mcmc_identifiable_region_recovers() -> Result<(), AifError> {
-        const SEED: u64 = 20250101;
+        const SEED: u64 = 20_250_101;
         let data = single_agent_data(0.5, 150, &ExperimentOpts::new(SEED))?;
         let r = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &test_mcmc_config(SEED))?;
         println!("identifiable α=0.5: median={:.3}, r_hat={:.3}", r.median, r.r_hat);
@@ -2455,7 +2465,7 @@ mod tests {
     /// seed/reduced config: MCMC median ≈ 2.84, grid MAP ≈ 1.27).
     #[test]
     fn test_mcmc_degenerate_region_exceeds_grid_map() -> Result<(), AifError> {
-        const SEED: u64 = 20250102;
+        const SEED: u64 = 20_250_102;
         let data = single_agent_data(3.0, 150, &ExperimentOpts::new(SEED))?;
         let grid = recover_alpha(&data, 3, &BANDIT_PROBS, &PREFERENCES)?;
         let mcmc = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &test_mcmc_config(SEED))?;
@@ -2538,7 +2548,7 @@ mod tests {
         Ok(())
     }
 
-    /// The learning generalized likelihood rejects a wrong-length precision; McmcVecConfig
+    /// The learning generalized likelihood rejects a wrong-length precision; `McmcVecConfig`
     /// rejects empty dims and lo ≥ hi.
     #[test]
     fn test_ext2_length_and_config_rejections() {
@@ -2613,7 +2623,7 @@ mod tests {
     #[test]
     fn test_vec_2d_alpha_gamma_smoke() -> Result<(), AifError> {
         let data =
-            generate_params_data(&ModelParams::new(0.5, 16.0, 0.8), 120, 20250201)?;
+            generate_params_data(&ModelParams::new(0.5, 16.0, 0.8), 120, 20_250_201)?;
         let dims = vec![
             McmcDim { initial_sd: 0.5, lo: 0.0, hi: f64::INFINITY, init_spread: 4.0 },
             McmcDim { initial_sd: 4.0, lo: 0.0, hi: f64::INFINITY, init_spread: 32.0 },
@@ -2624,7 +2634,7 @@ mod tests {
                     + half_normal_log_prior_sd(t[0], 4.0)
                     + half_normal_log_prior_sd(t[1], 32.0))
             },
-            &test_vec_config(20250201, dims),
+            &test_vec_config(20_250_201, dims),
         )?;
         assert_eq!(res.dims.len(), 2);
         assert!(res.dims.iter().all(|d| d.median.is_finite()), "medians must be finite");
@@ -2667,6 +2677,11 @@ mod tests {
     /// if it moves, the scalar path's draw order changed — do NOT re-pin without confirming
     /// `extension1` is still byte-identical.
     #[test]
+    // The `==` / `!=` sanity checks distinguish a *rejected* proposal (the sampler repeats
+    // the previous value bit-for-bit) from an accepted one. Exactness is the whole signal:
+    // a tolerance would classify a tiny accepted move as a rejection and mask a draw-order
+    // change.
+    #[allow(clippy::float_cmp)]
     fn test_recover_alpha_mcmc_dim1_draw_order() -> Result<(), AifError> {
         let data = single_agent_data(0.5, 60, &ExperimentOpts::new(2024))?;
         // Config/seed chosen so the chain MOVES within the pinned window — the samples below
@@ -2678,8 +2693,8 @@ mod tests {
         let r = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &cfg)?;
         let got: Vec<f64> = r.chains[0].iter().map(|&x| (x * 1e9).round() / 1e9).collect();
         let want = [
-            6.884148141, 5.607902918, 5.269027445, 6.126933458, 6.343628103, 6.343628103,
-            7.313531378, 7.383831249,
+            6.884_148_141, 5.607_902_918, 5.269_027_445, 6.126_933_458, 6.343_628_103, 6.343_628_103,
+            7.313_531_378, 7.383_831_249,
         ];
         assert_eq!(got.len(), want.len());
         // Sanity: the window genuinely mixes accepts and rejects (so a proposal-draw change
@@ -2721,9 +2736,10 @@ mod tests {
         );
     }
 
-    /// Covariance mode is as reproducible as the JointScale path: same seed ⇒ identical
+    /// Covariance mode is as reproducible as the `JointScale` path: same seed ⇒ identical
     /// chains and medians; a different seed diverges.
     #[test]
+    #[allow(clippy::float_cmp)] // Bit-identical medians / frozen scales are the contract.
     fn test_covariance_mode_deterministic() -> Result<(), AifError> {
         // 2-D correlated Gaussian in (ln θ₀, ln θ₁), ρ = 0.8. Written in θ space (the
         // −ln θ terms) as the kernel's contract requires.
@@ -2807,7 +2823,7 @@ mod tests {
     /// the *proposal geometry*, not the budget) and pins the fix.
     ///
     /// **The seeds are part of the pin**: with fixed seeds both verdicts are deterministic,
-    /// so the JointScale non-convergence assertion is exact rather than probabilistic. Do
+    /// so the `JointScale` non-convergence assertion is exact rather than probabilistic. Do
     /// not re-seed without re-checking both arms.
     #[test]
     fn test_covariance_mixes_on_ridge_where_jointscale_does_not() -> Result<(), AifError> {
@@ -2849,7 +2865,7 @@ mod tests {
         Ok(())
     }
 
-    /// The scalar α path keeps its JointScale byte-identity contract (guards the draw-order
+    /// The scalar α path keeps its `JointScale` byte-identity contract (guards the draw-order
     /// pin from the other side: no covariance mode can leak into `recover_alpha_mcmc`).
     #[test]
     fn test_covariance_dim1_scalar_config_unaffected() {

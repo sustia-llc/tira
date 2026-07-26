@@ -1,4 +1,8 @@
 // Tests from aif/src/group.rs that require BanditEnvironment (lives in reproduce).
+// See the crate-level note in `reproduce/src/lib.rs`: every cast is a `usize as f64` on a
+// trial/agent count, all far below 2^53 (issue #11 pedantic burn-down).
+#![allow(clippy::cast_precision_loss)]
+
 use reproduce::{
     Agent, BanditEnvironment, Environment, GroupAgentBuilder, AifError, VotingMode, env_seed,
     group_seed,
@@ -224,7 +228,7 @@ fn test_bandit_environment() -> Result<(), AifError> {
             preferred += 1;
         }
     }
-    let observed_prob = preferred as f64 / n_trials as f64;
+    let observed_prob = f64::from(preferred) / f64::from(n_trials);
     assert_relative_eq!(observed_prob, 0.8, epsilon = 0.05);
     Ok(())
 }

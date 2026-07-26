@@ -51,7 +51,14 @@ learned per-bit precisions + novelty at fixed γ, no precision dynamics) beat th
 magnitude arm 0.4406 vs 0.2720 out-of-sample, the first arm to do so; arm choice is
 now koalisi #54 (cost-quality tradeoff)).
 
-- **183 tests** (182 `#[test]` + 1 doctest), 0 clippy warnings (default lints), edition 2024
+- **183 tests** (182 `#[test]` + 1 doctest), edition 2024, 0 clippy warnings under both
+  the default lints **and** `-W clippy::pedantic` since #11 — pedantic is zero-warning
+  *fixed-or-justified*, not pedantic-clean: benign/drift-risky lints
+  (`cast_precision_loss` crate-wide, `float_cmp` on bit-identity pins, `manual_midpoint`,
+  `too_many_lines`, `similar_names`, `many_single_char_names`, `struct_excessive_bools`,
+  `needless_pass_by_value` on `from_model`) carry item- or crate-level `#[allow]`s with
+  written reasons. So a pedantic run surfaces only NEW issues; don't "clean up" an allow
+  without reading its reason.
 - `cargo run --release -p reproduce --bin reproduce` — full reproduction in ~30s
 
 ## Module map

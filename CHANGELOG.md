@@ -13,8 +13,35 @@
   `Serialize`/`Deserialize` derives on the `communication` module's message types
   (`Message`, `MessageContent`, `InfoRequestType`); default builds no longer pull in
   serde at all.
+- Non-behavioral hardening from the #11 pedantic burn-down (all anchors and seeded
+  pins bit-identical): the three `n_actions.pow(policy_depth as u32)` sites now
+  `u32::try_from(..).expect("invariant: ..")` instead of truncating (a wrap would have
+  silently mis-sized `E`), `POMDPAgent::from_model` / `with_params` gained `# Panics`
+  sections documenting that path, `CommunicationChannel::new` gained `#[must_use]`,
+  and two `self.beliefs = ..clone()` writes became `clone_from`.
 
 ### reproduce harness (unversioned; no `aif` engine change, no release required)
+
+2026-07-25 (#11 — pedantic burn-down):
+
+- Fixed the useful subset workspace-wide: doc backticks, digit separators on every long
+  literal, `# Errors` sections on the three `plotter` render functions, `f64::from`
+  instead of `i32 as f64`, `map_or`, `clone_from`, `&mut v` loops, `to_vec`, `if/else`
+  for a two-arm `match`, hoisted `const`s, and dropped redundant `continue`s. Zero
+  numeric or RNG-draw-order change: 183 tests green and all three figures regenerate
+  sha256-identical.
+- Allowed-with-justification where the lint is benign or the fix would risk drift:
+  `cast_precision_loss` crate-wide in both crates (every site is a `usize as f64` count
+  far below 2^53), `float_cmp` on the eight bit-identity/rejected-proposal pins,
+  `manual_midpoint` (`f64::midpoint` is not specified as `(a+b)/2`), `too_many_lines`
+  ×6, `similar_names` ×7, `many_single_char_names` ×2 (math notation),
+  `struct_excessive_bools` ×2 (`AgentParams`' deliberate independent-toggle surface),
+  `needless_pass_by_value` on `from_model` (narrowing to `&AgentParams` would break the
+  koalisi-facing API), and the `stats::percentile` index casts. Every allow carries a
+  one-to-four-line reason; none are crate-wide except `cast_precision_loss`.
+- `cargo clippy --all-targets -- -W clippy::pedantic` is now **zero-warning**
+  (fixed-or-justified), including the `-p aif --features serde` configuration, so a
+  future pedantic pass surfaces only new issues.
 
 2026-07-25 (#30 — extension 2 revisited, identifiability settled):
 

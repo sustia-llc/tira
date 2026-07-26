@@ -89,7 +89,8 @@ fn test_competitive_multi_agent() -> Result<(), AifError> {
                                 found = true;
                                 break;
                             }
-                            Err(AifError::ResourceConflict(_)) => continue,
+                            // Contended arm: fall through to the next alternative.
+                            Err(AifError::ResourceConflict(_)) => {}
                             Err(e) => return Err(e),
                         }
                     }
@@ -247,7 +248,8 @@ fn test_sequential_communication() -> Result<(), AifError> {
                     done = true;
                     break;
                 }
-                Err(AifError::ResourceConflict(_)) => continue,
+                // Contended arm: fall through to the next alternative.
+                Err(AifError::ResourceConflict(_)) => {}
                 Err(e) => return Err(e),
             }
         }

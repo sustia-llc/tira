@@ -7,7 +7,7 @@ use rand_distr::weighted::WeightedIndex;
 use rand_distr::Distribution;
 
 /// Sample a uniform index in `0..n`. `n` must be > 0 — guaranteed by the
-/// `VotingAgent` constructor assert (n_actions > 0) and by non-empty winner sets.
+/// `VotingAgent` constructor assert (`n_actions` > 0) and by non-empty winner sets.
 fn uniform_index(rng: &mut StdRng, n: usize) -> usize {
     rand_distr::Uniform::new(0, n)
         .expect("invariant: n > 0 (constructor-asserted n_actions / non-empty winners)")
@@ -133,9 +133,9 @@ impl VotingAgent {
 
     /// Aggregate full action-probability distributions weighted by confidence.
     ///
-    /// Each agent contributes its action distribution P_i(a), weighted by
-    /// confidence w_i = exp(-H(P_i)) where H is the entropy.
-    /// The mixture P_group(a) = Σ w_i P_i(a) / Σ w_i is then sampled.
+    /// Each agent contributes its action distribution `P_i(a)`, weighted by
+    /// confidence `w_i = exp(-H(P_i))` where `H` is the entropy.
+    /// The mixture `P_group(a) = Σ w_i P_i(a) / Σ w_i` is then sampled.
     ///
     /// This method accepts ANY [`VotingMode`] when called directly, applying the
     /// confidence-weighted mixing and then resolving the final action per mode.
@@ -196,32 +196,29 @@ impl VotingAgent {
             }
         }
 
-        match self.mode {
-            VotingMode::Deterministic => {
-                let max_p = mixture
-                    .iter()
-                    .copied()
-                    .fold(f64::NEG_INFINITY, f64::max);
-                let winners: Vec<usize> = mixture
-                    .iter()
-                    .enumerate()
-                    .filter(|&(_, &p)| (p - max_p).abs() < 1e-10)
-                    .map(|(i, _)| i)
-                    .collect();
-                if winners.len() == 1 {
-                    Ok(winners[0])
-                } else {
-                    let idx = uniform_index(&mut self.rng, winners.len());
-                    Ok(winners[idx])
-                }
+        if self.mode == VotingMode::Deterministic {
+            let max_p = mixture
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max);
+            let winners: Vec<usize> = mixture
+                .iter()
+                .enumerate()
+                .filter(|&(_, &p)| (p - max_p).abs() < 1e-10)
+                .map(|(i, _)| i)
+                .collect();
+            if winners.len() == 1 {
+                Ok(winners[0])
+            } else {
+                let idx = uniform_index(&mut self.rng, winners.len());
+                Ok(winners[idx])
             }
+        } else {
             // Covers `Probabilistic`/`CertaintyWeighted`. The group pipeline only
             // reaches this method via `CertaintyWeighted`; direct callers may use
             // any non-`Deterministic` mode.
-            _ => {
-                let dist = WeightedIndex::new(&mixture)?;
-                Ok(dist.sample(&mut self.rng))
-            }
+            let dist = WeightedIndex::new(&mixture)?;
+            Ok(dist.sample(&mut self.rng))
         }
     }
 }
@@ -334,7 +331,7 @@ impl Agent for GroupAgent {
     }
 }
 
-/// Builder for constructing GroupAgent configurations.
+/// Builder for constructing `GroupAgent` configurations.
 pub struct GroupAgentBuilder {
     n_bandits: usize,
     n_internal: usize,
@@ -643,8 +640,8 @@ mod tests {
 
     /// Full `aggregate_weighted` mixture pinned by hand for 2 agents × 2 actions.
     ///
-    /// Agent A = [0.5, 0.5] → H = ln 2   ⇒ w_A = 1/2 (exact)
-    /// Agent B = [1.0, 0.0] → H = 0      ⇒ w_B = 1   (exact)
+    /// Agent A = [0.5, 0.5] → H = ln 2   ⇒ `w_A` = 1/2 (exact)
+    /// Agent B = [1.0, 0.0] → H = 0      ⇒ `w_B` = 1   (exact)
     ///
     /// Unnormalized mixture: [½·½ + 1·1, ½·½ + 1·0] = [1.25, 0.25]
     /// Total weight        : ½ + 1 = 1.5
@@ -659,6 +656,9 @@ mod tests {
     #[test]
     fn test_aggregate_weighted_mixture_hand_computed() -> Result<(), AifError> {
         const TOL: f64 = 1e-12;
+        /// Draws for the (2) mass check below — enough that a seeded frequency lands
+        /// within 0.01 of 5/6.
+        const DRAWS: usize = 20_000;
         let agent_a = DVector::from_vec(vec![0.5, 0.5]);
         let agent_b = DVector::from_vec(vec![1.0, 0.0]);
 
@@ -691,7 +691,6 @@ mod tests {
         // (2) mass: a seeded CW sampler's frequency is a fixed number, not a random one;
         // over 20_000 draws it must land on 5/6 within sampling noise.
         let mut cw = VotingAgent::with_seed(2, VotingMode::CertaintyWeighted, 7);
-        const DRAWS: usize = 20_000;
         let mut counts = [0usize; 2];
         for _ in 0..DRAWS {
             counts[cw.aggregate_weighted(&distributions)?] += 1;
@@ -751,6 +750,9 @@ mod tests {
 
     #[test]
     fn test_aggregate_weighted_zero_total_weight_falls_back_to_uniform() -> Result<(), AifError> {
+        /// Width of the Path-2 fixture below: 100 unnormalized entries of 0.5 is what
+        /// drives the entropy high enough to underflow the total-weight guard.
+        const N_WIDE: usize = 100;
         // Path 1: empty input ⇒ total_weight stays 0 ⇒ uniform mixture.
         let mut voter = VotingAgent::with_seed(3, VotingMode::CertaintyWeighted, 99);
         let mut counts = [0usize; 3];
@@ -771,7 +773,6 @@ mod tests {
         // single-agent total falls under the guard. This is the only non-empty way to
         // reach the fallback (a normalized distribution over n actions has H ≤ ln n, so
         // w ≥ 1/n).
-        const N_WIDE: usize = 100;
         let wide = vec![DVector::from_element(N_WIDE, 0.5)];
         assert!(
             confidence_weight(wide[0].as_slice()) <= 1e-15,
@@ -814,6 +815,9 @@ mod tests {
     }
 
     #[test]
+    // `voter` (the agent) and `votes` (its input) are the domain terms; renaming either
+    // would be worse than the similarity.
+    #[allow(clippy::similar_names)]
     fn test_voting_agent_probabilistic() -> Result<(), AifError> {
         let mut voter = VotingAgent::new(3, VotingMode::Probabilistic);
         let votes = vec![0, 0, 0, 1, 2];
@@ -830,6 +834,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::similar_names)] // `voter` / `votes` — see above.
     fn test_voting_agent_deterministic() -> Result<(), AifError> {
         let mut voter = VotingAgent::new(3, VotingMode::Deterministic);
         let votes = vec![0, 0, 0, 1, 2];
@@ -841,6 +846,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::similar_names)] // `voter` / `votes` — see above.
     fn test_voting_agent_deterministic_tie() -> Result<(), AifError> {
         let mut voter = VotingAgent::new(3, VotingMode::Deterministic);
         let votes = vec![0, 1, 0, 1]; // actions 0 and 1 tie at 2 votes each; 2 has none

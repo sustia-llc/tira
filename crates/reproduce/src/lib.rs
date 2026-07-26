@@ -1,3 +1,10 @@
+// `clippy::cast_precision_loss` is allowed crate-wide (issue #11 pedantic burn-down).
+// Every occurrence is a `usize as f64` on a count — trial counts, agent counts, sample
+// counts, percentile ranks. All far below 2^53, so no precision is actually lost, and
+// the harness's figures and recovered αs are byte-reproducible: rewriting the casts
+// would add fallible plumbing without changing a computed value.
+#![allow(clippy::cast_precision_loss)]
+
 pub use aif::{
     Agent, CopyAgent, CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel,
     AgentMessage, Message, MessageContent,
@@ -32,6 +39,12 @@ pub use plotter::{plot_figure4, plot_figure5, plot_figure6};
 pub mod stats {
     /// Linear-interpolation percentile `p ∈ [0, 1]` of a **pre-sorted** slice.
     /// Empty ⇒ NaN; single element ⇒ that element.
+    // The two `f64 as usize` casts are structurally in range: `p ∈ [0, 1]` and `n >= 2`
+    // (the 0/1 arms are handled above) ⇒ `rank ∈ [0, n-1]`, so both `floor` and `ceil`
+    // are non-negative and index the slice. Every caller in this workspace passes a
+    // literal 0.25/0.5/0.75. A `try_from` here would be dead error-handling in the
+    // percentile hot path used by the sweep binaries.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     #[must_use]
     pub fn percentile(sorted: &[f64], p: f64) -> f64 {
         match sorted.len() {

@@ -16,6 +16,12 @@ use plotters::prelude::*;
 
 /// Figure 4: Parameter recovery for α.
 /// x = true α, y = inferred α, gray identity line.
+///
+/// # Errors
+///
+/// Propagates any `plotters` backend error — most commonly a missing or
+/// unwritable `plots/` directory, since the output path is relative to the
+/// process working directory.
 pub fn plot_figure4(points: &[(f64, f64)]) -> Result<(), Box<dyn std::error::Error>> {
     let root = BitMapBackend::new("plots/figure4_recovery.png", (800, 700)).into_drawing_area();
     root.fill(&WHITE)?;
@@ -119,7 +125,13 @@ fn plot_panel(
 }
 
 /// Figure 5: 4-panel experiment results.
-/// Each panel: x = mean internal α, y = inferred group α, colored by n_agents.
+/// Each panel: x = mean internal α, y = inferred group α, colored by `n_agents`.
+///
+/// # Errors
+///
+/// Propagates any `plotters` backend error — most commonly a missing or
+/// unwritable `plots/` directory, since the output path is relative to the
+/// process working directory.
 pub fn plot_figure5(
     exp1: &[(f64, f64, usize)],
     exp2: &[(f64, f64, usize)],
@@ -149,6 +161,12 @@ pub fn plot_figure5(
 
 /// Figure 6: Simple probabilistic voting (Exp 2) vs certainty-weighted voting (Exp 5).
 /// Side-by-side comparison — same Dirichlet-constructed varying α, different aggregation.
+///
+/// # Errors
+///
+/// Propagates any `plotters` backend error — most commonly a missing or
+/// unwritable `plots/` directory, since the output path is relative to the
+/// process working directory.
 pub fn plot_figure6(
     exp2: &[(f64, f64, usize)],
     exp5: &[(f64, f64, usize)],

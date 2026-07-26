@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // -----------------------------------------------------------------------
     println!("=== Figure 4: Parameter Recovery ===");
 
-    let true_alphas: Vec<f64> = (1..=40).map(|i| i as f64 * 0.05).collect();
+    let true_alphas: Vec<f64> = (1..=40).map(|i| f64::from(i) * 0.05).collect();
     let fig4_base = substream(MASTER_SEED, 4);
     let recovery_points: Vec<(f64, f64)> = true_alphas
         .par_iter()
@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Figure 5: Four simulation experiments (§3.2)
     // -----------------------------------------------------------------------
     let n_agents_list: [usize; 4] = [4, 8, 16, 100];
-    let alpha_steps: Vec<f64> = (1..=20).map(|i| i as f64 * 0.05).collect();
+    let alpha_steps: Vec<f64> = (1..=20).map(|i| f64::from(i) * 0.05).collect();
 
     // Per-experiment seed bases: distinct stream indices off MASTER_SEED (fig4 uses 4).
     // Experiment 5's base is deliberately Experiment 2's (52), not a fresh index —

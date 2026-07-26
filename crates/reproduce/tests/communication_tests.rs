@@ -1,3 +1,7 @@
+// See the crate-level note in `reproduce/src/lib.rs`: every cast is a `usize as f64` on a
+// trial/action count, all far below 2^53 (issue #11 pedantic burn-down).
+#![allow(clippy::cast_precision_loss)]
+
 use reproduce::{
     CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel, Message, MessageContent,
     MultiAgentEnvironment, AifError, POMDPAgent, SharedBanditEnvironment, env_seed, group_seed,
@@ -49,6 +53,11 @@ impl TestEnvironment {
 /// matched-seed tests — PR #34 review finding. Arm-coverage assertions verified to
 /// hold at SEED = 2026 and 815 under this derivation.
 #[test]
+// A single end-to-end scenario: two seeded communicating agents driving a shared bandit
+// across 30 trials, with the contention-retry path and the arm-coverage assertions inline.
+// Splitting it would require threading the whole mutable env + agent + tracker state
+// through helpers, and the seeded trajectory is only meaningful as one uninterrupted run.
+#[allow(clippy::too_many_lines)]
 fn test_communicating_agents() -> Result<(), AifError> {
     const SEED: u64 = 2026;
     let n_agents = 2;
@@ -136,7 +145,8 @@ fn test_communicating_agents() -> Result<(), AifError> {
                             found = true;
                             break;
                         }
-                        Err(AifError::ResourceConflict(_)) => continue,
+                        // Contended arm: fall through to the next alternative.
+                        Err(AifError::ResourceConflict(_)) => {}
                         Err(e) => return Err(e),
                     }
                 }
