@@ -1,10 +1,10 @@
 [package]
 name = "reproduce"
 version = "0.5.0"
-edition = "2024"
+edition.workspace = true
 description = "Paper-reproduction harness for the aif active-inference engine"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/sustia-llc/tira"
+license.workspace = true
+repository.workspace = true
 publish = false
 
 [dependencies]

@@ -6,11 +6,13 @@
 
 use crate::{Agent, AifError};
 use flume::{Receiver, Sender};
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum MessageContent {
     Text(String),
     Beliefs(Vec<f64>),
@@ -20,7 +22,8 @@ pub enum MessageContent {
     Custom(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum InfoRequestType {
     Beliefs,
     PlannedAction,
@@ -28,7 +31,8 @@ pub enum InfoRequestType {
     Custom(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Message {
     pub sender_id: usize,
     pub recipient_id: Option<usize>,
