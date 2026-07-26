@@ -39,14 +39,16 @@ pub use plotter::{plot_figure4, plot_figure5, plot_figure6};
 pub mod stats {
     /// Linear-interpolation percentile `p ∈ [0, 1]` of a **pre-sorted** slice.
     /// Empty ⇒ NaN; single element ⇒ that element.
-    // The two `f64 as usize` casts are structurally in range: `p ∈ [0, 1]` and `n >= 2`
-    // (the 0/1 arms are handled above) ⇒ `rank ∈ [0, n-1]`, so both `floor` and `ceil`
-    // are non-negative and index the slice. Every caller in this workspace passes a
-    // literal 0.25/0.5/0.75. A `try_from` here would be dead error-handling in the
-    // percentile hot path used by the sweep binaries.
+    // The two `f64 as usize` casts are in range **by caller convention** (debug-asserted
+    // below, not statically enforced): given `p ∈ [0, 1]` and `n >= 2` (the 0/1 arms are
+    // handled above), `rank ∈ [0, n-1]`, so both `floor` and `ceil` are non-negative and
+    // index the slice. Every caller in this workspace passes a literal 0.25/0.5/0.75. A
+    // `try_from` here would be dead error-handling in the percentile hot path used by the
+    // sweep binaries.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     #[must_use]
     pub fn percentile(sorted: &[f64], p: f64) -> f64 {
+        debug_assert!((0.0..=1.0).contains(&p), "percentile precondition: p ∈ [0, 1], got {p}");
         match sorted.len() {
             0 => f64::NAN,
             1 => sorted[0],

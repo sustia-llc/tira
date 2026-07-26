@@ -32,9 +32,9 @@
   sha256-identical.
 - Allowed-with-justification where the lint is benign or the fix would risk drift:
   `cast_precision_loss` crate-wide in both crates (every site is a `usize as f64` count
-  far below 2^53), `float_cmp` on the eight bit-identity/rejected-proposal pins,
+  far below 2^53), `float_cmp` on the seven bit-identity/rejected-proposal pins,
   `manual_midpoint` (`f64::midpoint` is not specified as `(a+b)/2`), `too_many_lines`
-  ×6, `similar_names` ×7, `many_single_char_names` ×2 (math notation),
+  ×6, `similar_names` ×6, `many_single_char_names` ×2 (math notation),
   `struct_excessive_bools` ×2 (`AgentParams`' deliberate independent-toggle surface),
   `needless_pass_by_value` on `from_model` (narrowing to `&AgentParams` would break the
   koalisi-facing API), and the `stats::percentile` index casts. Every allow carries a
