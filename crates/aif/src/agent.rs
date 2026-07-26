@@ -153,6 +153,12 @@ impl Default for PrecisionDynamics {
 /// `alpha` has no meaningful default and must be supplied by the caller; the
 /// [`Default`] impl fills it with `1.0` purely so the struct is constructible
 /// via `..Default::default()`.
+// The `learn_a`/`learn_b`/`learn_d`/`learn_e`/`use_*_info_gain` flags are a deliberate
+// independent-toggle surface, not a state enum: SPM/pymdp parity requires each model
+// surface to be switchable on its own, and downstream A/B arms (koalisi) select
+// configurations by flipping individual flags. Collapsing them into an enum or bitflags
+// would break `..Default::default()` construction, which is the documented idiom here.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct AgentParams {
     /// Softmax temperature over marginalized action probabilities (action
@@ -320,7 +326,7 @@ pub struct ParameterFreeEnergies {
 ///   A: observation model P(o|s)          — per modality, `(n_obs[m] × Π_f n_states[f])`
 ///   B: transition model P(s'|s, action)  — per factor, one `(n_states[f]²)` per control
 ///   C: log-preference prior ln P(o|C)    — per modality, `(n_obs[m],)`
-///   D: state prior P(s_1)                — per factor, `(n_states[f],)`
+///   D: state prior P(s₁)                 — per factor, `(n_states[f],)`
 ///   E: policy prior P(π)                 — `(n_policies,)`
 ///
 /// The classic single-factor, single-modality MAB agent ([`Self::new`]) is the
@@ -330,6 +336,9 @@ pub struct ParameterFreeEnergies {
 /// Two precision parameters:
 ///   gamma: softmax temperature over expected free energy G → posterior over policies
 ///   alpha: softmax temperature over marginalized action probabilities → action selection
+// Mirrors the `AgentParams` flag surface (see the allow there): these private fields are
+// the stored copies of the caller's independent learning / info-gain toggles.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 pub struct POMDPAgent {
     a: Vec<DMatrix<f64>>,          // per modality: (n_obs[m] × n_joint)
@@ -535,6 +544,11 @@ impl POMDPAgent {
     }
 
     /// Create a MAB agent with explicit gamma and policy depth.
+    ///
+    /// # Panics
+    ///
+    /// Only if `policy_depth` exceeds `u32::MAX` — see
+    /// [`Self::from_model`](Self::from_model#panics).
     #[allow(clippy::missing_errors_doc, clippy::too_many_arguments)]
     pub fn with_params(
         n_states: usize,
@@ -574,7 +588,9 @@ impl POMDPAgent {
         agent.policy_depth = policy_depth;
 
         if policy_depth > 1 {
-            let n_policies = agent.n_actions.pow(policy_depth as u32);
+            let depth = u32::try_from(policy_depth)
+                .expect("invariant: policy_depth <= u32::MAX (pow overflows far earlier)");
+            let n_policies = agent.n_actions.pow(depth);
             let n_pol_f = n_policies as f64;
             agent.e_vector = DVector::from_element(n_policies, 1.0 / n_pol_f);
         }
@@ -590,7 +606,34 @@ impl POMDPAgent {
     ///
     /// See [`GenerativeModel`] for the little-endian (factor 0 fastest)
     /// flattening convention and the mean-field state-inference caveat.
+    ///
+    /// # Panics
+    ///
+    /// Only if `params.policy_depth` exceeds `u32::MAX`, which is checked rather
+    /// than silently truncated (a truncating cast would compute a *smaller*
+    /// policy-space size and quietly mis-size `E`). Any such depth overflows the
+    /// `n_actions.pow(depth)` policy enumeration long before it is reachable.
+    ///
+    /// The three `expect("invariant: ...")` calls on
+    /// `initial_precision_b`/`_d`/`_e` are unreachable-by-construction:
+    /// `validate_agent_params` runs first and returns `Err` when a
+    /// `learn_b`/`learn_d`/`learn_e` flag is set without its concentration
+    /// scale, and `initial_precision`'s length is shape-checked against
+    /// `n_joint` before it is indexed.
     #[allow(clippy::missing_errors_doc)]
+    // `params` is taken by value on purpose: `AgentParams` is the public construction
+    // surface of this crate (downstream `koalisi` calls `from_model` directly), so
+    // narrowing it to `&AgentParams` would be a breaking change for no measurable
+    // gain — the owned `Vec`/`Option<Vec>` fields are cloned out of it either way.
+    #[allow(clippy::needless_pass_by_value)]
+    // 281 lines of straight-line shape validation + field derivation, one guard per
+    // model surface. Splitting it would scatter the validation order that the
+    // trial-boundary semantics depend on; the length is the point.
+    #[allow(clippy::too_many_lines)]
+    // `pa`/`pb`/`pd`/`pe` and their `*_start` snapshots are the paper's Dirichlet
+    // parameter names (pA/pB/pD/pE). The similarity is the notation, and disambiguating
+    // it would sever the link to Eq. 34/36.
+    #[allow(clippy::similar_names)]
     pub fn from_model(model: GenerativeModel, params: AgentParams) -> Result<Self, AifError> {
         let GenerativeModel { mut a, mut b, c, d } = model;
 
@@ -765,7 +808,9 @@ impl POMDPAgent {
         }
         let n_actions: usize = n_controls.iter().product();
         let e_len = if params.policy_depth > 1 {
-            n_actions.pow(params.policy_depth as u32)
+            let depth = u32::try_from(params.policy_depth)
+                .expect("invariant: policy_depth <= u32::MAX (pow overflows far earlier)");
+            n_actions.pow(depth)
         } else {
             n_actions
         };
@@ -1344,7 +1389,7 @@ impl POMDPAgent {
         }
 
         self.mmp_free_energy = self.mmp_window_free_energy(&traj);
-        self.beliefs = traj[w - 1].clone();
+        self.beliefs.clone_from(&traj[w - 1]);
         self.mmp_traj = traj;
     }
 
@@ -1644,7 +1689,7 @@ impl POMDPAgent {
             .collect();
 
         self.mmp_free_energy = q.iter().zip(policy_f.iter()).map(|(&qi, &fi)| qi * fi).sum();
-        self.beliefs = bma[w - 1].clone();
+        self.beliefs.clone_from(&bma[w - 1]);
         self.mmp_traj = bma;
         self.beta = beta;
         self.gamma = 1.0 / beta;
@@ -1864,7 +1909,7 @@ impl POMDPAgent {
     /// `None`), latched to fire once. MMP accumulates elsewhere (window slide /
     /// [`Self::reset_window`]).
     ///
-    /// The `D` write-back is applied immediately here because under MeanField
+    /// The `D` write-back is applied immediately here because under `MeanField`
     /// `self.d` is read only at the trial boundary (first `belief_step` /
     /// `reset_window`), never mid-trial — so the write is inert within the trial and
     /// the belief trajectory is unaffected. (Under MMP the write must be deferred;
@@ -2024,7 +2069,12 @@ impl POMDPAgent {
         if self.policy_depth <= 1 {
             return (0..self.n_actions).map(|a| vec![a]).collect();
         }
-        let n_policies = self.n_actions.pow(self.policy_depth as u32);
+        // Checked rather than truncating: a `depth as u32` wrap would enumerate a
+        // *shorter* policy space than `policy_depth` implies. Unreachable — the
+        // constructors already rejected any depth this large.
+        let depth = u32::try_from(self.policy_depth)
+            .expect("invariant: policy_depth <= u32::MAX (validated at construction)");
+        let n_policies = self.n_actions.pow(depth);
         (0..n_policies)
             .map(|idx| {
                 let mut seq = Vec::with_capacity(self.policy_depth);
@@ -2368,7 +2418,7 @@ impl POMDPAgent {
     /// smoothed `X₁`. The learned `D` write-back (`D = pd/Σ`) is then applied here,
     /// at the trial boundary, for **both** inference modes: under MMP it was
     /// deferred (mid-trial `D` mutation would corrupt the [`Self::mmp_messages`]
-    /// `τ = 0` anchor); under MeanField it was already written mid-trial and this
+    /// `τ = 0` anchor); under `MeanField` it was already written mid-trial and this
     /// re-sync is idempotent. `D` thus updates exactly at the trial boundary,
     /// matching the paper's trial-indexed Eq. 34. The method then re-snapshots the
     /// Dirichlet trial-boundary references (so [`Self::parameter_free_energies`]
@@ -2748,6 +2798,10 @@ fn validate_column_stochastic(m: &DMatrix<f64>) -> Result<(), AifError> {
 /// `policy_depth` >= 1 (depth 0 enumerates empty policies and panics on action
 /// marginalization), and `inference_iters` >= 1 (zero sweeps would skip the
 /// multi-factor belief update).
+// A flat list of one independent domain guard per `AgentParams` field, each with its own
+// diagnostic message. Length tracks the field count; splitting it into per-surface
+// helpers would hide the single place a reader can audit "what is rejected".
+#[allow(clippy::too_many_lines)]
 fn validate_agent_params(params: &AgentParams) -> Result<(), AifError> {
     if !params.alpha.is_finite() || params.alpha < 0.0 {
         return Err(AifError::InvalidDistribution(format!(
@@ -3537,7 +3591,7 @@ mod tests {
         let pragmatic = -std::f64::consts::LN_2;
         let info_gain = neg_g - pragmatic;
         assert!(info_gain > 0.0, "epistemic term must be positive: {info_gain}");
-        assert_relative_eq!(info_gain, 0.315952, epsilon = 1e-5);
+        assert_relative_eq!(info_gain, 0.315_952, epsilon = 1e-5);
         Ok(())
     }
 
@@ -3626,7 +3680,7 @@ mod tests {
         {
             let (neg_g, _) = agent.efe_step(&agent.beliefs, 0);
             assert_relative_eq!(neg_g, prag0 + prag1, epsilon = 1e-12);
-            assert_relative_eq!(neg_g, -1.666313, epsilon = 1e-5);
+            assert_relative_eq!(neg_g, -1.666_313, epsilon = 1e-5);
         }
 
         // Agent::act rejects a multi-modality agent; act_multi works.
@@ -3939,6 +3993,11 @@ mod tests {
     /// Exact smoothed marginals `P(s_τ | o_{1:T})` by brute-force enumeration over
     /// all `S^T` joint trajectories of a single-factor HMM. This is the reference
     /// the marginal-message-passing fixed point is measured against.
+    // Single-char bindings are the HMM's standard notation (A/B/D matrices, s states,
+    // t timesteps, w trajectory weight); renaming them would obscure the mapping to
+    // the equations. `t as u32` cannot truncate: `t` is a test fixture's observation
+    // count (2-4), and `s.pow(t)` would overflow long before u32 does.
+    #[allow(clippy::many_single_char_names, clippy::cast_possible_truncation)]
     fn brute_force_smoother(
         b: &DMatrix<f64>,
         a: &DMatrix<f64>,
@@ -3952,7 +4011,7 @@ mod tests {
         for idx in 0..s.pow(t as u32) {
             let mut traj = vec![0usize; t];
             let mut r = idx;
-            for slot in traj.iter_mut() {
+            for slot in &mut traj {
                 *slot = r % s;
                 r /= s;
             }
@@ -3975,6 +4034,9 @@ mod tests {
 
     /// Exact smoothed marginals via the forward–backward (sum-product) algorithm,
     /// which is exact on a chain and must agree with [`brute_force_smoother`].
+    // Single-char bindings are the forward–backward algorithm's standard notation
+    // (α/β messages, γ marginals, A/B/D matrices, s states, t timesteps).
+    #[allow(clippy::many_single_char_names)]
     fn forward_backward_smoother(
         b: &DMatrix<f64>,
         a: &DMatrix<f64>,
@@ -4121,9 +4183,9 @@ mod tests {
         let brute = brute_force_smoother(&b, &a, &d, &obs);
         let fb = forward_backward_smoother(&b, &a, &d, &obs);
         let exact_hand = [
-            [0.631171, 0.368829],
-            [0.566312, 0.433688],
-            [0.717135, 0.282865],
+            [0.631_171, 0.368_829],
+            [0.566_312, 0.433_688],
+            [0.717_135, 0.282_865],
         ];
         for tau in 0..3 {
             for x in 0..2 {
@@ -4149,9 +4211,9 @@ mod tests {
             assert_relative_eq!(s[0].sum(), 1.0, epsilon = 1e-9);
         }
         // Pinned MMP fixed point (regression on the Eq. 23 variational solution).
-        assert_relative_eq!(s1[0][0], 0.659424, epsilon = 1e-4);
-        assert_relative_eq!(s2[0][0], 0.331069, epsilon = 1e-4);
-        assert_relative_eq!(s3[0][0], 0.699195, epsilon = 1e-4);
+        assert_relative_eq!(s1[0][0], 0.659_424, epsilon = 1e-4);
+        assert_relative_eq!(s2[0][0], 0.331_069, epsilon = 1e-4);
+        assert_relative_eq!(s3[0][0], 0.699_195, epsilon = 1e-4);
 
         // 3. The MMP fixed point genuinely deviates from the exact smoother
         //    (documents "NOT exact-consistent" — do not fudge to a 1e-6 pass).
@@ -4165,7 +4227,7 @@ mod tests {
         //    future observations pull it DOWN toward the exact γ₁ = 0.631171, and
         //    MMP moves it the same way and lands closer to exact than the filter.
         let filter_1 = 0.5 * a[(obs[0], 0)] / (0.5 * a[(obs[0], 0)] + 0.5 * a[(obs[0], 1)]);
-        assert_relative_eq!(filter_1, 0.727273, epsilon = 1e-5);
+        assert_relative_eq!(filter_1, 0.727_273, epsilon = 1e-5);
         assert!(s1[0][0] < filter_1, "MMP τ=1 belief must move away from the filter");
         assert!(
             (s1[0][0] - brute[0][0]).abs() < (filter_1 - brute[0][0]).abs(),
@@ -4189,8 +4251,8 @@ mod tests {
         let obs = [0usize, 1];
 
         let brute = brute_force_smoother(&b, &a, &d, &obs);
-        assert_relative_eq!(brute[0][0], 0.526316, epsilon = 1e-5);
-        assert_relative_eq!(brute[1][0], 0.410526, epsilon = 1e-5);
+        assert_relative_eq!(brute[0][0], 0.526_316, epsilon = 1e-5);
+        assert_relative_eq!(brute[1][0], 0.410_526, epsilon = 1e-5);
 
         let mut agent = mmp_chain_agent(b.clone(), a.clone(), d.clone(), 2)?;
         agent.action_probabilities(obs[0]);
@@ -4550,12 +4612,7 @@ mod tests {
         }
         learner.reset_window();
 
-        let counts: Vec<Vec<DMatrix<f64>>> = learner
-            .pb()
-            .expect("learn_b ⇒ pb is Some")
-            .iter()
-            .map(|bf| bf.to_vec())
-            .collect();
+        let counts: Vec<Vec<DMatrix<f64>>> = learner.pb().expect("learn_b ⇒ pb is Some").to_vec();
         let mut injected = POMDPAgent::from_model(
             model(),
             AgentParams {
@@ -4758,6 +4815,8 @@ mod tests {
     }
 
     #[test]
+    // `pa_subfloor`/`pb_subfloor` name the Dirichlet surface each case exercises.
+    #[allow(clippy::similar_names)]
     fn test_injected_count_subfloor_column_rejected() {
         // Regression for the validate/normalize threshold mismatch: a column summing
         // into (0, CONC_NORM_FLOOR] is positive yet would land un-normalized in A/B
@@ -4908,6 +4967,9 @@ mod tests {
     }
 
     #[test]
+    // Exact comparison is the assertion: the masked terms cancel to a hard 0.0, not to
+    // something within a tolerance. A margin here would let a real regression through.
+    #[allow(clippy::float_cmp)]
     fn test_b_novelty_zero_for_deterministic_b() {
         // Deterministic (0/1) pB columns: colsum equals the single nonzero entry, so
         // each surviving term is exactly ½(1/1 − 1/1) = 0 (and zeros are masked).
@@ -4918,6 +4980,8 @@ mod tests {
     }
 
     #[test]
+    // Exact comparison is the assertion: a masked zero contributes a hard 0.0.
+    #[allow(clippy::float_cmp)]
     fn test_a_novelty_masks_zero_entries() {
         // An exact-zero pA entry must contribute 0 (pymdp mask), not the spurious
         // 1/1e-10 ≈ 1e10 term the old floor would have injected.
@@ -4930,6 +4994,9 @@ mod tests {
     }
 
     #[test]
+    // Bit-identity is the contract under test (flag off ⇒ pB consulted nowhere), so the
+    // comparison must be exact; a tolerance would not test anything.
+    #[allow(clippy::float_cmp)]
     fn test_b_novelty_flag_off_bit_identical() -> Result<(), AifError> {
         // A learn_b agent with the flag off consults pB nowhere in efe_step, so its
         // neg-G matches the same model built without learn_b (no pB at all).
@@ -5288,6 +5355,11 @@ mod tests {
     }
 
     #[test]
+    // The `(0.5 + x1[k]) / 2.0` expectations spell out the Dirichlet normalization
+    // `pd / Σ pd` being asserted, and are NOT rewritten to `f64::midpoint`: midpoint has
+    // its own rounding (it is not specified as `(a + b) / 2`), so the substitution could
+    // shift the last bits of a value this test pins.
+    #[allow(clippy::manual_midpoint)]
     fn test_learn_d_mmp_commits_smoothed_x1() -> Result<(), AifError> {
         // MMP horizon 2, learn_d, ω = η = 1, pd_start = D = [.5, .5]. The window
         // slides on the third observation; the node about to leave carries the

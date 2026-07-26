@@ -39,6 +39,10 @@
 //!
 //! Run: `cargo run --release -p reproduce --bin extension11`.
 
+// See the crate-level note in `reproduce/src/lib.rs`: every cast is a `usize as f64` on a
+// trial/agent count, all far below 2^53 (issue #11 pedantic burn-down).
+#![allow(clippy::cast_precision_loss)]
+
 use reproduce::stats::{median, median_iqr};
 use reproduce::{
     Agent, AifError, BANDIT_PROBS, BanditEnvironment, Environment, GroupAgentBuilder, PREFERENCES,
@@ -246,8 +250,7 @@ fn print_report(results: &[CellResult]) {
                 results
                     .iter()
                     .find(|c| c.n == n && (c.alpha - alpha).abs() < 1e-9 && c.mode == mode)
-                    .map(|c| if sum { c.r_sum.0 } else { c.r_mean.0 })
-                    .unwrap_or(f64::NAN)
+                    .map_or(f64::NAN, |c| if sum { c.r_sum.0 } else { c.r_mean.0 })
             };
             println!(
                 "| {:.1} | {} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} |",

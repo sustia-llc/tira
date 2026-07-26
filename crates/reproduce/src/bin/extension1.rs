@@ -44,7 +44,7 @@ fn is_identifiable(true_alpha: f64) -> bool {
 /// Sweep across identifiable (< 1) and degenerate (≥ 1) true αs.
 const ALPHA_SWEEP: [f64; 8] = [0.1, 0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 3.0];
 /// Master seed; per-cell/per-rep seeds derived via `run_sweep`'s issue-#2 convention.
-/// Distinct from reproduce (2026), extension11 (0xE11_2026), extension3 (0xE3_2026); added
+/// Distinct from reproduce (2026), extension11 (`0xE11_2026`), extension3 (`0xE3_2026`); added
 /// to the anti-collision guard in `simulation.rs`.
 const MASTER_SEED: u64 = 0xE1_2026;
 
@@ -119,6 +119,10 @@ fn main() -> Result<(), AifError> {
     Ok(())
 }
 
+// A linear sequence of `println!`s emitting the markdown report. Long by construction
+// (the prose *is* the deliverable, `docs/extension1-mcmc.md`); splitting it into
+// per-section helpers would only add indirection between the text and its ordering.
+#[allow(clippy::too_many_lines)]
 fn print_report(results: &[CellResult]) {
     println!("# Extension 1 — MCMC parameter recovery for α");
     println!();

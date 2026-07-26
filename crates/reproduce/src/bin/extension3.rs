@@ -40,6 +40,10 @@
 //!
 //! Run: `cargo run --release -p reproduce --bin extension3`.
 
+// See the crate-level note in `reproduce/src/lib.rs`: every cast is a `usize as f64` on a
+// cell/rep count, all far below 2^53 (issue #11 pedantic burn-down).
+#![allow(clippy::cast_precision_loss)]
+
 use reproduce::stats::median_iqr;
 use reproduce::{
     AifError, BANDIT_PROBS, EXT3_INITIAL_PRECISION, ExperimentOpts, PREFERENCES,
@@ -51,7 +55,7 @@ const REPS: usize = 5;
 const N_SWEEP: [usize; 3] = [4, 8, 16];
 const ALPHA_SWEEP: [f64; 5] = [0.1, 0.3, 0.5, 0.7, 0.9];
 /// Master seed; per-cell/per-rep seeds are derived via [`substream`] (issue #2).
-/// Deliberately distinct from `reproduce.rs`'s 2026 and `extension11.rs`'s 0xE11_2026
+/// Deliberately distinct from `reproduce.rs`'s 2026 and `extension11.rs`'s `0xE11_2026`
 /// so none of the three binaries' seed-derivation trees share a root.
 const MASTER_SEED: u64 = 0xE3_2026;
 
@@ -130,6 +134,8 @@ fn main() -> Result<(), AifError> {
     Ok(())
 }
 
+// A linear sequence of `println!`s emitting the markdown report (see extension1.rs).
+#[allow(clippy::too_many_lines)]
 fn print_report(results: &[CellResult]) {
     println!("# Extension 3 — individual A-learning and group-α recovery");
     println!();

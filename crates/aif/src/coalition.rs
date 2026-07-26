@@ -573,6 +573,10 @@ mod tests {
     }
 
     #[test]
+    // `bad_pref`/`bad_alpha` and `nan_prec`/`nan_pref` name the field each fixture
+    // corrupts; the shared prefix is what makes the one-bad-field-per-case structure
+    // readable.
+    #[allow(clippy::similar_names)]
     fn test_competence_efe_rejects_degenerate_params() {
         // `params` is validated before use so a caller cannot silently obtain a degenerate or
         // monotonicity-inverted observation model. Each field is checked independently.

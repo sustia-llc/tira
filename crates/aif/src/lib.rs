@@ -1,3 +1,12 @@
+// `clippy::cast_precision_loss` is allowed crate-wide (issue #11 pedantic burn-down).
+// Every occurrence is a `usize as f64` on a dimension or a count — state/observation/
+// action counts, window lengths, Dirichlet denominators, uniform-distribution
+// reciprocals. These are all far below 2^53, so no precision is actually lost, and the
+// engine's arithmetic is bit-pinned by seeded tests: rewriting the casts (e.g. via
+// `f64::from(u32::try_from(..)?)`) would add fallible plumbing to hot numeric loops
+// without changing a single computed value.
+#![allow(clippy::cast_precision_loss)]
+
 use rand::seq::WeightError;
 use rand_distr::BernoulliError;
 use thiserror::Error;
