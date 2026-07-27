@@ -59,7 +59,7 @@ now koalisi #54 (cost-quality tradeoff)).
   `needless_pass_by_value` on `from_model`) carry item- or crate-level `#[allow]`s with
   written reasons. So a pedantic run surfaces only NEW issues; don't "clean up" an allow
   without reading its reason.
-- `cargo run --release -p reproduce --bin reproduce` — full reproduction in ~30s
+- `cargo run --release -p reproduce --bin reproduce` — full reproduction in ~35s
 
 ## Module map
 
