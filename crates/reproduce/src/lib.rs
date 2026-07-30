@@ -20,7 +20,8 @@ mod plotter;
 mod simulation;
 
 pub use simulation::{
-    BANDIT_PROBS, DimResult, EXT3_INITIAL_PRECISION, ExperimentOpts, LearningParams, McmcConfig,
+    BANDIT_PROBS, DimResult, DynamicsParams, EXT3_INITIAL_PRECISION, ExperimentOpts,
+    LearningParams, McmcConfig,
     McmcDim, McmcResult, McmcVecConfig, McmcVecResult, ModelParams, PREFERENCES, PRIOR_SD,
     ProposalMode, R_HAT_THRESHOLD,
     RecoveryResult, TrialData, env_seed, experiment_certainty_weighted, experiment_deterministic,
