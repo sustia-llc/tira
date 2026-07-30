@@ -117,10 +117,24 @@ factors stay prior-shaped (the behavioral stream constrains one temperature, not
 (α, p) is *genuinely degenerate* — a 4× budget probe near-converges onto tight-but-wrong
 marginals (rec p ≈ 0.36/0.50 vs true 0.8); (η, ω) stays weakly identifiable and is not
 sampler-limited. This is why the single-α studies fix every other parameter. β₀/ψ are
-analytically excluded (deterministic B ⇒ inert γ/β loop; needs a stochastic-B environment).
-Full tables and the two-arm details:
+analytically excluded on the MAB (rank-1 B ⇒ inert γ/β loop) — measured in extension 2b
+below. Full tables and the two-arm details:
 [extension2-multiparam.md](docs/extension2-multiparam.md); run with
 `cargo run --release -p reproduce --bin extension2`.
+
+### Extension 2b — (β₀, ψ) on a live precision loop (study, no figure)
+
+Closes the cell extension 2 excluded. The γ/β precision loop is inert for **any rank-1
+controlled B** (deterministic arm-teleport and uniform action-slip alike), while
+**column-varying deterministic B suffices** to make it live — so the study runs on a
+positional *foraging* bandit (the agent walks a line of arms while the good arm drifts
+under a hazard chain; no noise knobs). Result: the sampler fully converges everywhere
+(the only joint in this series where proposal geometry is not the story), there is **no
+β₀–ψ ridge** (corr ≈ 0), **β₀ is partially identifiable** (rank-orders truth,
+prior-shrunk), and **ψ is prior-dominated** — mechanistically expected, since the
+Table-2 loop's 16 damped iterations exhaust ψ's transient within each timestep. Report:
+[extension2b-stochastic-b.md](docs/extension2b-stochastic-b.md); run with
+`cargo run --release -p reproduce --bin extension2b` (~29 min).
 
 ## Architecture
 
@@ -155,6 +169,7 @@ Environment (BanditEnvironment)
 | `crates/reproduce/src/bin/extension3.rs` | Individual A-learning vs group-α recovery study (extension 3) |
 | `crates/reproduce/src/bin/extension1.rs` | MCMC (Metropolis-Hastings) α recovery vs grid MAP (extension 1 / #25) |
 | `crates/reproduce/src/bin/extension2.rs` | Joint multi-parameter recovery: (α,γ)/(α,p)/(η,ω) two-arm identifiability study (extension 2 / #29+#30) |
+| `crates/reproduce/src/bin/extension2b.rs` | (β₀, ψ) recovery on the positional foraging bandit (extension 2b / #33) |
 
 ## Usage
 

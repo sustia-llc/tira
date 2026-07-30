@@ -402,7 +402,11 @@ fn dynamics_replay_reset_window_beta_semantics_match() -> Result<(), AifError> {
     let mut generator = POMDPAgent::from_model(model.clone(), params.clone())?;
     let (fed_a, acts_a, gen_a) = drive_generation(&mut generator, first)?;
     generator.reset_window();
-    assert_eq!(generator.beta().expect("dynamics on"), 1.0, "β must reset to β₀");
+    assert_eq!(
+        generator.beta().expect("invariant: dynamics on in this fixture"),
+        1.0,
+        "β must reset to β₀"
+    );
     assert_eq!(generator.gamma(), 1.0, "γ must reset to 1/β₀");
     assert!(generator.gamma_trajectory().is_empty());
     let (fed_b, acts_b, gen_b) = drive_generation(&mut generator, second)?;
@@ -410,7 +414,7 @@ fn dynamics_replay_reset_window_beta_semantics_match() -> Result<(), AifError> {
     let mut replayer = POMDPAgent::from_model(model, params)?;
     let rep_a = drive_replay(&mut replayer, &fed_a, &acts_a);
     replayer.reset_window();
-    assert_eq!(replayer.beta().expect("dynamics on"), 1.0);
+    assert_eq!(replayer.beta().expect("invariant: dynamics on in this fixture"), 1.0);
     assert_eq!(replayer.gamma(), 1.0);
     assert!(replayer.gamma_trajectory().is_empty());
     let rep_b = drive_replay(&mut replayer, &fed_b, &acts_b);
@@ -439,8 +443,8 @@ fn dynamics_with_learning_replay_matches_generation() -> Result<(), AifError> {
 
     assert_eq!(gen_trace, replay_trace, "β/γ/F must be bit-identical per step");
     let (gen_pa, rep_pa) = (
-        generator.pa().expect("learn_a on"),
-        replayer.pa().expect("learn_a on"),
+        generator.pa().expect("invariant: learn_a on in this fixture"),
+        replayer.pa().expect("invariant: learn_a on in this fixture"),
     );
     assert_eq!(gen_pa, rep_pa, "learned Dirichlet counts must be bit-identical");
     Ok(())

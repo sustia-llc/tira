@@ -1342,8 +1342,9 @@ fn score_replay(model: &mut POMDPAgent, data: &TrialData) -> f64 {
 /// Build a fresh agent at `params` — fixed-A via `with_params` (α/γ/good-arm p), or
 /// A-learning via `from_model` + `AgentParams` (adds η/ω). Shared by
 /// [`log_likelihood_params`] (recovery) and [`generate_params_data`] (generation) so both
-/// use the identical construction. Learning precision is length-checked against `n_bandits`.
-/// The preferences `C` are fixed at the paper's [`PREFERENCES`] (only α/γ/p/η/ω vary).
+/// use the identical construction. Learning precision is length-checked against `n_bandits`
+/// on the MAB path, and against `n_bandits²` (the positional model's joint state count) on
+/// the dynamics path. The preferences `C` are fixed at the paper's [`PREFERENCES`].
 fn build_params_agent(params: &ModelParams) -> Result<POMDPAgent, AifError> {
     let obs_probs = params.obs_probs();
     let n = obs_probs.len();
@@ -1437,31 +1438,44 @@ pub fn generate_params_data(
     match &params.dynamics {
         None => run_seeded_agent(build_params_agent(params)?, n_trials, seed),
         Some(dp) => {
-            let mut agent = build_params_agent(params)?;
-            agent.reseed(group_seed(seed));
             let mut env = PositionalBanditEnvironment::with_seed(
                 BANDIT_PROBS.to_vec(),
                 dp.hazard,
                 env_seed(seed),
                 switch_seed(seed),
             )?;
-            run_single_simulation(&mut agent, &mut env, n_trials)
+            run_seeded_agent_in(build_params_agent(params)?, &mut env, n_trials, seed)
         }
     }
 }
 
-/// Seed a prebuilt agent's action sampler ([`group_seed`]) + a fresh standard-MAB
-/// environment ([`env_seed`]) and roll out `n_trials`. The single source of the
-/// generation seeding pipeline, shared by [`single_agent_data`] and
-/// [`generate_params_data`] so their RNG streams are byte-identical for a given seed.
-fn run_seeded_agent(
+/// Seed a prebuilt agent's action sampler ([`group_seed`]) and roll it out in `env` —
+/// the single source of the AGENT-side generation seeding, shared by the standard-MAB
+/// route ([`run_seeded_agent`]) and the extension-2b positional route so the role
+/// order lives in one place.
+fn run_seeded_agent_in(
     mut agent: POMDPAgent,
+    env: &mut impl Environment,
     n_trials: usize,
     seed: u64,
 ) -> Result<TrialData, AifError> {
     agent.reseed(group_seed(seed));
+    run_single_simulation(&mut agent, env, n_trials)
+}
+
+/// Seed a prebuilt agent + a fresh standard-MAB environment ([`env_seed`]) and roll out
+/// `n_trials`. The standard-MAB generation pipeline shared by [`single_agent_data`] and
+/// [`generate_params_data`]'s non-dynamics route, so their RNG streams are byte-identical
+/// for a given seed; the dynamics route shares the agent-side seeding via
+/// [`run_seeded_agent_in`]. (Agent and env RNGs are independent, so the construction
+/// order here does not affect the draws.)
+fn run_seeded_agent(
+    agent: POMDPAgent,
+    n_trials: usize,
+    seed: u64,
+) -> Result<TrialData, AifError> {
     let mut env = make_env(seed)?;
-    run_single_simulation(&mut agent, &mut env, n_trials)
+    run_seeded_agent_in(agent, &mut env, n_trials, seed)
 }
 
 /// Options controlling an experiment-factory run.

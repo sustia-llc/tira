@@ -207,9 +207,10 @@ impl Environment for BanditEnvironment {
 /// Reward and switch draws come from two independent RNGs (role streams 2 and 4
 /// — [`env_seed`]/[`switch_seed`]) so reward-noise realizations stay comparable
 /// across hazard settings. The probability vector follows the [`BANDIT_PROBS`]
-/// convention: the good arm starts at the argmax entry (first argmax on ties),
-/// and a switch SWAPS the good value to the new position — with the paper's
-/// `[0.8, 0.2, 0.2]` this is exactly "the 0.8 arm moves". Start position is 0.
+/// convention: the good arm starts at the argmax entry (ties resolve to the
+/// LAST maximal entry — the `Iterator::max_by` contract), and a switch SWAPS
+/// the good value to the new position — with the paper's `[0.8, 0.2, 0.2]`
+/// this is exactly "the 0.8 arm moves". Start position is 0.
 // `Clone` intentionally not derived — see [`BanditEnvironment`].
 #[derive(Debug)]
 pub struct PositionalBanditEnvironment {

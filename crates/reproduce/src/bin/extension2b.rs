@@ -23,8 +23,9 @@
 //! A single dynamics likelihood eval replays the whole trial sequence through
 //! an MMP smoother + γ/β loop: 265 ms at 300 trials (release). The study
 //! therefore runs 150 trials × 2×2 cells × 3 reps × 4 chains × (400 + 800)
-//! evals ≈ 58k evals ≈ 10 min wall on 12 cores — sized down from extension
-//! 2's defaults (300 trials, 5 reps, 1000 + 2000), which would run 30 min+.
+//! evals ≈ 58k evals — **measured ≈ 29 min wall on 12 cores** — sized down
+//! from extension 2's defaults (300 trials, 5 reps, 1000 + 2000), which
+//! would have run several times longer still.
 //!
 //! Run: `cargo run --release -p reproduce --bin extension2b`.
 
