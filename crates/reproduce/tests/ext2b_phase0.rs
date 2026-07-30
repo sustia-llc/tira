@@ -2,15 +2,24 @@
 //! (plan `2026-07-30-ext2b-stochastic-b.md`).
 //!
 //! **D1 spike outcome (2026-07-30): the plan's original encoding FAILED its
-//! gate and was redesigned in-spike.** Three pinned findings:
+//! gate; owner ratified the POSITIONAL encoding (C2) after exploration.**
+//! Pinned findings:
 //! 1. Deterministic controlled factor + stochastic UNCONTROLLED hazard factor
 //!    ⇒ `F_π` exactly policy-constant ⇒ γ/β loop inert (finding 1).
 //! 2. Uniform action-slip doesn't fix it: from-state-independent noise keeps
 //!    the controlled B rank-1 — the inert result generalizes from
 //!    "deterministic MAB B" to "any rank-1 controlled B" (finding 2).
-//! 3. **Sticky slip** (switch fails w.p. ε, previous arm pulled) is
-//!    from-state-dependent, `F_π` varies, the loop is live — with or without the
-//!    hazard (D1′, the encoding of record pending owner ratification).
+//! 3. Sticky slip (switch fails w.p. ε, previous arm pulled) is
+//!    from-state-dependent and the loop is live (finding 3) — but weaker than:
+//! 4. **Positional (foraging) encoding — the ENCODING OF RECORD (owner,
+//!    2026-07-30)**: factor 0 = position, controls {left, stay, right} with
+//!    deterministic clamped moves; factor 1 = good-arm hazard chain. `to`
+//!    depends on `from` structurally, so B is column-varying while fully
+//!    deterministic — largest `F_π` spread of every candidate (~3× sticky),
+//!    zero noise knobs. Corollary: the docs' "F varies only with stochastic B"
+//!    phrasing is imprecise — column-varying DETERMINISTIC controlled B
+//!    suffices (the inert theorem is about rank-1 B) — doc-correction pass due
+//!    at PR time (CLAUDE.md + aif module docs).
 //!
 //! **Dynamics-replay fidelity** (the issue's do-first item): sampled
 //! generation (`Agent::act`) and forced replay (`action_probabilities` +
@@ -230,6 +239,116 @@ fn spike_sticky_only_no_hazard_characterization() -> Result<(), AifError> {
     Ok(())
 }
 
+/// Positional ("foraging") candidate: factor 0 = position on a line of n
+/// arms; controls = {left, stay, right} with edge-clamping; pulling happens at
+/// the current position. `to` depends on `from` even with DETERMINISTIC
+/// movement — column-varying without any noise knob. `slip` (fail-to-move,
+/// stay in place) optional on top.
+#[allow(clippy::cast_precision_loss)] // n ≤ 3 here
+fn positional_model(n: usize, hazard: f64, slip: f64) -> GenerativeModel {
+    let mut a = DMatrix::zeros(2, n * n);
+    for good in 0..n {
+        for pos in 0..n {
+            let p = if pos == good { GOOD_P } else { BAD_P };
+            a[(0, pos + n * good)] = p;
+            a[(1, pos + n * good)] = 1.0 - p;
+        }
+    }
+    // Controls 0/1/2 = left/stay/right, clamped at the edges (B[to][from]).
+    let b_pos: Vec<DMatrix<f64>> = [-1i64, 0, 1]
+        .iter()
+        .map(|&mv| {
+            let mut m = DMatrix::zeros(n, n);
+            for from in 0..n {
+                let from_i = i64::try_from(from).expect("invariant: n ≤ 3");
+                let hi = i64::try_from(n - 1).expect("invariant: n ≤ 3");
+                let to = usize::try_from((from_i + mv).clamp(0, hi))
+                    .expect("invariant: clamped to 0..n");
+                m[(to, from)] += 1.0 - slip;
+                m[(from, from)] += slip;
+            }
+            m
+        })
+        .collect();
+    let mut h = DMatrix::zeros(n, n);
+    for from in 0..n {
+        for to in 0..n {
+            h[(to, from)] = if to == from { 1.0 - hazard } else { hazard / (n as f64 - 1.0) };
+        }
+    }
+    GenerativeModel {
+        a: vec![a],
+        b: vec![b_pos, vec![h]],
+        c: vec![vec![0.7, 0.3]],
+        d: vec![vec![1.0 / n as f64; n], vec![1.0 / n as f64; n]],
+    }
+}
+
+/// Encoding-candidate comparison table (exploration that led to the C2
+/// ratification, kept as cheap documentation of the choice): drives each
+/// candidate identically and prints (`F_π` spread, |γ−1|). Non-pinning; the
+/// ratified candidate's gate is `spike_positional_deterministic_loop_live`.
+#[test]
+fn explore_encoding_candidates() -> Result<(), AifError> {
+    let drive = |model: GenerativeModel, n_actions: usize| -> Result<(f64, f64), AifError> {
+        let mut agent = POMDPAgent::from_model(model, dynamics_params(7))?;
+        assert_eq!(agent.n_actions(), n_actions);
+        let obs = [0usize, 1, 0, 1, 0];
+        let acts = [0usize, 1, 2, 1];
+        agent.action_probabilities(obs[0]);
+        for i in 1..obs.len() {
+            agent.record_action(acts[i - 1] % n_actions);
+            agent.action_probabilities(obs[i]);
+        }
+        let fpi = agent.policy_free_energies().expect("invariant: MMP surfaces F_π");
+        assert!(fpi.iter().all(|x| x.is_finite()));
+        let max = fpi.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let min = fpi.iter().copied().fold(f64::INFINITY, f64::min);
+        Ok((max - min, (agent.gamma() - 1.0).abs()))
+    };
+
+    let candidates: [(&str, GenerativeModel, usize); 5] = [
+        ("C1 sticky n=3 (eps=0.1, h=0.2)   ", switching_model(3, 0.2, Slip::Sticky(0.1)), 3),
+        ("C2 positional DETERMINISTIC h=0.2", positional_model(3, 0.2, 0.0), 3),
+        ("C2b positional determ.     h=0   ", positional_model(3, 0.0, 0.0), 3),
+        ("C3 positional slip=0.1     h=0.2 ", positional_model(3, 0.2, 0.1), 3),
+        ("C1b sticky n=2 (eps=0.1, h=0.2)  ", switching_model(2, 0.2, Slip::Sticky(0.1)), 2),
+    ];
+    for (name, model, n_actions) in candidates {
+        let (spread, gamma_dev) = drive(model, n_actions)?;
+        println!("{name}  F_pi spread = {spread:.6e}   |gamma-1| = {gamma_dev:.6e}");
+    }
+    Ok(())
+}
+
+#[test]
+fn spike_positional_deterministic_loop_live() -> Result<(), AifError> {
+    // THE GATE for the ratified encoding (C2, owner 2026-07-30): deterministic
+    // clamped movement + hazard chain must keep the γ/β loop live. Thresholds
+    // are deliberately loose liveness bounds (measured ~4.5e-1 / ~1.2e-2 on
+    // this drive), not value pins.
+    let mut agent = POMDPAgent::from_model(positional_model(3, 0.2, 0.0), dynamics_params(7))?;
+    assert_eq!(agent.n_actions(), 3); // {left, stay, right}
+    let obs = [0usize, 1, 0, 1, 0];
+    let acts = [0usize, 2, 1, 2];
+    agent.action_probabilities(obs[0]);
+    for i in 1..obs.len() {
+        agent.record_action(acts[i - 1]);
+        agent.action_probabilities(obs[i]);
+    }
+    let fpi = agent.policy_free_energies().expect("invariant: MMP surfaces F_π");
+    assert_eq!(fpi.len(), agent.n_actions().pow(2));
+    let max = fpi.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let min = fpi.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!(max - min > 1e-2, "C2 GATE FAIL: F_π spread collapsed ({})", max - min);
+    assert!(
+        (agent.gamma() - 1.0).abs() > 1e-4,
+        "C2 GATE FAIL: γ pinned at its prior (γ = {})",
+        agent.gamma()
+    );
+    Ok(())
+}
+
 #[test]
 fn spike_fully_deterministic_is_inert() -> Result<(), AifError> {
     // h = 0, slip = None: fully deterministic joint B — the inert regime.
@@ -247,9 +366,9 @@ fn spike_fully_deterministic_is_inert() -> Result<(), AifError> {
 
 #[test]
 fn dynamics_replay_matches_generation_bit_identically() -> Result<(), AifError> {
-    // Live encoding (slip > 0) so the β/γ fidelity assertions are non-vacuous —
-    // under the inert encoding β ≡ β₀ and the comparison would pin nothing.
-    let model = switching_model(2, 0.2, Slip::Sticky(0.1));
+    // The RATIFIED encoding (live loop) so the β/γ fidelity assertions are
+    // non-vacuous — under an inert encoding β ≡ β₀ and they would pin nothing.
+    let model = positional_model(3, 0.2, 0.0);
     let params = dynamics_params(42);
 
     let mut generator = POMDPAgent::from_model(model.clone(), params.clone())?;
@@ -276,7 +395,7 @@ fn dynamics_replay_matches_generation_bit_identically() -> Result<(), AifError> 
 fn dynamics_replay_reset_window_beta_semantics_match() -> Result<(), AifError> {
     // Trial boundary mid-stream: reset must restore β₀/γ₀ and empty the
     // trajectory on BOTH sides, and the continuation must stay bit-identical.
-    let model = switching_model(2, 0.2, Slip::Sticky(0.1));
+    let model = positional_model(3, 0.2, 0.0);
     let params = dynamics_params(11);
     let (first, second) = (&OBS_SCRIPT[..4], &OBS_SCRIPT[4..]);
 
@@ -305,10 +424,10 @@ fn dynamics_replay_reset_window_beta_semantics_match() -> Result<(), AifError> {
 fn dynamics_with_learning_replay_matches_generation() -> Result<(), AifError> {
     // The combined path (learn_a + MMP + dynamics) — the 0.9.0 reorder ran the
     // γ/β loop post-Dirichlet-updates; replay must walk the same sequence.
-    let model = switching_model(2, 0.2, Slip::Sticky(0.1));
+    let model = positional_model(3, 0.2, 0.0);
     let params = AgentParams {
         learn_a: true,
-        initial_precision: Some(vec![1.0; 4]), // n_joint = 2 factors × 2 states
+        initial_precision: Some(vec![1.0; 9]), // n_joint = 3 positions × 3 good-arms
         ..dynamics_params(23)
     };
 
