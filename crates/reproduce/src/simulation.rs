@@ -69,11 +69,13 @@ pub fn run_group_simulation(
     Ok(data)
 }
 
-/// Run a single POMDP agent in a bandit environment for `n_trials` steps.
+/// Run a single POMDP agent in an environment for `n_trials` steps. Generic
+/// over [`Environment`] since extension 2b (#33) — `BanditEnvironment` callers
+/// are source-compatible; the positional env drives the same loop.
 #[allow(clippy::missing_errors_doc)]
 pub fn run_single_simulation(
     agent: &mut POMDPAgent,
-    env: &mut BanditEnvironment,
+    env: &mut impl Environment,
     n_trials: usize,
 ) -> Result<TrialData, AifError> {
     let mut data = TrialData::new();
@@ -1570,7 +1572,7 @@ pub fn parameter_recovery_single(
 /// scrambled rather than small offsets, so a factory's heterogeneity/group/env
 /// streams cannot collide with the group builder's internal-agent streams. See
 /// [`group_seed`] for the full derivation the group stream feeds into; the
-/// `substream(s, 0..4)` separation contract is pinned by
+/// `substream(s, 0..5)` separation contract is pinned by
 /// `tests::substream_streams_are_well_separated`.
 #[must_use]
 pub fn substream(master: u64, stream: u64) -> u64 {
@@ -1583,7 +1585,8 @@ pub fn substream(master: u64, stream: u64) -> u64 {
 // Substream role indices. A master seed splits into independent role streams via
 // [`substream`]; these constants name the roles so the mapping lives in exactly one place
 // (factories, `extension11`, the MCMC chains, and the seeded tests all go through the
-// [`heterogeneity_seed`]/[`group_seed`]/[`env_seed`]/[`mcmc_base_seed`] accessors below).
+// [`heterogeneity_seed`]/[`group_seed`]/[`env_seed`]/[`mcmc_base_seed`]/[`switch_seed`]
+// accessors below).
 const HETEROGENEITY_STREAM: u64 = 0;
 const GROUP_STREAM: u64 = 1;
 const ENV_STREAM: u64 = 2;
@@ -1591,6 +1594,10 @@ const ENV_STREAM: u64 = 2;
 /// — a **dedicated** role so chain RNGs never coincide with the data-generation streams
 /// (0/1/2) under matched-seed usage (the #25 chain-seed-collision fix).
 const MCMC_STREAM: u64 = 3;
+/// Good-arm hazard-chain role for [`crate::PositionalBanditEnvironment`]
+/// (extension 2b / #33) — separate from [`ENV_STREAM`] so reward-noise
+/// realizations stay comparable across hazard settings.
+const SWITCH_STREAM: u64 = 4;
 
 /// Seed for the per-agent heterogeneity draw (Dirichlet α / Beta preferences).
 #[must_use]
@@ -1625,6 +1632,13 @@ pub fn env_seed(master: u64) -> u64 {
 #[must_use]
 pub fn mcmc_base_seed(master: u64) -> u64 {
     substream(master, MCMC_STREAM)
+}
+
+/// Seed for the positional environment's good-arm hazard chain
+/// ([`crate::PositionalBanditEnvironment::with_seed`]'s `switch_seed` argument).
+#[must_use]
+pub fn switch_seed(master: u64) -> u64 {
+    substream(master, SWITCH_STREAM)
 }
 
 /// Run a seeded cell × rep sweep in parallel, returning per-cell rep results in cell
@@ -2101,8 +2115,13 @@ mod tests {
     #[test]
     fn substream_streams_are_well_separated() {
         for &s in &[2026u64, 0xE11_2026, 0xE3_2026, 0xE1_2026, 0xE2_2026, 9001] {
-            let streams: [u64; 4] =
-                [substream(s, 0), substream(s, 1), substream(s, 2), substream(s, 3)];
+            let streams: [u64; 5] = [
+                substream(s, 0),
+                substream(s, 1),
+                substream(s, 2),
+                substream(s, 3),
+                substream(s, 4),
+            ];
 
             // Pairwise distinct.
             for i in 0..streams.len() {
@@ -2123,7 +2142,8 @@ mod tests {
             // seed neighborhood (agent seeds b..=b+200 and the group RNG at b+0x9E37_79B9).
             let b = group_seed(s);
             assert_eq!(b, streams[1], "group_seed must equal substream(s, 1)");
-            for k in [0usize, 2, 3] {
+            assert_eq!(switch_seed(s), streams[4], "switch_seed must equal substream(s, 4)");
+            for k in [0usize, 2, 3, 4] {
                 let v = streams[k];
                 assert!(
                     !(b..=b.wrapping_add(200)).contains(&v),
