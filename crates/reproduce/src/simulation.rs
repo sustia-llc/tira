@@ -2256,7 +2256,7 @@ mod tests {
     /// group of ≤199 agents.
     #[test]
     fn substream_streams_are_well_separated() {
-        for &s in &[2026u64, 0xE11_2026, 0xE3_2026, 0xE1_2026, 0xE2_2026, 9001] {
+        for &s in &[2026u64, 0xE11_2026, 0xE3_2026, 0xE1_2026, 0xE2_2026, 0xE2B_2026, 9001] {
             let streams: [u64; 5] = [
                 substream(s, 0),
                 substream(s, 1),

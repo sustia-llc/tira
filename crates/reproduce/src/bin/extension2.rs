@@ -37,6 +37,12 @@
 //! (test-pinned in aif). Recovering them would need a stochastic-B environment; out of
 //! scope. See the report doc.
 //!
+//! **Superseded note (extension 2b, #33):** the exclusion is measured there on the
+//! positional foraging model — and the precise law is *rank-1* controlled B (column-varying
+//! DETERMINISTIC controlled B already makes the loop live; `tests/ext2b_phase0.rs`). The
+//! printed Interpretation below keeps its original wording — the registered
+//! `docs/extension2-multiparam.md` report stays byte-reproducible.
+//!
 //! Run: `cargo run --release -p reproduce --bin extension2`.
 
 // See the crate-level note in `reproduce/src/lib.rs`: every cast is a `usize as f64` on a
