@@ -2364,9 +2364,13 @@ impl POMDPAgent {
     /// with the policy's future actions. Under [`PrecisionDynamics`] the per-policy
     /// extended smoother makes these **genuinely policy-dependent** (each policy's
     /// future actions feed back into the observed-window backward messages) — though
-    /// with a deterministic transition model `B†` is uniform and the entries
-    /// collapse to a constant again. The returned vector is index-aligned with the
-    /// enumerated policy space (`n_actions^policy_depth` entries).
+    /// with a **rank-1** controlled transition model (e.g. the deterministic MAB,
+    /// where every from-state maps to the same to-state) `B†` is uniform and the
+    /// entries collapse to a constant again. Column-varying B keeps them
+    /// policy-dependent even when fully deterministic (the extension-2b rank-1 law,
+    /// pinned reproduce-side in `tests/ext2b_phase0.rs`). The returned vector is
+    /// index-aligned with the enumerated policy space (`n_actions^policy_depth`
+    /// entries).
     #[must_use]
     pub fn policy_free_energies(&self) -> Option<Vec<f64>> {
         match self.state_inference {

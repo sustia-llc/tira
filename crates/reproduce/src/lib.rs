@@ -13,14 +13,15 @@ pub use aif::{
 };
 
 use rand::rngs::StdRng;
-use rand::SeedableRng;
+use rand::{RngExt, SeedableRng};
 use rand_distr::{Bernoulli, Distribution};
 
 mod plotter;
 mod simulation;
 
 pub use simulation::{
-    BANDIT_PROBS, DimResult, EXT3_INITIAL_PRECISION, ExperimentOpts, LearningParams, McmcConfig,
+    BANDIT_PROBS, DimResult, DynamicsParams, EXT3_INITIAL_PRECISION, ExperimentOpts,
+    LearningParams, McmcConfig,
     McmcDim, McmcResult, McmcVecConfig, McmcVecResult, ModelParams, PREFERENCES, PRIOR_SD,
     ProposalMode, R_HAT_THRESHOLD,
     RecoveryResult, TrialData, env_seed, experiment_certainty_weighted, experiment_deterministic,
@@ -30,6 +31,7 @@ pub use simulation::{
     recover_alpha,
     recover_alpha_learning, recover_alpha_mcmc, recover_alpha_mcmc_learning, recover_mcmc_vec,
     run_group_simulation, run_single_simulation, run_sweep, single_agent_data, substream,
+    switch_seed,
 };
 
 pub use plotter::{plot_figure4, plot_figure5, plot_figure6};
@@ -191,6 +193,142 @@ impl Environment for BanditEnvironment {
     }
 }
 
+/// Foraging restless bandit (extension 2b / issue #33): the agent walks a line
+/// of `n` positions — actions `{0, 1, 2}` = `{left, stay, right}`, deterministic
+/// and edge-clamped — and pulls the arm at its CURRENT position, while the good
+/// arm follows a seeded Markov chain: stay w.p. `1 − hazard`, else jump
+/// uniformly to one of the other positions.
+///
+/// Column-varying controlled dynamics (movement) are what keep the γ/β
+/// precision loop live agent-side (the Phase-0 rank-1 law,
+/// `tests/ext2b_phase0.rs`); the hazard chain supplies the environment's hidden
+/// restless dynamics.
+///
+/// Reward and switch draws come from two independent RNGs (role streams 2 and 4
+/// — [`env_seed`]/[`switch_seed`]) so reward-noise realizations stay comparable
+/// across hazard settings. The probability vector follows the [`BANDIT_PROBS`]
+/// convention: the good arm starts at the argmax entry (ties resolve to the
+/// LAST maximal entry — the `Iterator::max_by` contract), and a switch SWAPS
+/// the good value to the new position — with the paper's `[0.8, 0.2, 0.2]`
+/// this is exactly "the 0.8 arm moves". Start position is 0.
+// `Clone` intentionally not derived — see [`BanditEnvironment`].
+#[derive(Debug)]
+pub struct PositionalBanditEnvironment {
+    probabilities: Vec<f64>,
+    hazard: f64,
+    position: usize,
+    good_arm: usize,
+    reward_rng: StdRng,
+    switch_rng: StdRng,
+}
+
+impl PositionalBanditEnvironment {
+    /// Validate and assemble around supplied RNGs (same shape as
+    /// [`BanditEnvironment::build`]). A walkable line needs ≥ 2 positions;
+    /// `hazard` is a probability.
+    fn build(
+        probabilities: Vec<f64>,
+        hazard: f64,
+        reward_rng: StdRng,
+        switch_rng: StdRng,
+    ) -> Result<Self, AifError> {
+        if probabilities.len() < 2 {
+            return Err(AifError::InvalidLength { expected: 2, got: probabilities.len() });
+        }
+        validate_probabilities(&probabilities)?;
+        if !(0.0..=1.0).contains(&hazard) {
+            return Err(AifError::InvalidProbability(hazard));
+        }
+        let good_arm = probabilities
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(i, _)| i)
+            .expect("invariant: len >= 2 checked above");
+        Ok(Self { probabilities, hazard, position: 0, good_arm, reward_rng, switch_rng })
+    }
+
+    #[allow(clippy::missing_errors_doc)]
+    pub fn new(probabilities: Vec<f64>, hazard: f64) -> Result<Self, AifError> {
+        Self::build(
+            probabilities,
+            hazard,
+            StdRng::from_rng(&mut rand::rng()),
+            StdRng::from_rng(&mut rand::rng()),
+        )
+    }
+
+    /// Construct with fixed seeds for the two independent streams: `reward_seed`
+    /// drives the Bernoulli reward draws ([`env_seed`] role), `switch_seed` the
+    /// good-arm hazard chain (the [`crate::switch_seed`] role).
+    #[allow(clippy::missing_errors_doc)]
+    pub fn with_seed(
+        probabilities: Vec<f64>,
+        hazard: f64,
+        reward_seed: u64,
+        switch_seed: u64,
+    ) -> Result<Self, AifError> {
+        Self::build(
+            probabilities,
+            hazard,
+            StdRng::seed_from_u64(reward_seed),
+            StdRng::seed_from_u64(switch_seed),
+        )
+    }
+
+    /// Current position on the line (starts at 0).
+    #[must_use]
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    /// Current good-arm position (starts at the argmax of the probability
+    /// vector, moves under the hazard chain).
+    #[must_use]
+    pub fn good_arm(&self) -> usize {
+        self.good_arm
+    }
+}
+
+impl Environment for PositionalBanditEnvironment {
+    fn step(&mut self, action: usize) -> Result<usize, AifError> {
+        if action >= 3 {
+            return Err(AifError::InvalidAction(action));
+        }
+        // Deterministic clamped move: 0/1/2 = left/stay/right.
+        self.position = match action {
+            0 => self.position.saturating_sub(1),
+            2 => (self.position + 1).min(self.probabilities.len() - 1),
+            _ => self.position,
+        };
+        // Hazard chain on the good arm. Skipped entirely at hazard = 0, so the
+        // h = 0 reward stream is draw-for-draw a fixed-arm [`BanditEnvironment`]
+        // (pinned in tests). Move-then-switch-then-reward matches the agent
+        // model's simultaneous factor transitions followed by observation of
+        // the new joint state; the two transitions are independent, so the
+        // within-step order is a documentation choice, not a semantic one.
+        if self.hazard > 0.0 {
+            let switch = Bernoulli::new(self.hazard)
+                .map_err(AifError::Distribution)?
+                .sample(&mut self.switch_rng);
+            if switch {
+                let n = self.probabilities.len();
+                let mut target = self.switch_rng.random_range(0..n - 1);
+                if target >= self.good_arm {
+                    target += 1;
+                }
+                self.probabilities.swap(self.good_arm, target);
+                self.good_arm = target;
+            }
+        }
+        let prob = self.probabilities[self.position];
+        let dist = Bernoulli::new(prob).map_err(AifError::Distribution)?;
+        let won = dist.sample(&mut self.reward_rng);
+        // Observation convention as [`BanditEnvironment`]: index 0 = preferred.
+        Ok(usize::from(!won))
+    }
+}
+
 // `Clone` intentionally not derived — see [`BanditEnvironment`].
 #[derive(Debug)]
 pub struct SharedBanditEnvironment {
@@ -331,6 +469,127 @@ impl Environment for SharedBanditEnvironment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- PositionalBanditEnvironment (extension 2b / #33, Phase 1) -----
+
+    #[test]
+    fn positional_h0_matches_fixed_arm_bandit_draw_for_draw() -> Result<(), AifError> {
+        // hazard = 0 skips the switch draw entirely, so an agent standing still
+        // at the good arm sees BIT-IDENTICAL rewards to a fixed-arm
+        // BanditEnvironment pulling that arm under the same reward seed.
+        let mut pos =
+            PositionalBanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 0.0, 777, 999)?;
+        let mut fixed = BanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 777)?;
+        for _ in 0..40 {
+            assert_eq!(pos.step(1)?, fixed.step(0)?); // stay at 0 vs pull arm 0
+        }
+        assert_eq!(pos.good_arm(), 0, "hazard = 0 must never move the good arm");
+        assert_eq!(pos.position(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn positional_reward_is_drawn_at_current_position() -> Result<(), AifError> {
+        // Degenerate probabilities make the reward deterministic: standing on
+        // the 1.0 arm always rewards (obs 0), walking off it never does.
+        let mut env = PositionalBanditEnvironment::with_seed(vec![1.0, 0.0], 0.0, 1, 2)?;
+        assert_eq!(env.step(1)?, 0, "stay on p=1.0 arm ⇒ reward");
+        assert_eq!(env.step(2)?, 1, "move right onto p=0.0 arm ⇒ no reward");
+        assert_eq!(env.position(), 1);
+        assert_eq!(env.step(0)?, 0, "move back left onto p=1.0 arm ⇒ reward");
+        Ok(())
+    }
+
+    #[test]
+    fn positional_edge_clamp() -> Result<(), AifError> {
+        let mut env =
+            PositionalBanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 0.0, 5, 6)?;
+        env.step(0)?; // left at 0 clamps
+        assert_eq!(env.position(), 0);
+        env.step(2)?;
+        env.step(2)?;
+        assert_eq!(env.position(), 2);
+        env.step(2)?; // right at n−1 clamps
+        assert_eq!(env.position(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn positional_seeded_switch_path_reproducible() -> Result<(), AifError> {
+        // Same seeds ⇒ identical (obs, position, good-arm) trajectories; a
+        // different switch seed diverges on the good-arm path (overwhelmingly
+        // likely over 50 draws at h = 0.5) while reward-noise stays on its own
+        // stream.
+        let script: Vec<usize> = (0..50).map(|i| [1, 2, 0, 1][i % 4]).collect();
+        let run = |switch: u64| -> Result<(Vec<usize>, Vec<usize>), AifError> {
+            let mut env =
+                PositionalBanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 0.5, 777, switch)?;
+            let mut obs = Vec::new();
+            let mut goods = Vec::new();
+            for &a in &script {
+                obs.push(env.step(a)?);
+                goods.push(env.good_arm());
+            }
+            Ok((obs, goods))
+        };
+        let (obs_a, goods_a) = run(999)?;
+        let (obs_b, goods_b) = run(999)?;
+        assert_eq!(obs_a, obs_b);
+        assert_eq!(goods_a, goods_b);
+        let (_, goods_c) = run(1000)?;
+        assert_ne!(goods_a, goods_c, "distinct switch seeds should diverge");
+        Ok(())
+    }
+
+    #[test]
+    fn positional_switch_count_tracks_hazard() -> Result<(), AifError> {
+        // Switches per step are Bernoulli(h): h = 0 ⇒ none, h = 1 ⇒ every step
+        // (the jump target is always ≠ current), h = 0.5 ⇒ a count deep inside
+        // the binomial bulk (400..600 over 1000 steps is ±6σ).
+        let count_switches = |hazard: f64| -> Result<usize, AifError> {
+            let mut env = PositionalBanditEnvironment::with_seed(
+                vec![0.8, 0.2, 0.2],
+                hazard,
+                777,
+                999,
+            )?;
+            let mut switches = 0;
+            let mut prev = env.good_arm();
+            for _ in 0..1000 {
+                env.step(1)?;
+                if env.good_arm() != prev {
+                    switches += 1;
+                }
+                prev = env.good_arm();
+            }
+            Ok(switches)
+        };
+        assert_eq!(count_switches(0.0)?, 0);
+        assert_eq!(count_switches(1.0)?, 1000);
+        let mid = count_switches(0.5)?;
+        assert!((400..=600).contains(&mid), "h = 0.5 switch count {mid} outside band");
+        Ok(())
+    }
+
+    #[test]
+    fn positional_rejects_invalid_inputs() {
+        // Action space is {left, stay, right} regardless of n.
+        let mut env = PositionalBanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 0.1, 1, 2)
+            .expect("valid construction");
+        assert!(matches!(env.step(3), Err(AifError::InvalidAction(3))));
+        assert!(matches!(
+            PositionalBanditEnvironment::with_seed(vec![0.8], 0.1, 1, 2),
+            Err(AifError::InvalidLength { expected: 2, got: 1 })
+        ));
+        assert!(matches!(
+            PositionalBanditEnvironment::with_seed(vec![0.8, 0.2], 1.5, 1, 2),
+            Err(AifError::InvalidProbability(_))
+        ));
+        assert!(matches!(
+            PositionalBanditEnvironment::with_seed(vec![0.8, 1.2], 0.1, 1, 2),
+            Err(AifError::InvalidProbability(_))
+        ));
+    }
 
     #[test]
     fn with_seed_reproduces_observation_sequence() -> Result<(), AifError> {

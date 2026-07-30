@@ -1,5 +1,8 @@
-use aif::{Agent, AgentParams, GenerativeModel, GroupAgent, GroupAgentBuilder, AifError, POMDPAgent};
-use crate::{BanditEnvironment, Environment};
+use aif::{
+    Agent, AgentParams, GenerativeModel, GroupAgent, GroupAgentBuilder, AifError, POMDPAgent,
+    PrecisionDynamics, StateInference,
+};
+use crate::{BanditEnvironment, Environment, PositionalBanditEnvironment};
 use nalgebra::{Cholesky, DMatrix};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -69,11 +72,13 @@ pub fn run_group_simulation(
     Ok(data)
 }
 
-/// Run a single POMDP agent in a bandit environment for `n_trials` steps.
+/// Run a single POMDP agent in an environment for `n_trials` steps. Generic
+/// over [`Environment`] since extension 2b (#33) — `BanditEnvironment` callers
+/// are source-compatible; the positional env drives the same loop.
 #[allow(clippy::missing_errors_doc)]
 pub fn run_single_simulation(
     agent: &mut POMDPAgent,
-    env: &mut BanditEnvironment,
+    env: &mut impl Environment,
     n_trials: usize,
 ) -> Result<TrialData, AifError> {
     let mut data = TrialData::new();
@@ -1166,6 +1171,22 @@ pub struct LearningParams {
     pub initial_precision: Vec<f64>,
 }
 
+/// Precision-dynamics parameters for the extension-2b positional (foraging)
+/// model ([`ModelParams::with_dynamics`], issue #33): the agent runs MMP +
+/// [`PrecisionDynamics`] over the two-factor positional generative model, and
+/// data generation routes to [`PositionalBanditEnvironment`].
+///
+/// `hazard` is shared by the agent's good-arm factor B and the environment's
+/// switch chain (the well-specified case — plan D2). `beta0` is the β prior
+/// (γ₀ = 1/β₀) and `psi` the update damping of Smith Table 2. **`gamma` is
+/// ignored under dynamics** (the 0.9.0 contract).
+#[derive(Debug, Clone, Copy)]
+pub struct DynamicsParams {
+    pub hazard: f64,
+    pub beta0: f64,
+    pub psi: f64,
+}
+
 /// Parameter set for the generalized likelihood [`log_likelihood_params`] (extension 2).
 ///
 /// Beyond α this exposes γ (the EFE→policy-posterior temperature, applied via
@@ -1173,29 +1194,46 @@ pub struct LearningParams {
 /// vector is `[good_arm_p, 0.2, 0.2]`). `learning` opts into A-learning with per-step η/ω
 /// (via `POMDPAgent::from_model` + `AgentParams`).
 ///
-/// **Not included: β₀/ψ under `PrecisionDynamics`.** On the paper's deterministic-B MAB
-/// these are *unidentifiable* — deterministic B ⇒ B† uniform ⇒ `F_π` is policy-constant ⇒
-/// the γ/β precision loop is provably inert (test-pinned in aif). Recovering them would
-/// need a stochastic-B environment; out of scope (see `docs/extension2-multiparam.md`).
+/// **β₀/ψ under `PrecisionDynamics` ship via `dynamics` (extension 2b, #33).** On the
+/// paper's deterministic-B MAB they are *unidentifiable* — deterministic B ⇒ B† uniform ⇒
+/// `F_π` is policy-constant ⇒ the γ/β precision loop is provably inert (test-pinned in
+/// aif; the Phase-0 rank-1 generalization is pinned in `tests/ext2b_phase0.rs`). Setting
+/// `dynamics` therefore switches the whole model family: the two-factor POSITIONAL
+/// (foraging) generative model with column-varying movement dynamics, whose environment
+/// counterpart is [`PositionalBanditEnvironment`] (actions become `{left, stay, right}`
+/// moves; `good_arm_p` still sets the A-matrix reward probability at the good position).
 #[derive(Debug, Clone)]
 pub struct ModelParams {
     pub alpha: f64,
     pub gamma: f64,
     pub good_arm_p: f64,
     pub learning: Option<LearningParams>,
+    pub dynamics: Option<DynamicsParams>,
 }
 
 impl ModelParams {
     /// Fixed-A params at `(α, γ, good_arm_p)`.
     #[must_use]
     pub fn new(alpha: f64, gamma: f64, good_arm_p: f64) -> Self {
-        Self { alpha, gamma, good_arm_p, learning: None }
+        Self { alpha, gamma, good_arm_p, learning: None, dynamics: None }
     }
 
     /// Opt into A-learning with the given η/ω/precision.
+    ///
+    /// With [`dynamics`](Self::dynamics) also set, the precision vector is
+    /// length-checked against the positional model's joint state count
+    /// (`n_bandits²`), not `n_bandits`.
     #[must_use]
     pub fn with_learning(mut self, learning: LearningParams) -> Self {
         self.learning = Some(learning);
+        self
+    }
+
+    /// Opt into the extension-2b positional model with MMP + precision
+    /// dynamics at `(hazard, β₀, ψ)`.
+    #[must_use]
+    pub fn with_dynamics(mut self, dynamics: DynamicsParams) -> Self {
+        self.dynamics = Some(dynamics);
         self
     }
 
@@ -1230,6 +1268,63 @@ fn build_mab_model(obs_probs: &[f64], preferences: &[f64]) -> GenerativeModel {
     }
 }
 
+/// MMP window and precision-iteration settings for the extension-2b dynamics
+/// path — the D6 cost levers (each likelihood eval replays the whole trial
+/// sequence through an MMP smoother + γ/β loop). Phase-0 fidelity is pinned at
+/// exactly these values (`tests/ext2b_phase0.rs::dynamics_params`).
+const DYNAMICS_MMP_HORIZON: usize = 3;
+const DYNAMICS_MMP_ITERS: usize = 16;
+
+/// Build the two-factor positional (foraging) [`GenerativeModel`] (extension 2b):
+/// factor 0 = position (controlled, deterministic clamped `{left, stay, right}`
+/// moves — column-varying, which is what keeps the γ/β loop live); factor 1 =
+/// good-arm identity (uncontrolled: ONE control carrying the hazard chain, so
+/// `n_actions = 3`). Joint states little-endian, factor 0 fastest.
+/// `P(reward | pos = i, good = j)` is `good_arm_p` if `i == j` else the bad-arm
+/// probability. D is the WELL-SPECIFIED delta prior matching
+/// [`PositionalBanditEnvironment`]'s deterministic start (position 0; good arm
+/// at the argmax of [`BANDIT_PROBS`], i.e. 0).
+fn build_positional_model(n: usize, good_arm_p: f64, preferences: &[f64], hazard: f64) -> GenerativeModel {
+    let mut a = DMatrix::zeros(2, n * n);
+    for good in 0..n {
+        for pos in 0..n {
+            let p = if pos == good { good_arm_p } else { BAD_ARM_PROB };
+            a[(0, pos + n * good)] = p;
+            a[(1, pos + n * good)] = 1.0 - p;
+        }
+    }
+    let b_pos: Vec<DMatrix<f64>> = [-1i64, 0, 1]
+        .iter()
+        .map(|&mv| {
+            let mut m = DMatrix::zeros(n, n);
+            for from in 0..n {
+                let from_i = i64::try_from(from).expect("invariant: n is a small arm count");
+                let hi = i64::try_from(n - 1).expect("invariant: n is a small arm count");
+                let to = usize::try_from((from_i + mv).clamp(0, hi))
+                    .expect("invariant: clamped into 0..n");
+                m[(to, from)] = 1.0;
+            }
+            m
+        })
+        .collect();
+    let mut h = DMatrix::zeros(n, n);
+    for from in 0..n {
+        for to in 0..n {
+            h[(to, from)] = if to == from { 1.0 - hazard } else { hazard / (n as f64 - 1.0) };
+        }
+    }
+    let mut d_pos = vec![0.0; n];
+    d_pos[0] = 1.0;
+    let mut d_good = vec![0.0; n];
+    d_good[0] = 1.0;
+    GenerativeModel {
+        a: vec![a],
+        b: vec![b_pos, vec![h]],
+        c: vec![preferences.to_vec()],
+        d: vec![d_pos, d_good],
+    }
+}
+
 /// Replay an (obs, action) sequence through `model`, summing `ln P(action_t | obs_t)`.
 /// Shared inner loop for the parameterized likelihood.
 fn score_replay(model: &mut POMDPAgent, data: &TrialData) -> f64 {
@@ -1247,13 +1342,14 @@ fn score_replay(model: &mut POMDPAgent, data: &TrialData) -> f64 {
 /// Build a fresh agent at `params` — fixed-A via `with_params` (α/γ/good-arm p), or
 /// A-learning via `from_model` + `AgentParams` (adds η/ω). Shared by
 /// [`log_likelihood_params`] (recovery) and [`generate_params_data`] (generation) so both
-/// use the identical construction. Learning precision is length-checked against `n_bandits`.
-/// The preferences `C` are fixed at the paper's [`PREFERENCES`] (only α/γ/p/η/ω vary).
+/// use the identical construction. Learning precision is length-checked against `n_bandits`
+/// on the MAB path, and against `n_bandits²` (the positional model's joint state count) on
+/// the dynamics path. The preferences `C` are fixed at the paper's [`PREFERENCES`].
 fn build_params_agent(params: &ModelParams) -> Result<POMDPAgent, AifError> {
     let obs_probs = params.obs_probs();
     let n = obs_probs.len();
-    match &params.learning {
-        None => POMDPAgent::with_params(
+    match (&params.learning, &params.dynamics) {
+        (None, None) => POMDPAgent::with_params(
             n,
             Some(obs_probs),
             None,
@@ -1264,7 +1360,7 @@ fn build_params_agent(params: &ModelParams) -> Result<POMDPAgent, AifError> {
             1,
             false,
         ),
-        Some(lp) => {
+        (Some(lp), None) => {
             validate_precision_len(&lp.initial_precision, n)?;
             let generative = build_mab_model(&obs_probs, &PREFERENCES);
             let agent_params = AgentParams {
@@ -1276,6 +1372,37 @@ fn build_params_agent(params: &ModelParams) -> Result<POMDPAgent, AifError> {
                 initial_precision: Some(lp.initial_precision.clone()),
                 ..Default::default()
             };
+            POMDPAgent::from_model(generative, agent_params)
+        }
+        // Extension 2b: the positional model under MMP + precision dynamics.
+        // `gamma` is passed through but IGNORED under dynamics (0.9.0 contract);
+        // depth 2 gives the per-policy future windows the γ/β loop needs.
+        (learning, Some(dp)) => {
+            let generative =
+                build_positional_model(n, params.good_arm_p, &PREFERENCES, dp.hazard);
+            let mut agent_params = AgentParams {
+                alpha: params.alpha,
+                gamma: params.gamma,
+                policy_depth: 2,
+                state_inference: StateInference::MarginalMessagePassing {
+                    horizon: DYNAMICS_MMP_HORIZON,
+                    iters: DYNAMICS_MMP_ITERS,
+                },
+                precision_dynamics: Some(PrecisionDynamics {
+                    beta_prior: dp.beta0,
+                    psi: dp.psi,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            if let Some(lp) = learning {
+                // Joint state count for the two-factor positional model.
+                validate_precision_len(&lp.initial_precision, n * n)?;
+                agent_params.learn_a = true;
+                agent_params.eta = lp.eta;
+                agent_params.omega = lp.omega;
+                agent_params.initial_precision = Some(lp.initial_precision.clone());
+            }
             POMDPAgent::from_model(generative, agent_params)
         }
     }
@@ -1297,27 +1424,58 @@ pub fn log_likelihood_params(data: &TrialData, params: &ModelParams) -> Result<f
 /// ([`group_seed`]) and the standard-MAB environment ([`env_seed`]), and rolling out
 /// `n_trials`. The environment reward probs are always the paper's `BANDIT_PROBS` (the
 /// agent's `good_arm_p` only sets its *own* observation model / A matrix).
+///
+/// With [`ModelParams::dynamics`] set (extension 2b), generation routes to a
+/// [`PositionalBanditEnvironment`] at the same hazard (well-specified), adding the
+/// [`switch_seed`] role stream for the good-arm chain; the non-dynamics path is
+/// byte-identical to before.
 #[allow(clippy::missing_errors_doc)]
 pub fn generate_params_data(
     params: &ModelParams,
     n_trials: usize,
     seed: u64,
 ) -> Result<TrialData, AifError> {
-    run_seeded_agent(build_params_agent(params)?, n_trials, seed)
+    match &params.dynamics {
+        None => run_seeded_agent(build_params_agent(params)?, n_trials, seed),
+        Some(dp) => {
+            let mut env = PositionalBanditEnvironment::with_seed(
+                BANDIT_PROBS.to_vec(),
+                dp.hazard,
+                env_seed(seed),
+                switch_seed(seed),
+            )?;
+            run_seeded_agent_in(build_params_agent(params)?, &mut env, n_trials, seed)
+        }
+    }
 }
 
-/// Seed a prebuilt agent's action sampler ([`group_seed`]) + a fresh standard-MAB
-/// environment ([`env_seed`]) and roll out `n_trials`. The single source of the
-/// generation seeding pipeline, shared by [`single_agent_data`] and
-/// [`generate_params_data`] so their RNG streams are byte-identical for a given seed.
-fn run_seeded_agent(
+/// Seed a prebuilt agent's action sampler ([`group_seed`]) and roll it out in `env` —
+/// the single source of the AGENT-side generation seeding, shared by the standard-MAB
+/// route ([`run_seeded_agent`]) and the extension-2b positional route so the role
+/// order lives in one place.
+fn run_seeded_agent_in(
     mut agent: POMDPAgent,
+    env: &mut impl Environment,
     n_trials: usize,
     seed: u64,
 ) -> Result<TrialData, AifError> {
     agent.reseed(group_seed(seed));
+    run_single_simulation(&mut agent, env, n_trials)
+}
+
+/// Seed a prebuilt agent + a fresh standard-MAB environment ([`env_seed`]) and roll out
+/// `n_trials`. The standard-MAB generation pipeline shared by [`single_agent_data`] and
+/// [`generate_params_data`]'s non-dynamics route, so their RNG streams are byte-identical
+/// for a given seed; the dynamics route shares the agent-side seeding via
+/// [`run_seeded_agent_in`]. (Agent and env RNGs are independent, so the construction
+/// order here does not affect the draws.)
+fn run_seeded_agent(
+    agent: POMDPAgent,
+    n_trials: usize,
+    seed: u64,
+) -> Result<TrialData, AifError> {
     let mut env = make_env(seed)?;
-    run_single_simulation(&mut agent, &mut env, n_trials)
+    run_seeded_agent_in(agent, &mut env, n_trials, seed)
 }
 
 /// Options controlling an experiment-factory run.
@@ -1570,7 +1728,7 @@ pub fn parameter_recovery_single(
 /// scrambled rather than small offsets, so a factory's heterogeneity/group/env
 /// streams cannot collide with the group builder's internal-agent streams. See
 /// [`group_seed`] for the full derivation the group stream feeds into; the
-/// `substream(s, 0..4)` separation contract is pinned by
+/// `substream(s, 0..5)` separation contract is pinned by
 /// `tests::substream_streams_are_well_separated`.
 #[must_use]
 pub fn substream(master: u64, stream: u64) -> u64 {
@@ -1583,7 +1741,8 @@ pub fn substream(master: u64, stream: u64) -> u64 {
 // Substream role indices. A master seed splits into independent role streams via
 // [`substream`]; these constants name the roles so the mapping lives in exactly one place
 // (factories, `extension11`, the MCMC chains, and the seeded tests all go through the
-// [`heterogeneity_seed`]/[`group_seed`]/[`env_seed`]/[`mcmc_base_seed`] accessors below).
+// [`heterogeneity_seed`]/[`group_seed`]/[`env_seed`]/[`mcmc_base_seed`]/[`switch_seed`]
+// accessors below).
 const HETEROGENEITY_STREAM: u64 = 0;
 const GROUP_STREAM: u64 = 1;
 const ENV_STREAM: u64 = 2;
@@ -1591,6 +1750,10 @@ const ENV_STREAM: u64 = 2;
 /// — a **dedicated** role so chain RNGs never coincide with the data-generation streams
 /// (0/1/2) under matched-seed usage (the #25 chain-seed-collision fix).
 const MCMC_STREAM: u64 = 3;
+/// Good-arm hazard-chain role for [`crate::PositionalBanditEnvironment`]
+/// (extension 2b / #33) — separate from [`ENV_STREAM`] so reward-noise
+/// realizations stay comparable across hazard settings.
+const SWITCH_STREAM: u64 = 4;
 
 /// Seed for the per-agent heterogeneity draw (Dirichlet α / Beta preferences).
 #[must_use]
@@ -1625,6 +1788,13 @@ pub fn env_seed(master: u64) -> u64 {
 #[must_use]
 pub fn mcmc_base_seed(master: u64) -> u64 {
     substream(master, MCMC_STREAM)
+}
+
+/// Seed for the positional environment's good-arm hazard chain
+/// ([`crate::PositionalBanditEnvironment::with_seed`]'s `switch_seed` argument).
+#[must_use]
+pub fn switch_seed(master: u64) -> u64 {
+    substream(master, SWITCH_STREAM)
 }
 
 /// Run a seeded cell × rep sweep in parallel, returning per-cell rep results in cell
@@ -2100,9 +2270,14 @@ mod tests {
     /// group of ≤199 agents.
     #[test]
     fn substream_streams_are_well_separated() {
-        for &s in &[2026u64, 0xE11_2026, 0xE3_2026, 0xE1_2026, 0xE2_2026, 9001] {
-            let streams: [u64; 4] =
-                [substream(s, 0), substream(s, 1), substream(s, 2), substream(s, 3)];
+        for &s in &[2026u64, 0xE11_2026, 0xE3_2026, 0xE1_2026, 0xE2_2026, 0xE2B_2026, 9001] {
+            let streams: [u64; 5] = [
+                substream(s, 0),
+                substream(s, 1),
+                substream(s, 2),
+                substream(s, 3),
+                substream(s, 4),
+            ];
 
             // Pairwise distinct.
             for i in 0..streams.len() {
@@ -2123,7 +2298,8 @@ mod tests {
             // seed neighborhood (agent seeds b..=b+200 and the group RNG at b+0x9E37_79B9).
             let b = group_seed(s);
             assert_eq!(b, streams[1], "group_seed must equal substream(s, 1)");
-            for k in [0usize, 2, 3] {
+            assert_eq!(switch_seed(s), streams[4], "switch_seed must equal substream(s, 4)");
+            for k in [0usize, 2, 3, 4] {
                 let v = streams[k];
                 assert!(
                     !(b..=b.wrapping_add(200)).contains(&v),
@@ -2667,6 +2843,94 @@ mod tests {
                 "params-learning(α={alpha}) {generalized} != scalar {scalar}"
             );
         }
+        Ok(())
+    }
+
+    // ----- extension 2b (#33, Phase 2): dynamics path -----
+
+    fn dynamics_test_params(beta0: f64, psi: f64) -> ModelParams {
+        ModelParams::new(0.5, 16.0, 0.8)
+            .with_dynamics(DynamicsParams { hazard: 0.2, beta0, psi })
+    }
+
+    #[test]
+    fn test_dynamics_generation_bit_reproducible() -> Result<(), AifError> {
+        let p = dynamics_test_params(1.0, 2.0);
+        let a = generate_params_data(&p, 60, 20_260_730)?;
+        let b = generate_params_data(&p, 60, 20_260_730)?;
+        assert_eq!(a.observations, b.observations, "same seed must reproduce observations");
+        assert_eq!(a.actions, b.actions, "same seed must reproduce actions");
+        assert!(a.actions.iter().all(|&x| x < 3), "positional actions are {{left, stay, right}}");
+        let c = generate_params_data(&p, 60, 20_260_731)?;
+        assert!(
+            a.observations != c.observations || a.actions != c.actions,
+            "distinct seeds should diverge"
+        );
+        Ok(())
+    }
+
+    #[test]
+    // Exact equality is the signal: the replay path must be a pure function of
+    // (data, params), like the Phase-0 bit-identity pins.
+    #[allow(clippy::float_cmp)]
+    fn test_dynamics_replay_deterministic_and_finite() -> Result<(), AifError> {
+        let p = dynamics_test_params(1.0, 2.0);
+        let data = generate_params_data(&p, 60, 20_260_730)?;
+        let ll_a = log_likelihood_params(&data, &p)?;
+        let ll_b = log_likelihood_params(&data, &p)?;
+        assert!(ll_a.is_finite());
+        assert_eq!(ll_a, ll_b, "dynamics replay must be deterministic");
+        Ok(())
+    }
+
+    #[test]
+    fn test_dynamics_beta0_psi_are_likelihood_visible() -> Result<(), AifError> {
+        // THE ext-2b premise, asserted at the likelihood level: on the positional
+        // model (live γ/β loop — Phase-0 gate), moving (β₀, ψ) moves the replay
+        // likelihood. This is exactly what the deterministic-B MAB provably
+        // cannot do (inert loop ⇒ β₀/ψ likelihood-INVISIBLE there).
+        let truth = dynamics_test_params(1.0, 2.0);
+        let data = generate_params_data(&truth, 120, 20_260_730)?;
+        let ll_true = log_likelihood_params(&data, &truth)?;
+        let ll_far = log_likelihood_params(&data, &dynamics_test_params(4.0, 6.0))?;
+        assert!(
+            (ll_true - ll_far).abs() > 1e-9,
+            "(β₀, ψ) must be likelihood-visible: {ll_true} vs {ll_far}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_dynamics_learning_combo_and_precision_len() -> Result<(), AifError> {
+        // learn_a composes with the dynamics path (Phase-0 fidelity pinned it);
+        // the precision length contract switches to the joint state count n².
+        let lp = |len: usize| LearningParams { eta: 1.0, omega: 1.0, initial_precision: vec![1.0; len] };
+        let good = dynamics_test_params(1.0, 2.0).with_learning(lp(9));
+        let data = generate_params_data(&good, 30, 20_260_730)?;
+        assert!(log_likelihood_params(&data, &good)?.is_finite());
+
+        let bad = dynamics_test_params(1.0, 2.0).with_learning(lp(3));
+        assert!(
+            matches!(
+                log_likelihood_params(&data, &bad),
+                Err(AifError::InvalidLength { expected: 9, got: 3 })
+            ),
+            "MAB-length precision must be rejected on the positional model"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_dynamics_single_eval_runtime_recorded() -> Result<(), AifError> {
+        // D6 cost probe (informational — no timing assert; run under --release
+        // for the number that matters to the study-binary budget).
+        let p = dynamics_test_params(1.0, 2.0);
+        let data = generate_params_data(&p, 300, 20_260_730)?;
+        let t0 = std::time::Instant::now();
+        let ll = log_likelihood_params(&data, &p)?;
+        let dt = t0.elapsed();
+        assert!(ll.is_finite());
+        println!("ext-2b single 300-trial likelihood eval: {dt:?}");
         Ok(())
     }
 
