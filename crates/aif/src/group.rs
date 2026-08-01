@@ -14,6 +14,33 @@ fn uniform_index(rng: &mut StdRng, n: usize) -> usize {
         .sample(rng)
 }
 
+/// A flat distribution over `n` actions. `n` must be > 0 — the group's
+/// `n_actions` carries the same constructor-asserted invariant the
+/// [`VotingAgent`] does.
+///
+/// This is the neutral answer used by
+/// [`InternalAgent::action_probabilities`] for a nested [`GroupAgent`] whenever
+/// the underlying fallible step has no error channel to report through.
+fn uniform_distribution(n: usize) -> DVector<f64> {
+    DVector::from_element(n, 1.0 / n as f64)
+}
+
+/// The indices tied for the largest entry of `counts` — the winner set the
+/// `Deterministic` branch of [`VotingAgent::aggregate`] resolves.
+///
+/// Non-empty whenever `counts` is (the maximum is attained), which
+/// [`VotingAgent`]'s `n_actions > 0` assert guarantees; the `unwrap_or(&0)` is a
+/// defensive default for the otherwise unreachable empty slice.
+fn max_count_winners(counts: &[usize]) -> Vec<usize> {
+    let max_count = *counts.iter().max().unwrap_or(&0);
+    counts
+        .iter()
+        .enumerate()
+        .filter(|&(_, c)| *c == max_count)
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// Confidence weight of one agent's action distribution: `w = exp(−H)`, where
 /// `H = −Σ p ln p` is the Shannon entropy in nats.
 ///
@@ -86,6 +113,72 @@ impl VotingAgent {
         }
     }
 
+    /// Reset the voter's sampling/tie-breaking RNG to a deterministic stream.
+    ///
+    /// Mirrors [`POMDPAgent::reseed`](crate::POMDPAgent::reseed). The RNG is the
+    /// only state a [`VotingAgent`] carries between calls, so afterwards the voter
+    /// is indistinguishable from a freshly built
+    /// [`VotingAgent::with_seed`]`(n_actions, mode, seed)`.
+    ///
+    /// Used by [`InternalAgent::reseed`] for a nested [`GroupAgent`], which
+    /// reproduces [`GroupAgentBuilder::seed`]'s scheme (voter = `s`).
+    pub fn reseed(&mut self, seed: u64) {
+        self.rng = StdRng::seed_from_u64(seed);
+    }
+
+    /// Tally one vote per internal agent into per-action counts.
+    ///
+    /// Returns [`AifError::InvalidAction`] carrying the **first** out-of-range
+    /// vote. Extracted from [`aggregate`](Self::aggregate) so the nested-group
+    /// path can reach [`vote_distribution`](Self::vote_distribution) through the
+    /// same validation.
+    fn vote_counts(&self, votes: &[usize]) -> Result<Vec<usize>, AifError> {
+        let mut counts = vec![0usize; self.n_actions];
+        for &v in votes {
+            if v >= self.n_actions {
+                return Err(AifError::InvalidAction(v));
+            }
+            counts[v] += 1;
+        }
+        Ok(counts)
+    }
+
+    /// The distribution [`aggregate`](Self::aggregate) would sample its group
+    /// action from, given already-tallied `counts` — formed **without** drawing
+    /// from the voter's RNG.
+    ///
+    /// * `Deterministic` — uniform over the winner set. A lone winner is a delta
+    ///   (which `aggregate` returns with no draw at all); a tie is exactly the
+    ///   uniform choice `aggregate` makes among the tied actions.
+    /// * `Probabilistic` / `CertaintyWeighted` — the counts normalized by their
+    ///   total, which is the mass `WeightedIndex(counts)` samples with; all-zero
+    ///   counts (no votes) give the uniform fallback `aggregate` substitutes.
+    ///
+    /// This is the group-as-member view:
+    /// [`InternalAgent::action_probabilities`] for a nested [`GroupAgent`] returns
+    /// it verbatim, so the sampling moves up to the outer group.
+    ///
+    /// It is deliberately **not** used for `aggregate`'s own sampling:
+    /// `WeightedIndex` over the integer counts and over these `f64` weights
+    /// consume the RNG differently, and the integer path is the shipped,
+    /// figure-pinned one.
+    fn vote_distribution(&self, counts: &[usize]) -> Vec<f64> {
+        if self.mode == VotingMode::Deterministic {
+            let winners = max_count_winners(counts);
+            let share = 1.0 / winners.len() as f64;
+            let mut dist = vec![0.0f64; self.n_actions];
+            for &w in &winners {
+                dist[w] = share;
+            }
+            return dist;
+        }
+        let total: usize = counts.iter().sum();
+        if total == 0 {
+            return vec![1.0 / self.n_actions as f64; self.n_actions];
+        }
+        counts.iter().map(|&c| c as f64 / total as f64).collect()
+    }
+
     /// Aggregate discrete votes into a single group action.
     ///
     /// This method accepts ANY [`VotingMode`] when called directly, branching on
@@ -95,23 +188,14 @@ impl VotingAgent {
     /// never reaches this method with `CertaintyWeighted`; direct callers may.
     #[allow(clippy::missing_errors_doc)]
     pub fn aggregate(&mut self, votes: &[usize]) -> Result<usize, AifError> {
-        let mut counts = vec![0usize; self.n_actions];
-        for &v in votes {
-            if v >= self.n_actions {
-                return Err(AifError::InvalidAction(v));
-            }
-            counts[v] += 1;
-        }
+        let counts = self.vote_counts(votes)?;
 
         match self.mode {
             VotingMode::Deterministic => {
-                let max_count = *counts.iter().max().unwrap_or(&0);
-                let winners: Vec<usize> = counts
-                    .iter()
-                    .enumerate()
-                    .filter(|&(_, c)| *c == max_count)
-                    .map(|(i, _)| i)
-                    .collect();
+                let winners = max_count_winners(&counts);
+                // No RNG draw for a lone winner — only ties consume one. The
+                // nested-group path must not perturb this pattern, which is why it
+                // reads `vote_distribution` instead of calling through here.
                 if winners.len() == 1 {
                     Ok(winners[0])
                 } else {
@@ -152,6 +236,47 @@ impl VotingAgent {
         &mut self,
         distributions: &[DVector<f64>],
     ) -> Result<usize, AifError> {
+        let mixture = self.weighted_mixture(distributions)?;
+
+        if self.mode == VotingMode::Deterministic {
+            let max_p = mixture
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max);
+            let winners: Vec<usize> = mixture
+                .iter()
+                .enumerate()
+                .filter(|&(_, &p)| (p - max_p).abs() < 1e-10)
+                .map(|(i, _)| i)
+                .collect();
+            if winners.len() == 1 {
+                Ok(winners[0])
+            } else {
+                let idx = uniform_index(&mut self.rng, winners.len());
+                Ok(winners[idx])
+            }
+        } else {
+            // Covers `Probabilistic`/`CertaintyWeighted`. The group pipeline only
+            // reaches this method via `CertaintyWeighted`; direct callers may use
+            // any non-`Deterministic` mode.
+            let dist = WeightedIndex::new(&mixture)?;
+            Ok(dist.sample(&mut self.rng))
+        }
+    }
+
+    /// The confidence-weighted mixture `P(a) = Σ w_i P_i(a) / Σ w_i` that
+    /// [`aggregate_weighted`](Self::aggregate_weighted) samples from — formed
+    /// **without** drawing from the voter's RNG.
+    ///
+    /// Carries that method's length validation (every distribution must be
+    /// `n_actions` long, else [`AifError::InvalidLength`]) and its
+    /// total-weight-underflow uniform fallback; only the final sampling step is
+    /// left to the caller.
+    ///
+    /// This is the group-as-member view under `CertaintyWeighted`:
+    /// [`InternalAgent::action_probabilities`] for a nested [`GroupAgent`] returns
+    /// it verbatim, so the sampling moves up to the outer group.
+    fn weighted_mixture(&self, distributions: &[DVector<f64>]) -> Result<Vec<f64>, AifError> {
         for dist in distributions {
             if dist.len() != self.n_actions {
                 return Err(AifError::InvalidLength {
@@ -196,30 +321,7 @@ impl VotingAgent {
             }
         }
 
-        if self.mode == VotingMode::Deterministic {
-            let max_p = mixture
-                .iter()
-                .copied()
-                .fold(f64::NEG_INFINITY, f64::max);
-            let winners: Vec<usize> = mixture
-                .iter()
-                .enumerate()
-                .filter(|&(_, &p)| (p - max_p).abs() < 1e-10)
-                .map(|(i, _)| i)
-                .collect();
-            if winners.len() == 1 {
-                Ok(winners[0])
-            } else {
-                let idx = uniform_index(&mut self.rng, winners.len());
-                Ok(winners[idx])
-            }
-        } else {
-            // Covers `Probabilistic`/`CertaintyWeighted`. The group pipeline only
-            // reaches this method via `CertaintyWeighted`; direct callers may use
-            // any non-`Deterministic` mode.
-            let dist = WeightedIndex::new(&mixture)?;
-            Ok(dist.sample(&mut self.rng))
-        }
+        Ok(mixture)
     }
 }
 
@@ -287,10 +389,10 @@ impl Aggregator for VotingAgent {
 /// [`with_slots`](GroupAgent::with_slots) /
 /// [`with_slots_seeded`](GroupAgent::with_slots_seeded).
 ///
-/// This is groundwork for the paper's §4.1 extensions: a sensory or active slot
-/// that is itself an active-inference agent (extension 4), and — once
-/// `InternalAgent for GroupAgent` is designed — groups of groups via
-/// `I = Box<dyn InternalAgent>` (extension 8).
+/// This carries the paper's §4.1 extensions: a sensory or active slot that is
+/// itself an active-inference agent (extension 4), and groups of groups —
+/// `I = GroupAgent<..>` or `I = Box<dyn InternalAgent>` — via the
+/// [`InternalAgent`] impl below (extension 8).
 pub struct GroupAgent<
     S: Agent = CopyAgent,
     I: InternalAgent = POMDPAgent,
@@ -444,6 +546,120 @@ impl<S: Agent, I: InternalAgent, X: Aggregator> Agent for GroupAgent<S, I, X> {
             }
             self.active.aggregate(&votes)
         }
+    }
+}
+
+/// A [`GroupAgent`] is itself a usable **member** of an outer group — the paper's
+/// §4.1 "greater-than-two-scale nesting" (extension 8), and the deferral
+/// [`InternalAgent`] documents.
+///
+/// # Semantics
+///
+/// [`action_probabilities`](InternalAgent::action_probabilities) returns *the
+/// distribution the group's own voter would have sampled from*, without drawing
+/// from it: the normalized vote tally under `Probabilistic` (uniform over the
+/// winner set under `Deterministic`), the confidence-weighted mixture under
+/// `CertaintyWeighted`. Sampling therefore moves **up** to the outer group,
+/// exactly as it does for a [`POMDPAgent`] member — a nested group inside an
+/// outer `CertaintyWeighted` group contributes its full group-level distribution
+/// (and its group-level confidence weight `exp(−H)` with it), rather than a
+/// single collapsed vote.
+///
+/// Everything below the returned distribution still runs: the members act (or
+/// report-and-record, under `CertaintyWeighted`) exactly as they do in
+/// [`Agent::act`], so a nested group advances identically whether it is driven as
+/// a member or as a standalone group.
+///
+/// # Aggregator scope
+///
+/// Implemented for the concrete [`VotingAgent`] active slot only, not for a
+/// generic `X: Aggregator`. [`Aggregator`] is a *sampling* interface — both its
+/// methods return a chosen action — so there is no way to ask an arbitrary
+/// implementor for the distribution behind that choice without either widening
+/// the trait or drawing from its RNG. Groups with a custom aggregator stay
+/// [`Agent`]s (usable as sensory slots, runnable standalone); nesting them is a
+/// follow-on that has to design that widening.
+///
+/// # No error channel
+///
+/// The trait method returns a `DVector` rather than a `Result` (a
+/// [`POMDPAgent`]'s cannot fail). A group's can, in principle: the sensory slot,
+/// a member's `act`, and the aggregation step are all fallible. In the supported
+/// nesting configurations none of them do — a [`CopyAgent`] sensory slot accepts
+/// any observation, `POMDPAgent`/`GroupAgent` members return valid actions and
+/// normalized distributions, and the aggregator's `n_actions` agrees with the
+/// group's (the [`with_slots`](GroupAgent::with_slots) contract). Should one
+/// nevertheless fail, this impl returns the **uniform** distribution over
+/// `n_actions`: with no channel to report through, the only neutral answer, and
+/// far preferable to a panic or an `unwrap` in a member slot. Callers who need
+/// the error must drive the group through [`Agent::act`], which propagates it.
+impl<S: Agent, I: InternalAgent> InternalAgent for GroupAgent<S, I, VotingAgent> {
+    fn action_probabilities(&mut self, observation: usize) -> DVector<f64> {
+        let Ok(sensory_output) = self.sensory.act(observation) else {
+            return uniform_distribution(self.n_actions);
+        };
+
+        if self.active.mode() == VotingMode::CertaintyWeighted {
+            // The CW member loop from `Agent::act`, verbatim: each member reports
+            // its distribution, the GROUP rng samples that member's own action, and
+            // the member records it. Only the final `aggregate_weighted` draw is
+            // replaced — by the mixture it would have drawn from.
+            let mut distributions = Vec::with_capacity(self.internal.len());
+            for agent in &mut self.internal {
+                let probs = agent.action_probabilities(sensory_output);
+                let Ok(dist) = WeightedIndex::new(probs.as_slice()) else {
+                    return uniform_distribution(self.n_actions);
+                };
+                let action = dist.sample(&mut self.rng);
+                agent.record_action(action);
+                distributions.push(probs);
+            }
+            match self.active.weighted_mixture(&distributions) {
+                Ok(mixture) => DVector::from_vec(mixture),
+                Err(_) => uniform_distribution(self.n_actions),
+            }
+        } else {
+            let mut votes = Vec::with_capacity(self.internal.len());
+            for agent in &mut self.internal {
+                let Ok(action) = agent.act(sensory_output) else {
+                    return uniform_distribution(self.n_actions);
+                };
+                votes.push(action);
+            }
+            match self.active.vote_counts(&votes) {
+                Ok(counts) => DVector::from_vec(self.active.vote_distribution(&counts)),
+                Err(_) => uniform_distribution(self.n_actions),
+            }
+        }
+    }
+
+    /// No-op.
+    ///
+    /// A [`VotingAgent`] carries no state across steps but its RNG, and the
+    /// members already advanced during
+    /// [`action_probabilities`](InternalAgent::action_probabilities) — they acted
+    /// (or reported-and-recorded) there, just as they do in [`Agent::act`]. The
+    /// group action sampled from the returned distribution lives only in the
+    /// **outer** group's stream, so there is nothing here to record it into.
+    fn record_action(&mut self, _action: usize) {}
+
+    /// Reseed the whole nested pipeline under [`GroupAgentBuilder::seed`]'s
+    /// scheme: member `i` = `seed + 1 + i`, voter = `seed`, group RNG =
+    /// `seed + 0x9E37_79B9` (all wrapping). A group reseeded with `s` therefore
+    /// matches one the builder produced with `.seed(s)`.
+    ///
+    /// # Limitation
+    ///
+    /// The **sensory** slot is not reseeded: it is a plain [`Agent`], which has no
+    /// `reseed`. This is exact for the canonical nesting (a stateless
+    /// [`CopyAgent`]) and for any deterministic sensory agent; a sensory slot with
+    /// its own RNG must be seeded by the caller at construction.
+    fn reseed(&mut self, seed: u64) {
+        for (i, agent) in self.internal.iter_mut().enumerate() {
+            InternalAgent::reseed(agent, seed.wrapping_add(1 + i as u64));
+        }
+        self.active.reseed(seed);
+        self.rng = StdRng::seed_from_u64(seed.wrapping_add(0x9E37_79B9));
     }
 }
 
@@ -1396,11 +1612,26 @@ mod tests {
     /// `build_identical` at the given seed: `n` identical canonical MAB agents,
     /// each reseeded to the builder's `s + 1 + i` stream.
     fn slot_members(n: usize, seed: u64) -> Result<Vec<POMDPAgent>, AifError> {
+        slot_members_with(n, seed, &[0.8, 0.2, 0.2])
+    }
+
+    /// [`slot_members`] with a caller-chosen observation model.
+    ///
+    /// The nesting tests need a **contested** one. Under the canonical
+    /// `[0.8, 0.2, 0.2]` every member favors arm 0 so heavily that a two-level
+    /// majority collapses to it outright — nesting sharpens the vote, and a
+    /// constant stream would make the determinism assertions vacuous. See
+    /// [`NESTED_OBS`].
+    fn slot_members_with(
+        n: usize,
+        seed: u64,
+        observation_probs: &[f64],
+    ) -> Result<Vec<POMDPAgent>, AifError> {
         (0..n)
             .map(|i| {
                 let mut agent = POMDPAgent::new(
                     3,
-                    Some(vec![0.8, 0.2, 0.2]),
+                    Some(observation_probs.to_vec()),
                     None,
                     vec![0.7, 0.3],
                     None,
@@ -1667,6 +1898,278 @@ mod tests {
             group_seq, solo_seq,
             "FirstVote must return internal agent 0's action at every step"
         );
+        Ok(())
+    }
+
+    // ----- Nesting: `InternalAgent for GroupAgent` (tira #41 / extension 8) -----
+
+    /// Low-contrast observation model for the nesting fixtures: members disagree
+    /// often enough that a two-level vote stays live. See [`slot_members_with`].
+    const NESTED_OBS: [f64; 3] = [0.55, 0.5, 0.45];
+
+    /// One inner group for the nesting tests: a [`NESTED_OBS`] roster of `n`
+    /// members behind a [`CopyAgent`] sensory slot and a [`VotingAgent`] in
+    /// `mode`, with all three RNGs on [`GroupAgentBuilder::seed`]'s scheme for
+    /// `seed` (voter = `seed`, group = `seed + 0x9E37_79B9`, member `i` =
+    /// `seed + 1 + i`) — i.e. exactly the state [`InternalAgent::reseed`] installs.
+    fn nested_group(n: usize, mode: VotingMode, seed: u64) -> Result<GroupAgent, AifError> {
+        Ok(GroupAgent::with_slots_seeded(
+            CopyAgent,
+            slot_members_with(n, seed, &NESTED_OBS)?,
+            VotingAgent::with_seed(3, mode, seed),
+            3,
+            seed,
+        ))
+    }
+
+    /// Groups of groups run and stay deterministic (the paper's §4.1
+    /// greater-than-two-scale nesting).
+    ///
+    /// The meta group's members are themselves `GroupAgent`s. Note which combos
+    /// exercise the new impl: a `CertaintyWeighted` **meta** mode is what routes
+    /// members through [`InternalAgent::action_probabilities`] (a discrete-vote
+    /// meta drives them through [`Agent::act`] instead), and the **inner** mode
+    /// then selects which distribution the nested group reports — the vote tally
+    /// (`Probabilistic`), the winner set (`Deterministic`), or the
+    /// confidence-weighted mixture (`CertaintyWeighted`).
+    ///
+    /// The last combo re-runs one case with `Box<dyn InternalAgent>` members,
+    /// pinning that a boxed nested group is bit-identical to a concretely typed
+    /// one — extension 8's heterogeneous rosters depend on it.
+    #[test]
+    fn test_nested_group_of_groups_runs_and_is_deterministic() -> Result<(), AifError> {
+        const SEED: u64 = 2026;
+        const N_GROUPS: usize = 4;
+        const N_MEMBERS: usize = 4;
+        const N_STEPS: usize = 50;
+
+        let inner_roster = |mode: VotingMode| -> Result<Vec<GroupAgent>, AifError> {
+            (0..N_GROUPS)
+                .map(|i| nested_group(N_MEMBERS, mode, SEED.wrapping_add(1 + i as u64)))
+                .collect()
+        };
+        let meta = |meta_mode: VotingMode, inner_mode: VotingMode| {
+            Ok::<_, AifError>(GroupAgent::with_slots_seeded(
+                CopyAgent,
+                inner_roster(inner_mode)?,
+                VotingAgent::with_seed(3, meta_mode, SEED),
+                3,
+                SEED,
+            ))
+        };
+
+        for (meta_mode, inner_mode) in [
+            (VotingMode::Probabilistic, VotingMode::Probabilistic),
+            (VotingMode::Deterministic, VotingMode::Probabilistic),
+            (VotingMode::CertaintyWeighted, VotingMode::Probabilistic),
+            (VotingMode::CertaintyWeighted, VotingMode::Deterministic),
+            (VotingMode::CertaintyWeighted, VotingMode::CertaintyWeighted),
+        ] {
+            // Anti-fallback probe: what a nested group actually reports must not be
+            // the uniform vector the no-error-channel fallback would return.
+            let mut probe = nested_group(N_MEMBERS, inner_mode, SEED)?;
+            let reported = InternalAgent::action_probabilities(&mut probe, 0);
+            assert!(
+                reported.iter().any(|&p| (p - 1.0 / 3.0).abs() > 1e-9),
+                "{inner_mode:?}: a nested group must report a real distribution, \
+                 not the uniform fallback: {reported:?}"
+            );
+
+            let mut group_a = meta(meta_mode, inner_mode)?;
+            let mut group_b = meta(meta_mode, inner_mode)?;
+            assert_eq!(group_a.n_internal(), N_GROUPS);
+            assert_eq!(group_a.n_actions(), 3);
+
+            let seq_a = act_sequence(&mut group_a, N_STEPS)?;
+            let seq_b = act_sequence(&mut group_b, N_STEPS)?;
+
+            assert!(
+                seq_a.iter().all(|&a| a < 3),
+                "{meta_mode:?}/{inner_mode:?}: every nested group action must be a valid arm: {seq_a:?}"
+            );
+            assert!(
+                seq_a.iter().any(|&a| a != seq_a[0]),
+                "{meta_mode:?}/{inner_mode:?}: the contested NESTED_OBS fixture must keep the \
+                 two-level vote live rather than collapsing to one arm: {seq_a:?}"
+            );
+            assert_eq!(
+                seq_a, seq_b,
+                "{meta_mode:?}/{inner_mode:?}: identically seeded meta-groups must agree"
+            );
+        }
+
+        // Boxed inner groups must be bit-identical to concretely typed ones.
+        let boxed: Vec<Box<dyn InternalAgent>> = inner_roster(VotingMode::Probabilistic)?
+            .into_iter()
+            .map(|g| Box::new(g) as Box<dyn InternalAgent>)
+            .collect();
+        let mut dynamic = GroupAgent::with_slots_seeded(
+            CopyAgent,
+            boxed,
+            VotingAgent::with_seed(3, VotingMode::CertaintyWeighted, SEED),
+            3,
+            SEED,
+        );
+        let mut concrete = meta(VotingMode::CertaintyWeighted, VotingMode::Probabilistic)?;
+        assert_eq!(
+            act_sequence(&mut dynamic, N_STEPS)?,
+            act_sequence(&mut concrete, N_STEPS)?,
+            "Box<dyn InternalAgent> nested groups must match concretely typed ones"
+        );
+        Ok(())
+    }
+
+    /// [`InternalAgent::reseed`] on a group reproduces
+    /// [`GroupAgentBuilder::seed`]'s whole scheme: a mid-life reseed to `s` puts
+    /// the group on exactly the stream of a group freshly built with `.seed(s)`,
+    /// and of one assembled by hand via `with_slots_seeded` + per-member reseeds.
+    ///
+    /// The burn-in before the reseed is load-bearing — it proves the reseed erases
+    /// the RNG history rather than merely matching an untouched group. It does not
+    /// leave stale *beliefs* behind: the MAB's controlled `B` is rank-1 (every
+    /// action teleports to its own arm), so a fixed-`A` member's predictive prior
+    /// — hence its neg-G, hence its action distribution — does not depend on the
+    /// belief it entered the step with.
+    #[test]
+    fn test_nested_group_reseed_matches_fresh_construction() -> Result<(), AifError> {
+        const SEED: u64 = 4242;
+        const BURN_IN: usize = 10;
+        const N_STEPS: usize = 30;
+        const N_MEMBERS: usize = 4;
+
+        for mode in [
+            VotingMode::Probabilistic,
+            VotingMode::Deterministic,
+            VotingMode::CertaintyWeighted,
+        ] {
+            let build = |seed: u64| {
+                GroupAgentBuilder::new(3)
+                    .n_internal(N_MEMBERS)
+                    .observation_probs(NESTED_OBS.to_vec())
+                    .preferences(vec![0.7, 0.3])
+                    .alpha(0.5)
+                    .voting_mode(mode)
+                    .seed(seed)
+                    .build_identical()
+            };
+
+            // Run off a *different* seed, then reseed to SEED mid-life.
+            let mut reseeded = build(99)?;
+            let _burn = act_sequence(&mut reseeded, BURN_IN)?;
+            InternalAgent::reseed(&mut reseeded, SEED);
+
+            let mut fresh = build(SEED)?;
+            let mut by_hand = nested_group(N_MEMBERS, mode, SEED)?;
+
+            let from_reseed = act_sequence(&mut reseeded, N_STEPS)?;
+            let from_fresh = act_sequence(&mut fresh, N_STEPS)?;
+            let from_hand = act_sequence(&mut by_hand, N_STEPS)?;
+
+            assert_eq!(
+                from_reseed, from_fresh,
+                "{mode:?}: reseed(s) must match a fresh builder group seeded with s"
+            );
+            assert_eq!(
+                from_fresh, from_hand,
+                "{mode:?}: the builder's scheme must match with_slots_seeded + per-member reseeds"
+            );
+        }
+        Ok(())
+    }
+
+    /// What a nested group reports, and what it costs.
+    ///
+    /// (1) [`VotingAgent::vote_distribution`] on hand-tallied counts: normalized
+    ///     counts under `Probabilistic` (uniform when no votes were cast), uniform
+    ///     over the winner set under `Deterministic`.
+    /// (2) At group level under `Probabilistic`, `action_probabilities` returns the
+    ///     normalized member-vote tally — every entry is a multiple of
+    ///     `1/n_internal` and the entries sum to 1.
+    /// (3) It draws **nothing** from the voter's RNG. The group's own voter is fed
+    ///     the reconstructed votes afterwards and must stay lock-step with both a
+    ///     fresh twin `VotingAgent` on the same seed and an identically seeded
+    ///     group driven through [`Agent::act`] — for 25 consecutive steps. A single
+    ///     stray draw would desynchronize all three almost immediately.
+    #[test]
+    fn test_nested_action_probabilities_is_the_vote_tally_without_a_voter_draw()
+    -> Result<(), AifError> {
+        const SEED: u64 = 11;
+        const N_MEMBERS: usize = 4;
+        const N_STEPS: usize = 25;
+        const TOL: f64 = 1e-15;
+
+        let close = |a: &[f64], b: &[f64], what: &str| {
+            assert_eq!(a.len(), b.len(), "{what}: length");
+            for (i, (&x, &y)) in a.iter().zip(b).enumerate() {
+                assert!((x - y).abs() < TOL, "{what}: entry {i}: {x} vs {y}");
+            }
+        };
+
+        // (1) The helper's semantics, on counts tallied by hand.
+        let prob = VotingAgent::with_seed(3, VotingMode::Probabilistic, SEED);
+        close(&prob.vote_distribution(&[3, 1, 0]), &[0.75, 0.25, 0.0], "probabilistic tally");
+        close(
+            &prob.vote_distribution(&[0, 0, 0]),
+            &[1.0 / 3.0; 3],
+            "no votes ⇒ the uniform fallback `aggregate` substitutes",
+        );
+        let det = VotingAgent::with_seed(3, VotingMode::Deterministic, SEED);
+        close(&det.vote_distribution(&[3, 1, 0]), &[1.0, 0.0, 0.0], "lone winner ⇒ delta");
+        close(&det.vote_distribution(&[2, 2, 0]), &[0.5, 0.5, 0.0], "tie ⇒ uniform over winners");
+
+        // (2) + (3) at group level.
+        let group = |seed: u64| -> Result<GroupAgent, AifError> {
+            nested_group(N_MEMBERS, VotingMode::Probabilistic, seed)
+        };
+        let mut reporting = group(SEED)?;
+        let mut acting = group(SEED)?;
+        let mut twin_voter = VotingAgent::with_seed(3, VotingMode::Probabilistic, SEED);
+
+        for t in 0..N_STEPS {
+            let obs = t % 2;
+            let dist = InternalAgent::action_probabilities(&mut reporting, obs);
+            assert_eq!(dist.len(), 3, "step {t}: one entry per action");
+
+            let total: f64 = dist.iter().sum();
+            assert!((total - 1.0).abs() < TOL, "step {t}: must normalize, got {total}");
+
+            // Each entry is k/N_MEMBERS for an integer k — i.e. a vote tally.
+            let counts: Vec<usize> = dist
+                .iter()
+                .map(|&p| {
+                    (0..=N_MEMBERS)
+                        .find(|&k| (p - k as f64 / N_MEMBERS as f64).abs() < TOL)
+                        .unwrap_or_else(|| {
+                            panic!("step {t}: entry {p} is not a multiple of 1/{N_MEMBERS}")
+                        })
+                })
+                .collect();
+            assert_eq!(
+                counts.iter().sum::<usize>(),
+                N_MEMBERS,
+                "step {t}: the tally must account for every member: {counts:?}"
+            );
+
+            // A vote vector with the reconstructed multiset. `aggregate` weights by
+            // counts, so ordering is irrelevant.
+            let votes: Vec<usize> = counts
+                .iter()
+                .enumerate()
+                .flat_map(|(a, &c)| std::iter::repeat_n(a, c))
+                .collect();
+
+            let from_reporting = reporting.active.aggregate(&votes)?;
+            let from_twin = twin_voter.aggregate(&votes)?;
+            let from_acting = acting.act(obs)?;
+            assert_eq!(
+                from_reporting, from_twin,
+                "step {t}: action_probabilities must leave the voter's RNG untouched"
+            );
+            assert_eq!(
+                from_acting, from_twin,
+                "step {t}: the reported tally must be the one `act` aggregates"
+            );
+        }
         Ok(())
     }
 

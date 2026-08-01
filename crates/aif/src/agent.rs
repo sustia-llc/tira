@@ -23,7 +23,8 @@ pub trait Agent {
 /// exactly what this trait abstracts, so the member slot can be any type rather
 /// than a concrete [`POMDPAgent`].
 ///
-/// [`POMDPAgent`] is the only implementor in-tree; the blanket
+/// [`POMDPAgent`] and `GroupAgent<S, I, VotingAgent>` are the in-tree
+/// implementors; the blanket
 /// `impl<T: InternalAgent + ?Sized> InternalAgent for Box<T>` makes
 /// `Box<dyn InternalAgent>` a usable member type for heterogeneous groups
 /// (extension 4's POMDP sensory/active slots, extension 8's nested groups).
@@ -39,10 +40,12 @@ pub trait Agent {
 /// `variational_free_energy` is a [`POMDPAgent`] inherent method and stays there.
 /// A group has no native `F` of its own (extension 11 recovers one by replaying
 /// the blanket stream through a fresh canonical agent), so requiring it here
-/// would block `impl InternalAgent for GroupAgent`. That impl — the nesting that
-/// makes groups-of-groups work — is deliberately **deferred to extension 8**,
-/// where the semantics of a group's `action_probabilities` (vote mixture? active
-/// agent's own distribution?) get designed rather than guessed.
+/// would have blocked `impl InternalAgent for GroupAgent` — the nesting that
+/// makes groups-of-groups work, added for extension 8. That impl settled the
+/// open question this note used to record (vote mixture? active agent's own
+/// distribution?): a group reports **the distribution its own voter would have
+/// sampled from**, leaving the sampling to the outer group. See the impl in
+/// `group.rs` for the semantics and its `VotingAgent`-only scope.
 pub trait InternalAgent: Agent {
     /// Update beliefs from `observation` and return the action distribution
     /// **without** sampling. See [`POMDPAgent::action_probabilities`] for the
