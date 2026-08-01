@@ -648,12 +648,21 @@ impl<S: Agent, I: InternalAgent> InternalAgent for GroupAgent<S, I, VotingAgent>
     /// `seed + 0x9E37_79B9` (all wrapping). A group reseeded with `s` therefore
     /// matches one the builder produced with `.seed(s)`.
     ///
-    /// # Limitation
+    /// # Limitations
     ///
     /// The **sensory** slot is not reseeded: it is a plain [`Agent`], which has no
     /// `reseed`. This is exact for the canonical nesting (a stateless
     /// [`CopyAgent`]) and for any deterministic sensory agent; a sensory slot with
     /// its own RNG must be seeded by the caller at construction.
+    ///
+    /// **Do not rely on this method to seed a roster whose members are themselves
+    /// groups.** The `s + 1 + i` member offset is builder-parity (test-pinned for
+    /// flat rosters), but recursing it across scales aliases sibling streams:
+    /// member 0 of inner group 0 lands at `(s+1)+1 = s+2`, which is exactly inner
+    /// group 1's voter stream (`s+1+1`). For nested rosters, seed each inner group
+    /// individually from avalanche-mixed seeds (the reproduce crate's
+    /// `inner_group_seed` role scheme, negative-pinned there) and use this method
+    /// only per inner group — the extension-8 harness does exactly that.
     fn reseed(&mut self, seed: u64) {
         for (i, agent) in self.internal.iter_mut().enumerate() {
             InternalAgent::reseed(agent, seed.wrapping_add(1 + i as u64));

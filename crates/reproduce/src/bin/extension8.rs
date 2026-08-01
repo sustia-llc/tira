@@ -126,9 +126,9 @@ const CONTESTED_IX: usize = 1;
 
 /// Band on `meta α / flat α` for the probabilistic nested cells — the study's
 /// headline that an extra scale does not move the recovered precision. Measured
-/// 0.95–1.06 across both fixtures and all three shapes (4x4, 2x8, 8x2), i.e. a
-/// worst deviation of 0.06 from parity against 0.25/0.30 of allowance: ~4× headroom
-/// on the floor, ~5× on the ceiling.
+/// 0.95–1.06 across both fixtures and all three shapes (4x4, 2x8, 8x2): worst
+/// floor-side deviation 0.05 (0.9505) against 0.25 of allowance (~5× headroom),
+/// worst ceiling-side deviation 0.06 (1.060) against 0.30 (~5×).
 const SCALE_FREE_LO: f64 = 0.75;
 const SCALE_FREE_HI: f64 = 1.30;
 

@@ -80,10 +80,11 @@ Run: `cargo run --release -p reproduce --bin extension8` (~70 s on 12 cores).
    5–7% of steps; under CONTESTED it moves 31–64% (regimes pinned disjoint,
    0.066 < 0.308). But concentration ≠ uninformativeness: canonical recovers
    the TIGHTER α (IQR ≈ 0.05 vs 0.135). And the concentration is the
-   *member's*, not the nesting's — a lone member is already 0.973 arm-0,
-   flat-16 is 0.966, the 4×4 meta 0.968. The phase-1 "majority-of-majorities
-   amplification" framing did not survive measurement in blanket statistics:
-   nesting adds ~nothing to concentration (CW meta nudges it most, 0.979).
+   *members'*, not the nesting's — the flat 16-member group is already 0.966
+   arm-0 and the 4×4 meta reads 0.968 (both from the pinned table). The
+   phase-1 "majority-of-majorities amplification" framing did not survive
+   measurement in blanket statistics: nesting adds ~nothing to concentration
+   (CW meta nudges it most, 0.979).
 5. **The nested-seeding collision is real** (negative-pinned): reusing the
    builder's `+1+i` offset across scales aliases inner 0's member-0 stream
    with inner 1's voter stream. Cross-scale seeding must go through
