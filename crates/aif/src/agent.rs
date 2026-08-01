@@ -11,6 +11,86 @@ pub trait Agent {
     fn act(&mut self, observation: usize) -> Result<usize, AifError>;
 }
 
+/// The capability set [`GroupAgent`](crate::GroupAgent) needs from an internal
+/// (member) agent, over and above [`Agent`].
+///
+/// The group's `CertaintyWeighted` branch does not call [`Agent::act`]: it reads
+/// each member's full action distribution, samples the member's own action with
+/// the *group* RNG, and records it. Those three operations —
+/// [`action_probabilities`](Self::action_probabilities),
+/// [`record_action`](Self::record_action), plus
+/// [`reseed`](Self::reseed) for `GroupAgentBuilder`'s determinism scheme — are
+/// exactly what this trait abstracts, so the member slot can be any type rather
+/// than a concrete [`POMDPAgent`].
+///
+/// [`POMDPAgent`] is the only implementor in-tree; the blanket
+/// `impl<T: InternalAgent + ?Sized> InternalAgent for Box<T>` makes
+/// `Box<dyn InternalAgent>` a usable member type for heterogeneous groups
+/// (extension 4's POMDP sensory/active slots, extension 8's nested groups).
+///
+/// # Dyn compatibility
+///
+/// Every method takes `&mut self` and uses concrete argument/return types, so
+/// `dyn InternalAgent` is a valid type — pinned by a test in `group.rs`. Keep it
+/// that way: no generic methods, no `Self`-typed arguments or returns.
+///
+/// # Deliberately not on this trait
+///
+/// `variational_free_energy` is a [`POMDPAgent`] inherent method and stays there.
+/// A group has no native `F` of its own (extension 11 recovers one by replaying
+/// the blanket stream through a fresh canonical agent), so requiring it here
+/// would block `impl InternalAgent for GroupAgent`. That impl — the nesting that
+/// makes groups-of-groups work — is deliberately **deferred to extension 8**,
+/// where the semantics of a group's `action_probabilities` (vote mixture? active
+/// agent's own distribution?) get designed rather than guessed.
+pub trait InternalAgent: Agent {
+    /// Update beliefs from `observation` and return the action distribution
+    /// **without** sampling. See [`POMDPAgent::action_probabilities`] for the
+    /// learning-replay semantics.
+    fn action_probabilities(&mut self, observation: usize) -> DVector<f64>;
+
+    /// Record that `action` was taken, advancing whatever internal state a
+    /// sampled action would have advanced.
+    fn record_action(&mut self, action: usize);
+
+    /// Reset the agent's action-sampling RNG to a deterministic stream.
+    fn reseed(&mut self, seed: u64);
+}
+
+impl InternalAgent for POMDPAgent {
+    fn action_probabilities(&mut self, observation: usize) -> DVector<f64> {
+        POMDPAgent::action_probabilities(self, observation)
+    }
+
+    fn record_action(&mut self, action: usize) {
+        POMDPAgent::record_action(self, action);
+    }
+
+    fn reseed(&mut self, seed: u64) {
+        POMDPAgent::reseed(self, seed);
+    }
+}
+
+impl<T: Agent + ?Sized> Agent for Box<T> {
+    fn act(&mut self, observation: usize) -> Result<usize, AifError> {
+        (**self).act(observation)
+    }
+}
+
+impl<T: InternalAgent + ?Sized> InternalAgent for Box<T> {
+    fn action_probabilities(&mut self, observation: usize) -> DVector<f64> {
+        (**self).action_probabilities(observation)
+    }
+
+    fn record_action(&mut self, action: usize) {
+        (**self).record_action(action);
+    }
+
+    fn reseed(&mut self, seed: u64) {
+        (**self).reseed(seed);
+    }
+}
+
 /// The enumerated policies (each `(action_sequence, neg_g)`) paired with the
 /// normalized policy posterior `q(π)`, index-aligned. Produced by
 /// [`POMDPAgent::policy_posterior`] and cached under precision dynamics.

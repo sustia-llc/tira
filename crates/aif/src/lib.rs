@@ -18,8 +18,8 @@ mod group;
 mod special;
 
 pub use agent::{
-    Agent, AgentParams, CopyAgent, GenerativeModel, POMDPAgent, ParameterFreeEnergies,
-    PrecisionDynamics, StateInference,
+    Agent, AgentParams, CopyAgent, GenerativeModel, InternalAgent, POMDPAgent,
+    ParameterFreeEnergies, PrecisionDynamics, StateInference,
 };
 pub use coalition::{
     AgentId, CoalitionHistory, CompatibilityBeliefs, ObsPrecisionParams, TrustBeliefs,
@@ -29,7 +29,7 @@ pub use communication::{
     AgentMessage, CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel, Message,
     MessageContent,
 };
-pub use group::{GroupAgent, GroupAgentBuilder, VotingAgent, VotingMode};
+pub use group::{Aggregator, GroupAgent, GroupAgentBuilder, VotingAgent, VotingMode};
 
 #[derive(Error, Debug)]
 pub enum AifError {

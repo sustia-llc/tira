@@ -1,4 +1,4 @@
-use crate::agent::{Agent, CopyAgent, POMDPAgent};
+use crate::agent::{Agent, CopyAgent, InternalAgent, POMDPAgent};
 use crate::AifError;
 use nalgebra::DVector;
 use rand::rngs::StdRng;
@@ -223,16 +223,82 @@ impl VotingAgent {
     }
 }
 
+/// The capability set [`GroupAgent`] needs from its **active** (aggregating)
+/// slot: collapse the internal agents' outputs into one group action.
+///
+/// [`GroupAgent::act`] dispatches on [`mode`](Self::mode) — discrete-vote modes
+/// route to [`aggregate`](Self::aggregate), `CertaintyWeighted` to
+/// [`aggregate_weighted`](Self::aggregate_weighted) — so an implementor must
+/// supply both entry points and report which one the group should use.
+///
+/// [`VotingAgent`] is the only implementor in-tree (the trait impl delegates to
+/// the inherent methods, which stay the public API). The trait exists so the
+/// active slot can be a proper active-inference agent instead of a rule-based
+/// tallier — the paper's §4.1 suggestion, tracked as extension 4.
+pub trait Aggregator {
+    /// Collapse one discrete vote per internal agent into a group action.
+    #[allow(clippy::missing_errors_doc)]
+    fn aggregate(&mut self, votes: &[usize]) -> Result<usize, AifError>;
+
+    /// Collapse one full action distribution per internal agent into a group
+    /// action.
+    #[allow(clippy::missing_errors_doc)]
+    fn aggregate_weighted(
+        &mut self,
+        distributions: &[DVector<f64>],
+    ) -> Result<usize, AifError>;
+
+    /// Which of the two aggregation paths [`GroupAgent::act`] should feed.
+    fn mode(&self) -> VotingMode;
+}
+
+impl Aggregator for VotingAgent {
+    fn aggregate(&mut self, votes: &[usize]) -> Result<usize, AifError> {
+        VotingAgent::aggregate(self, votes)
+    }
+
+    fn aggregate_weighted(
+        &mut self,
+        distributions: &[DVector<f64>],
+    ) -> Result<usize, AifError> {
+        VotingAgent::aggregate_weighted(self, distributions)
+    }
+
+    fn mode(&self) -> VotingMode {
+        self.mode
+    }
+}
+
 /// Group agent implementing the Markov blanket structure from Figure 3.
 ///
 /// In `CertaintyWeighted` mode, internal agents report their full action
 /// probability distributions. The active agent forms a confidence-weighted
 /// mixture (§4.1: "certainty-weighted Bayesian model average") and samples
 /// from it.
-pub struct GroupAgent {
-    sensory: CopyAgent,
-    internal: Vec<POMDPAgent>,
-    active: VotingAgent,
+///
+/// # Slot polymorphism
+///
+/// The three blanket slots are type parameters, each defaulting to the paper's
+/// construction — so `GroupAgent` (unparameterized) means exactly what it did
+/// before: a [`CopyAgent`] sensory slot, [`POMDPAgent`] members, and a
+/// [`VotingAgent`] active slot, with [`new`](Self::new) /
+/// [`new_with_seed`](Self::new_with_seed) and [`GroupAgentBuilder`] all
+/// producing that type. Custom slots arrive via
+/// [`with_slots`](GroupAgent::with_slots) /
+/// [`with_slots_seeded`](GroupAgent::with_slots_seeded).
+///
+/// This is groundwork for the paper's §4.1 extensions: a sensory or active slot
+/// that is itself an active-inference agent (extension 4), and — once
+/// `InternalAgent for GroupAgent` is designed — groups of groups via
+/// `I = Box<dyn InternalAgent>` (extension 8).
+pub struct GroupAgent<
+    S: Agent = CopyAgent,
+    I: InternalAgent = POMDPAgent,
+    X: Aggregator = VotingAgent,
+> {
+    sensory: S,
+    internal: Vec<I>,
+    active: X,
     n_actions: usize,
     rng: StdRng,
 }
@@ -279,6 +345,56 @@ impl GroupAgent {
             rng: StdRng::seed_from_u64(seed.wrapping_add(0x9E37_79B9)),
         }
     }
+}
+
+impl<S: Agent, I: InternalAgent, X: Aggregator> GroupAgent<S, I, X> {
+    /// Construct a [`GroupAgent`] from caller-supplied blanket slots, with the
+    /// group RNG seeded from entropy.
+    ///
+    /// `n_actions` is the group's action space; it must be > 0 and must agree
+    /// with the action space `active` aggregates over (the aggregator owns its
+    /// own bound — [`VotingAgent`] asserts `n_actions > 0` at construction — and
+    /// a mismatch surfaces as an aggregation error, not a panic here).
+    ///
+    /// The slots arrive fully built, so their RNGs are the caller's
+    /// responsibility; [`with_slots_seeded`](Self::with_slots_seeded) seeds only
+    /// the group's own RNG.
+    #[must_use]
+    pub fn with_slots(sensory: S, internal: Vec<I>, active: X, n_actions: usize) -> Self {
+        Self {
+            sensory,
+            internal,
+            active,
+            n_actions,
+            rng: StdRng::from_rng(&mut rand::rng()),
+        }
+    }
+
+    /// [`with_slots`](Self::with_slots) with a deterministically seeded group RNG.
+    ///
+    /// Seeds **only** the group-level RNG (the one that samples each member's own
+    /// action in the `CertaintyWeighted` branch), using the same
+    /// `seed + 0x9E37_79B9` offset as [`GroupAgent::new_with_seed`] so a
+    /// default-typed group built this way matches one built there. Seeding the
+    /// members and the aggregator is the caller's job — pass
+    /// [`VotingAgent::with_seed`] and pre-[`reseed`](InternalAgent::reseed)ed
+    /// members to reproduce [`GroupAgentBuilder::seed`]'s full-pipeline scheme.
+    #[must_use]
+    pub fn with_slots_seeded(
+        sensory: S,
+        internal: Vec<I>,
+        active: X,
+        n_actions: usize,
+        seed: u64,
+    ) -> Self {
+        Self {
+            sensory,
+            internal,
+            active,
+            n_actions,
+            rng: StdRng::seed_from_u64(seed.wrapping_add(0x9E37_79B9)),
+        }
+    }
 
     #[must_use]
     pub fn n_internal(&self) -> usize {
@@ -291,21 +407,21 @@ impl GroupAgent {
     }
 
     #[must_use]
-    pub fn internal_agents(&self) -> &[POMDPAgent] {
+    pub fn internal_agents(&self) -> &[I] {
         &self.internal
     }
 
     #[must_use]
     pub fn voting_mode(&self) -> VotingMode {
-        self.active.mode
+        self.active.mode()
     }
 }
 
-impl Agent for GroupAgent {
+impl<S: Agent, I: InternalAgent, X: Aggregator> Agent for GroupAgent<S, I, X> {
     fn act(&mut self, observation: usize) -> Result<usize, AifError> {
         let sensory_output = self.sensory.act(observation)?;
 
-        if self.active.mode == VotingMode::CertaintyWeighted {
+        if self.active.mode() == VotingMode::CertaintyWeighted {
             // Each internal agent reports its full action distribution
             let mut distributions = Vec::with_capacity(self.internal.len());
             for agent in &mut self.internal {
@@ -450,8 +566,11 @@ impl GroupAgentBuilder {
         match self.seed {
             Some(s) => {
                 // Offset 1 + i: internal agent 0 must not share the voter's `s` stream.
+                // Reseeding is an `InternalAgent` obligation (trait-qualified so the
+                // builder's scheme stays expressed against the member abstraction, not
+                // `POMDPAgent`'s inherent method — the two are the same call).
                 for (i, agent) in internal.iter_mut().enumerate() {
-                    agent.reseed(s.wrapping_add(1 + i as u64));
+                    InternalAgent::reseed(agent, s.wrapping_add(1 + i as u64));
                 }
                 GroupAgent::new_with_seed(internal, self.n_bandits, mode, s)
             }
@@ -1267,6 +1386,286 @@ mod tests {
         assert_eq!(
             seq_a, seq_b,
             "Identical-seed Deterministic groups must produce identical action sequences"
+        );
+        Ok(())
+    }
+
+    // ----- Slot polymorphism (tira #39): trait-object groundwork -----
+
+    /// The internal-agent roster `GroupAgentBuilder` would build for
+    /// `build_identical` at the given seed: `n` identical canonical MAB agents,
+    /// each reseeded to the builder's `s + 1 + i` stream.
+    fn slot_members(n: usize, seed: u64) -> Result<Vec<POMDPAgent>, AifError> {
+        (0..n)
+            .map(|i| {
+                let mut agent = POMDPAgent::new(
+                    3,
+                    Some(vec![0.8, 0.2, 0.2]),
+                    None,
+                    vec![0.7, 0.3],
+                    None,
+                    0.5,
+                    false,
+                )?;
+                InternalAgent::reseed(&mut agent, seed.wrapping_add(1 + i as u64));
+                Ok(agent)
+            })
+            .collect()
+    }
+
+    /// [`slot_members`] with pA learning on (extension 3's weak prior).
+    ///
+    /// Needed wherever a test must *see* the observation: with a fixed `A` and the
+    /// MAB's deterministic `B`, the predictive prior is already a delta on the arm
+    /// just taken, so the Bayes update returns it unchanged and the observation
+    /// never reaches behavior. Learning is the channel that makes it matter — it
+    /// is what pA, hence `A`, hence neg-G, are updated from.
+    fn learning_slot_members(n: usize, seed: u64) -> Result<Vec<POMDPAgent>, AifError> {
+        (0..n)
+            .map(|i| {
+                let mut agent = POMDPAgent::new(
+                    3,
+                    Some(vec![0.8, 0.2, 0.2]),
+                    Some(vec![1.0, 1.0, 1.0]),
+                    vec![0.7, 0.3],
+                    None,
+                    0.5,
+                    true,
+                )?;
+                InternalAgent::reseed(&mut agent, seed.wrapping_add(1 + i as u64));
+                Ok(agent)
+            })
+            .collect()
+    }
+
+    fn act_sequence(group: &mut impl Agent, n: usize) -> Result<Vec<usize>, AifError> {
+        (0..n).map(|t| group.act(t % 2)).collect()
+    }
+
+    /// Dyn-compatibility + bit-identity pin for the trait-object member slot.
+    ///
+    /// Three constructions of the same group must produce the same action stream:
+    /// the builder (the shipped path), `new_with_seed` over concrete
+    /// `POMDPAgent`s, and `with_slots_seeded` over `Box<dyn InternalAgent>`. The
+    /// third both proves `dyn InternalAgent` is a usable member type (extension
+    /// 8's nesting depends on it) and proves the trait indirection changes no
+    /// RNG stream or call order — the constraint that keeps the paper figures
+    /// byte-reproducible.
+    ///
+    /// Run in both branches of `act`: `CertaintyWeighted` (group RNG samples each
+    /// member's action, `aggregate_weighted`) and `Probabilistic` (members sample
+    /// their own, `aggregate`).
+    #[test]
+    fn test_boxed_dyn_internal_slot_matches_default_typed_group() -> Result<(), AifError> {
+        const SEED: u64 = 42;
+        const N_INTERNAL: usize = 4;
+        const N_STEPS: usize = 30;
+
+        for mode in [VotingMode::CertaintyWeighted, VotingMode::Probabilistic] {
+            let mut built = GroupAgentBuilder::new(3)
+                .n_internal(N_INTERNAL)
+                .observation_probs(vec![0.8, 0.2, 0.2])
+                .preferences(vec![0.7, 0.3])
+                .alpha(0.5)
+                .voting_mode(mode)
+                .seed(SEED)
+                .build_identical()?;
+
+            let mut concrete =
+                GroupAgent::new_with_seed(slot_members(N_INTERNAL, SEED)?, 3, mode, SEED);
+
+            // The same members, behind `dyn`, with the slots the builder would have
+            // supplied: CopyAgent sensory + a voter seeded at `s` verbatim.
+            let boxed: Vec<Box<dyn InternalAgent>> = slot_members(N_INTERNAL, SEED)?
+                .into_iter()
+                .map(|a| Box::new(a) as Box<dyn InternalAgent>)
+                .collect();
+            let mut dynamic = GroupAgent::with_slots_seeded(
+                CopyAgent,
+                boxed,
+                VotingAgent::with_seed(3, mode, SEED),
+                3,
+                SEED,
+            );
+
+            assert_eq!(dynamic.n_internal(), N_INTERNAL);
+            assert_eq!(dynamic.n_actions(), 3);
+            assert_eq!(dynamic.voting_mode(), mode);
+
+            let from_builder = act_sequence(&mut built, N_STEPS)?;
+            let from_concrete = act_sequence(&mut concrete, N_STEPS)?;
+            let from_dyn = act_sequence(&mut dynamic, N_STEPS)?;
+
+            assert_eq!(
+                from_builder, from_concrete,
+                "{mode:?}: explicit reseeds must reproduce the builder's seeding scheme"
+            );
+            assert_eq!(
+                from_builder, from_dyn,
+                "{mode:?}: Box<dyn InternalAgent> members must be bit-identical to POMDPAgent members"
+            );
+        }
+        Ok(())
+    }
+
+    /// A sensory slot that inverts the observation. Defined for 2-observation
+    /// groups (the paper's binary reward): 0 ↦ 1, and anything else ↦ 0.
+    #[derive(Debug)]
+    struct FlipAgent;
+
+    impl Agent for FlipAgent {
+        fn act(&mut self, observation: usize) -> Result<usize, AifError> {
+            Ok(usize::from(observation == 0))
+        }
+    }
+
+    /// The sensory slot is a real seam: swapping `CopyAgent` for a distorting
+    /// agent must change the blanket stream (the paper's §4.1 "sensory agent that
+    /// can distort or filter", extension 4), while staying deterministic under a
+    /// seed.
+    ///
+    /// Members learn `A` here — see [`learning_slot_members`]. With a fixed `A`
+    /// the two streams come out *identical* (asserted below), and that is not a
+    /// bug in the seam: the MAB member's belief is a delta the observation cannot
+    /// move, so there is nothing for a sensory distortion to distort. Extension
+    /// 4's sensory agents will need the same learning (or a stochastic `B`) to
+    /// have any effect at all — the fixed-A arm pins that design constraint
+    /// (recorded on issue #40).
+    #[test]
+    fn test_custom_sensory_slot_changes_stream_and_stays_deterministic() -> Result<(), AifError> {
+        const SEED: u64 = 2026;
+        const N_INTERNAL: usize = 4;
+        const N_STEPS: usize = 40;
+
+        let flip_group = |seed: u64| -> Result<_, AifError> {
+            Ok(GroupAgent::with_slots_seeded(
+                FlipAgent,
+                learning_slot_members(N_INTERNAL, seed)?,
+                VotingAgent::with_seed(3, VotingMode::Probabilistic, seed),
+                3,
+                seed,
+            ))
+        };
+
+        let mut copy_group = GroupAgent::with_slots_seeded(
+            CopyAgent,
+            learning_slot_members(N_INTERNAL, SEED)?,
+            VotingAgent::with_seed(3, VotingMode::Probabilistic, SEED),
+            3,
+            SEED,
+        );
+
+        let mut flipped_a = flip_group(SEED)?;
+        let mut flipped_b = flip_group(SEED)?;
+
+        let copy_seq = act_sequence(&mut copy_group, N_STEPS)?;
+        let flip_seq_a = act_sequence(&mut flipped_a, N_STEPS)?;
+        let flip_seq_b = act_sequence(&mut flipped_b, N_STEPS)?;
+
+        assert_eq!(
+            flip_seq_a, flip_seq_b,
+            "a seeded group with a custom sensory slot must be reproducible"
+        );
+        assert_ne!(
+            copy_seq, flip_seq_a,
+            "inverting the observation must move the blanket stream off the CopyAgent group's"
+        );
+
+        // Fixed-A contrapositive: without learning, the same distortion is inert
+        // (delta beliefs never read the observation), so the flipped and copy
+        // streams must coincide exactly.
+        let mut fixed_copy = GroupAgent::with_slots_seeded(
+            CopyAgent,
+            slot_members(N_INTERNAL, SEED)?,
+            VotingAgent::with_seed(3, VotingMode::Probabilistic, SEED),
+            3,
+            SEED,
+        );
+        let mut fixed_flip = GroupAgent::with_slots_seeded(
+            FlipAgent,
+            slot_members(N_INTERNAL, SEED)?,
+            VotingAgent::with_seed(3, VotingMode::Probabilistic, SEED),
+            3,
+            SEED,
+        );
+        let fixed_copy_seq = act_sequence(&mut fixed_copy, N_STEPS)?;
+        let fixed_flip_seq = act_sequence(&mut fixed_flip, N_STEPS)?;
+        assert_eq!(
+            fixed_copy_seq, fixed_flip_seq,
+            "with fixed A, sensory distortion must be inert (ext-4 design constraint)"
+        );
+        Ok(())
+    }
+
+    /// An aggregator that hands the group action to internal agent 0 outright —
+    /// a dictatorship rather than a vote. Reports `Probabilistic` so
+    /// [`GroupAgent::act`] routes it through the discrete-vote branch.
+    #[derive(Debug)]
+    struct FirstVote;
+
+    impl Aggregator for FirstVote {
+        fn aggregate(&mut self, votes: &[usize]) -> Result<usize, AifError> {
+            votes
+                .first()
+                .copied()
+                .ok_or(AifError::InvalidLength { expected: 1, got: 0 })
+        }
+
+        /// Unused by this aggregator's `Probabilistic` mode; kept coherent with
+        /// `aggregate` (agent 0 decides — here by its own argmax).
+        fn aggregate_weighted(
+            &mut self,
+            distributions: &[DVector<f64>],
+        ) -> Result<usize, AifError> {
+            let first = distributions
+                .first()
+                .ok_or(AifError::InvalidLength { expected: 1, got: 0 })?;
+            let mut best = 0;
+            for (a, &p) in first.iter().enumerate() {
+                if p > first[best] {
+                    best = a;
+                }
+            }
+            Ok(best)
+        }
+
+        fn mode(&self) -> VotingMode {
+            VotingMode::Probabilistic
+        }
+    }
+
+    /// The active slot is a real seam too: a custom [`Aggregator`] governs the
+    /// group action. With `FirstVote` the group must echo internal agent 0
+    /// exactly, verified against a standalone agent built with the same
+    /// parameters and the same `s + 1 + 0` stream, replayed on the same
+    /// observations (the sensory slot is `CopyAgent`, so members see the group's
+    /// input verbatim).
+    #[test]
+    fn test_custom_aggregator_selects_first_internal_action() -> Result<(), AifError> {
+        const SEED: u64 = 7;
+        const N_INTERNAL: usize = 4;
+        const N_STEPS: usize = 30;
+
+        let mut group = GroupAgent::with_slots_seeded(
+            CopyAgent,
+            slot_members(N_INTERNAL, SEED)?,
+            FirstVote,
+            3,
+            SEED,
+        );
+        assert_eq!(group.voting_mode(), VotingMode::Probabilistic);
+
+        // Internal agent 0's twin: same parameters, same builder-scheme stream.
+        let mut solo = slot_members(1, SEED)?
+            .pop()
+            .expect("invariant: slot_members(1, _) yields exactly one agent");
+
+        let group_seq = act_sequence(&mut group, N_STEPS)?;
+        let solo_seq = act_sequence(&mut solo, N_STEPS)?;
+
+        assert_eq!(
+            group_seq, solo_seq,
+            "FirstVote must return internal agent 0's action at every step"
         );
         Ok(())
     }
