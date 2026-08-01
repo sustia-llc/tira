@@ -249,9 +249,13 @@ approximations. The paper suggests replacing these with proper active inference 
 e.g., a sensory agent that can distort or filter information, or an active agent that weighs
 votes by confidence.
 
-**Where**: New structs implementing `Agent` that wrap a `POMDPAgent` with appropriate
-generative models. `GroupAgent::new()` would accept `Box<dyn Agent>` for sensory/active slots
-instead of concrete types.
+**Where**: Groundwork shipped in #39 — `GroupAgent`'s slots are generic
+(`S: Agent` sensory, `X: Aggregator` active) with custom slots injected via
+`with_slots`/`with_slots_seeded` (`new()` unchanged, defaults paper-faithful). The study
+(issue #40) supplies POMDP-backed slot types: a sensory struct implementing `Agent` and an
+active struct implementing `Aggregator`, each wrapping a `POMDPAgent`. Design constraint
+(test-pinned, recorded on #40): with fixed `A` and the MAB's deterministic `B`, sensory
+distortion is inert — sensory arms need `learn_a` (or a stochastic `B`) to move the stream.
 
 ### 5. Certainty-weighted voting ✅ IMPLEMENTED
 
@@ -287,9 +291,11 @@ GroupAgents. `SharedBanditEnvironment` is a starting point but needs generalizat
 Groups of groups: a `MetaGroupAgent` whose "internal agents" are themselves `GroupAgent`
 instances. Tests whether the parameter recovery method works recursively across scales.
 
-**Where**: `GroupAgent` already implements `Agent`, so `GroupAgent::new()` could accept
-`Vec<Box<dyn Agent>>` instead of `Vec<POMDPAgent>`, allowing recursive composition.
-Requires making internal agent storage trait-object-based.
+**Where**: Groundwork shipped in #39 — internal storage is generic
+(`I: InternalAgent = POMDPAgent`), and `Box<dyn InternalAgent>` members are test-pinned
+bit-identical to concrete ones. What remains for the study (issue #41): design and implement
+`InternalAgent for GroupAgent` (a group's `action_probabilities` semantics + `reseed` stream
+scheme), then compose nested groups via `with_slots_seeded`.
 
 ### 9. Dynamically emerging Markov blankets
 Current implementation uses a fixed blanket structure. The paper mentions simulations where

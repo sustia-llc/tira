@@ -1525,11 +1525,12 @@ mod tests {
     /// seed.
     ///
     /// Members learn `A` here — see [`learning_slot_members`]. With a fixed `A`
-    /// the two streams come out *identical*, and that is not a bug in the seam:
-    /// the MAB member's belief is a delta the observation cannot move, so there
-    /// is nothing for a sensory distortion to distort. Extension 4's sensory
-    /// agents will need the same learning (or a stochastic `B`) to have any
-    /// effect at all.
+    /// the two streams come out *identical* (asserted below), and that is not a
+    /// bug in the seam: the MAB member's belief is a delta the observation cannot
+    /// move, so there is nothing for a sensory distortion to distort. Extension
+    /// 4's sensory agents will need the same learning (or a stochastic `B`) to
+    /// have any effect at all — the fixed-A arm pins that design constraint
+    /// (recorded on issue #40).
     #[test]
     fn test_custom_sensory_slot_changes_stream_and_stays_deterministic() -> Result<(), AifError> {
         const SEED: u64 = 2026;
@@ -1568,6 +1569,30 @@ mod tests {
         assert_ne!(
             copy_seq, flip_seq_a,
             "inverting the observation must move the blanket stream off the CopyAgent group's"
+        );
+
+        // Fixed-A contrapositive: without learning, the same distortion is inert
+        // (delta beliefs never read the observation), so the flipped and copy
+        // streams must coincide exactly.
+        let mut fixed_copy = GroupAgent::with_slots_seeded(
+            CopyAgent,
+            slot_members(N_INTERNAL, SEED)?,
+            VotingAgent::with_seed(3, VotingMode::Probabilistic, SEED),
+            3,
+            SEED,
+        );
+        let mut fixed_flip = GroupAgent::with_slots_seeded(
+            FlipAgent,
+            slot_members(N_INTERNAL, SEED)?,
+            VotingAgent::with_seed(3, VotingMode::Probabilistic, SEED),
+            3,
+            SEED,
+        );
+        let fixed_copy_seq = act_sequence(&mut fixed_copy, N_STEPS)?;
+        let fixed_flip_seq = act_sequence(&mut fixed_flip, N_STEPS)?;
+        assert_eq!(
+            fixed_copy_seq, fixed_flip_seq,
+            "with fixed A, sensory distortion must be inert (ext-4 design constraint)"
         );
         Ok(())
     }
