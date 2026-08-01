@@ -6,8 +6,9 @@
 #![allow(clippy::cast_precision_loss)]
 
 pub use aif::{
-    Agent, CopyAgent, CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel,
-    AgentMessage, Message, MessageContent,
+    Agent, Aggregator, CopyAgent, CommunicatingAgent, CommunicatingPOMDPAgent,
+    CommunicationChannel,
+    AgentMessage, InternalAgent, Message, MessageContent,
     GroupAgent, GroupAgentBuilder, VotingAgent, VotingMode,
     AifError, POMDPAgent,
 };
@@ -16,22 +17,26 @@ use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use rand_distr::{Bernoulli, Distribution};
 
+mod ext4;
 mod plotter;
 mod simulation;
+
+pub use ext4::{AgreementAggregator, SensoryFilter, build_ext4_group};
 
 pub use simulation::{
     BANDIT_PROBS, DimResult, DynamicsParams, EXT3_INITIAL_PRECISION, ExperimentOpts,
     LearningParams, McmcConfig,
     McmcDim, McmcResult, McmcVecConfig, McmcVecResult, ModelParams, PREFERENCES, PRIOR_SD,
     ProposalMode, R_HAT_THRESHOLD,
-    RecoveryResult, TrialData, env_seed, experiment_certainty_weighted, experiment_deterministic,
+    RecoveryResult, TrialData, active_seed, env_seed, experiment_certainty_weighted,
+    experiment_deterministic,
     experiment_identical, experiment_varying_alpha, experiment_varying_preferences, group_seed,
     generate_params_data, half_normal_log_prior_sd, heterogeneity_seed, log_likelihood,
     log_likelihood_learning, log_likelihood_params, mcmc_base_seed, parameter_recovery_single,
     recover_alpha,
     recover_alpha_learning, recover_alpha_mcmc, recover_alpha_mcmc_learning, recover_mcmc_vec,
-    run_group_simulation, run_single_simulation, run_sweep, single_agent_data, substream,
-    switch_seed,
+    run_group_simulation, run_single_simulation, run_sweep, sensory_seed, single_agent_data,
+    substream, switch_seed,
 };
 
 pub use plotter::{plot_figure4, plot_figure5, plot_figure6};

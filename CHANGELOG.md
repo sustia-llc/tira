@@ -37,6 +37,26 @@
 
 ### reproduce harness (unversioned; no `aif` engine change, no release required)
 
+2026-08-01 (#40 — extension 4 study, POMDP sensory/active slots):
+
+- New `ext4` module: `SensoryFilter` (S1 inference relay — exact Bayes over a binary
+  latent outcome with confusion precision `q`, posterior-predictive resample; `q = 1`
+  is an exact identity relay, gate-pinned byte-equal to `CopyAgent`; S2 optimism knob
+  via `with_bias`) and `AgreementAggregator` (A1 — two-factor `from_model` POMDP,
+  controlled announcement × identity-B good arm, majority-vote + agreement modalities;
+  EFE announces the believed-good arm; sharp-limit gate 180/180). New slot seed roles
+  `sensory_seed` (5) / `active_seed` (6); anti-collision guard extended 0..=6.
+- `bin/extension4` (master seed `0xE4_2026`, 6 matched-seed cells × 30 reps, < 1 min):
+  **the active slot dominates the group's blanket identity** — A1 moves recovered
+  group α ~10× (0.040 → 0.385, toward the true member α = 0.5) at 62% action
+  divergence; sensory distortion is second-order (q = 0.70 → 16% divergence, α nudged
+  down, monotone in 1−q); the effects don't compose. Misspec/aware gap widens under A1
+  (0.240 vs 0.385) — learning-aware replay becomes load-bearing for point α. Findings
+  guard-pinned (assert-before-print); report `docs/extension4-pomdp-blanket.md`.
+- All arms run learn_a members — the #39 test-pinned constraint (fixed-A sensory
+  distortion is provably inert on the deterministic-B MAB).
+- Test suite 207 → 220.
+
 2026-07-25 (#11 — pedantic burn-down):
 
 - Fixed the useful subset workspace-wide: doc backticks, digit separators on every long

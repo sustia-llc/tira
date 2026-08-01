@@ -1729,7 +1729,7 @@ pub fn parameter_recovery_single(
 /// scrambled rather than small offsets, so a factory's heterogeneity/group/env
 /// streams cannot collide with the group builder's internal-agent streams. See
 /// [`group_seed`] for the full derivation the group stream feeds into; the
-/// `substream(s, 0..5)` separation contract is pinned by
+/// `substream(s, 0..7)` separation contract is pinned by
 /// `tests::substream_streams_are_well_separated`.
 #[must_use]
 pub fn substream(master: u64, stream: u64) -> u64 {
@@ -1742,8 +1742,8 @@ pub fn substream(master: u64, stream: u64) -> u64 {
 // Substream role indices. A master seed splits into independent role streams via
 // [`substream`]; these constants name the roles so the mapping lives in exactly one place
 // (factories, `extension11`, the MCMC chains, and the seeded tests all go through the
-// [`heterogeneity_seed`]/[`group_seed`]/[`env_seed`]/[`mcmc_base_seed`]/[`switch_seed`]
-// accessors below).
+// [`heterogeneity_seed`]/[`group_seed`]/[`env_seed`]/[`mcmc_base_seed`]/[`switch_seed`]/
+// [`sensory_seed`]/[`active_seed`] accessors below).
 const HETEROGENEITY_STREAM: u64 = 0;
 const GROUP_STREAM: u64 = 1;
 const ENV_STREAM: u64 = 2;
@@ -1755,6 +1755,14 @@ const MCMC_STREAM: u64 = 3;
 /// (extension 2b / #33) — separate from [`ENV_STREAM`] so reward-noise
 /// realizations stay comparable across hazard settings.
 const SWITCH_STREAM: u64 = 4;
+/// Sensory-slot role for extension 4 (#40): the [`crate::SensoryFilter`]'s own
+/// emission RNG. A dedicated role is what makes the `q = 1` filter a *drop-in*
+/// replacement for [`CopyAgent`](aif::CopyAgent) — its draws can never perturb the
+/// members', voter's or group's streams (gate G1).
+const SENSORY_STREAM: u64 = 5;
+/// Active-slot role for extension 4 (#40): the [`crate::AgreementAggregator`]'s
+/// action-sampling RNG, kept clear of the group builder's voter stream it replaces.
+const ACTIVE_STREAM: u64 = 6;
 
 /// Seed for the per-agent heterogeneity draw (Dirichlet α / Beta preferences).
 #[must_use]
@@ -1796,6 +1804,18 @@ pub fn mcmc_base_seed(master: u64) -> u64 {
 #[must_use]
 pub fn switch_seed(master: u64) -> u64 {
     substream(master, SWITCH_STREAM)
+}
+
+/// Seed for extension 4's sensory slot ([`crate::SensoryFilter::new`]).
+#[must_use]
+pub fn sensory_seed(master: u64) -> u64 {
+    substream(master, SENSORY_STREAM)
+}
+
+/// Seed for extension 4's active slot ([`crate::AgreementAggregator::new`]).
+#[must_use]
+pub fn active_seed(master: u64) -> u64 {
+    substream(master, ACTIVE_STREAM)
 }
 
 /// Run a seeded cell × rep sweep in parallel, returning per-cell rep results in cell
@@ -2271,13 +2291,24 @@ mod tests {
     /// group of ≤199 agents.
     #[test]
     fn substream_streams_are_well_separated() {
-        for &s in &[2026u64, 0xE11_2026, 0xE3_2026, 0xE1_2026, 0xE2_2026, 0xE2B_2026, 9001] {
-            let streams: [u64; 5] = [
+        for &s in &[
+            2026u64,
+            0xE11_2026,
+            0xE3_2026,
+            0xE1_2026,
+            0xE2_2026,
+            0xE2B_2026,
+            0xE4_2026,
+            9001,
+        ] {
+            let streams: [u64; 7] = [
                 substream(s, 0),
                 substream(s, 1),
                 substream(s, 2),
                 substream(s, 3),
                 substream(s, 4),
+                substream(s, 5),
+                substream(s, 6),
             ];
 
             // Pairwise distinct.
@@ -2300,7 +2331,9 @@ mod tests {
             let b = group_seed(s);
             assert_eq!(b, streams[1], "group_seed must equal substream(s, 1)");
             assert_eq!(switch_seed(s), streams[4], "switch_seed must equal substream(s, 4)");
-            for k in [0usize, 2, 3, 4] {
+            assert_eq!(sensory_seed(s), streams[5], "sensory_seed must equal substream(s, 5)");
+            assert_eq!(active_seed(s), streams[6], "active_seed must equal substream(s, 6)");
+            for k in [0usize, 2, 3, 4, 5, 6] {
                 let v = streams[k];
                 assert!(
                     !(b..=b.wrapping_add(200)).contains(&v),
