@@ -4,6 +4,21 @@
 
 ### aif 0.12.0 (manifest bumped 2026-07-25; tag pending — cut at the Phase-3 release point)
 
+- Trait-object groundwork for extensions 4/8 (#39): new `InternalAgent: Agent` trait
+  (`action_probabilities`/`record_action`/`reseed` — the member-slot surface
+  `GroupAgent` actually uses; dyn-compatible, `POMDPAgent` implements it, blanket
+  impls make `Box<dyn InternalAgent>`/`Box<dyn Agent>` usable) and new `Aggregator`
+  trait (`aggregate`/`aggregate_weighted`/`mode`; `VotingAgent` implements it).
+  `GroupAgent` is now generic over its three blanket slots with paper-faithful
+  defaults — `GroupAgent<S: Agent = CopyAgent, I: InternalAgent = POMDPAgent,
+  X: Aggregator = VotingAgent>` — so the unparameterized type, `new`/`new_with_seed`,
+  and the builder are source- and bit-identical to before (`internal_agents()` now
+  returns `&[I]`, concretely `&[POMDPAgent]` at the defaults). Custom slots arrive
+  via `with_slots`/`with_slots_seeded` (seeds only the group RNG, same
+  `+0x9E37_79B9` offset; slot RNGs are the caller's). `InternalAgent for GroupAgent`
+  (nesting) is deliberately deferred to extension 8. All figures byte-identical;
+  reproduce runners `run_group_simulation`/`run_single_simulation` are now generic
+  over `Agent` (the group runner delegates to the single one).
 - Workspace-level `[workspace.package]` inheritance for `edition`/`license`/`repository`
   (both crate manifests now use `edition.workspace = true` etc.); `version` and
   `description` deliberately stay per-crate (aif 0.11.0, reproduce 0.5.0 — versions and

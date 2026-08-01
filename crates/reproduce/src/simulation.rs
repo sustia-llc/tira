@@ -1,5 +1,5 @@
 use aif::{
-    Agent, AgentParams, GenerativeModel, GroupAgent, GroupAgentBuilder, AifError, POMDPAgent,
+    Agent, AgentParams, GenerativeModel, GroupAgentBuilder, AifError, POMDPAgent,
     PrecisionDynamics, StateInference,
 };
 use crate::{BanditEnvironment, Environment, PositionalBanditEnvironment};
@@ -53,31 +53,32 @@ impl Default for TrialData {
 // Simulation runner
 // ---------------------------------------------------------------------------
 
-/// Run a group agent in a bandit environment for `n_trials` steps,
-/// collecting the group-level blanket states (observations and actions).
+/// Run a group agent in an environment for `n_trials` steps, collecting the
+/// group-level blanket states (observations and actions).
+///
+/// Identical to [`run_single_simulation`] — a [`GroupAgent`](aif::GroupAgent) is an [`Agent`],
+/// and since #39 both runners are generic over the agent, so the group/single
+/// split is now purely documentary: it names which scale of the paper's
+/// two-scale story a call site is exercising. Kept as two names because the
+/// experiment factories read better for it.
 #[allow(clippy::missing_errors_doc)]
 pub fn run_group_simulation(
-    group: &mut GroupAgent,
-    env: &mut BanditEnvironment,
+    group: &mut impl Agent,
+    env: &mut impl Environment,
     n_trials: usize,
 ) -> Result<TrialData, AifError> {
-    let mut data = TrialData::new();
-    let mut prev_obs = 0;
-    for _ in 0..n_trials {
-        let action = group.act(prev_obs)?;
-        let obs = env.step(action)?;
-        data.record(obs, action);
-        prev_obs = obs;
-    }
-    Ok(data)
+    run_single_simulation(group, env, n_trials)
 }
 
-/// Run a single POMDP agent in an environment for `n_trials` steps. Generic
-/// over [`Environment`] since extension 2b (#33) — `BanditEnvironment` callers
-/// are source-compatible; the positional env drives the same loop.
+/// Run a single agent in an environment for `n_trials` steps.
+///
+/// Generic over [`Environment`] since extension 2b (#33) and over [`Agent`]
+/// since the trait-object groundwork (#39) — `POMDPAgent` / `BanditEnvironment`
+/// callers are source-compatible, and a `GroupAgent` (or any custom `Agent`,
+/// e.g. extension 4's POMDP-slotted groups) drives the same loop.
 #[allow(clippy::missing_errors_doc)]
 pub fn run_single_simulation(
-    agent: &mut POMDPAgent,
+    agent: &mut impl Agent,
     env: &mut impl Environment,
     n_trials: usize,
 ) -> Result<TrialData, AifError> {
