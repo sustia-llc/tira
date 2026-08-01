@@ -18,10 +18,15 @@ use rand::{RngExt, SeedableRng};
 use rand_distr::{Bernoulli, Distribution};
 
 mod ext4;
+mod ext8;
 mod plotter;
 mod simulation;
 
 pub use ext4::{AgreementAggregator, SensoryFilter, build_ext4_group};
+pub use ext8::{
+    NestedRun, build_ext8_group, build_ext8_inners, build_ext8_meta, inner_group_seed,
+    run_nested_instrumented,
+};
 
 pub use simulation::{
     BANDIT_PROBS, DimResult, DynamicsParams, EXT3_INITIAL_PRECISION, ExperimentOpts,
