@@ -136,6 +136,33 @@ Table-2 loop's 16 damped iterations exhaust ψ's transient within each timestep.
 [extension2b-stochastic-b.md](docs/extension2b-stochastic-b.md); run with
 `cargo run --release -p reproduce --bin extension2b` (~29 min).
 
+### Extension 4 — active-inference sensory and active agents (study, no figure)
+
+Replaces the group's rule-based blanket slots (the `CopyAgent` relay and `VotingAgent`
+tallier) with proper active-inference agents, on the generic slots shipped in #39: an
+exact-Bayes **sensory filter** with confusion precision `q` (a `q = 1` relay is
+byte-identical to `CopyAgent`, gate-pinned) and an **agreement-seeking two-factor POMDP
+aggregator** that announces its believed-good arm instead of tallying. Result: **the
+active slot is where the group's blanket identity lives** — the announcer moves the
+recovered group α roughly tenfold back toward the true member α at 62% action
+divergence, while even heavy sensory distortion is second-order and the two effects do
+not compose. Every arm runs member A-learning: with a fixed `A` and the MAB's
+deterministic `B`, sensory distortion is provably inert (test-pinned). Report:
+[extension4-pomdp-blanket.md](docs/extension4-pomdp-blanket.md); run with
+`cargo run --release -p reproduce --bin extension4` (< 1 min).
+
+### Extension 8 — greater-than-two-scale nesting (study, no figure)
+
+Groups of groups, via `InternalAgent for GroupAgent` (a nested group reports the
+action distribution its voter would have sampled from; sampling moves up a scale).
+Result: **the paper's recovery method is scale-free** — meta-level α reads like the
+flat same-headcount α at every nesting shape (4×4, 2×8, 8×2) on both a canonical and a
+contested observation model, and the inner groups recover their true α too. The one
+systematic scale effect is certainty-weighted meta voting (≈ +12% α, the meta-scale
+analogue of extension 4's active-slot dominance). Report:
+[extension8-nesting.md](docs/extension8-nesting.md); run with
+`cargo run --release -p reproduce --bin extension8` (~70 s).
+
 ## Architecture
 
 ```
@@ -159,7 +186,7 @@ Environment (BanditEnvironment)
 | Module | Role |
 |--------|------|
 | `crates/aif/src/agent.rs` | POMDP active inference agent: A–E matrices (multi-factor/multi-modality via `GenerativeModel`), expected free energy G (pragmatic + info-gain + novelty), α/γ precision, Dirichlet learning (pA/pB/pD/pE, η/ω, `parameter_free_energies()`), `StateInference` (MeanField / marginal message passing), `variational_free_energy()`, opt-in `PrecisionDynamics` (Smith Table 2 γ/β loop) |
-| `crates/aif/src/group.rs` | VotingMode, GroupAgent, VotingAgent (discrete + certainty-weighted), GroupAgentBuilder |
+| `crates/aif/src/group.rs` | VotingMode, GroupAgent (generic blanket slots since #39; nests via `InternalAgent for GroupAgent`, #41), VotingAgent (discrete + certainty-weighted), GroupAgentBuilder |
 | `crates/aif/src/coalition.rs` | `competence_efe` + `ObsPrecisionParams` (the coalition-value primitive, opt-in `transition_noise` since 0.6.0), `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory`, `belief_weighted_preference` |
 | `crates/aif/src/communication.rs` | Flume-based inter-agent messaging (for extended scenarios) |
 | `crates/reproduce/src/simulation.rs` | Simulation runner, parameter recovery (grid MAP: `recover_alpha[_learning]`; MCMC: `recover_alpha_mcmc[_learning]`, #25; vector MH `recover_mcmc_vec` + `McmcVecConfig`/`ModelParams`/`log_likelihood_params` with `ProposalMode` JointScale/Covariance proposals, extension 2 / #29+#30), 5 experiment factories taking `&ExperimentOpts` (seed + optional A-learning) |
@@ -170,6 +197,10 @@ Environment (BanditEnvironment)
 | `crates/reproduce/src/bin/extension1.rs` | MCMC (Metropolis-Hastings) α recovery vs grid MAP (extension 1 / #25) |
 | `crates/reproduce/src/bin/extension2.rs` | Joint multi-parameter recovery: (α,γ)/(α,p)/(η,ω) two-arm identifiability study (extension 2 / #29+#30) |
 | `crates/reproduce/src/bin/extension2b.rs` | (β₀, ψ) recovery on the positional foraging bandit (extension 2b / #33) |
+| `crates/reproduce/src/ext4.rs` | Extension-4 slot agents: `SensoryFilter` (exact-Bayes relay) + `AgreementAggregator` (two-factor EFE announcer), gates G1–G3 |
+| `crates/reproduce/src/bin/extension4.rs` | POMDP sensory/active blanket-slot study (extension 4 / #40) |
+| `crates/reproduce/src/ext8.rs` | Extension-8 nesting harness: collision-free `inner_group_seed`, instrumented meta loop, gates G1–G3 |
+| `crates/reproduce/src/bin/extension8.rs` | Nested groups / recursive recovery study (extension 8 / #41) |
 
 ## Usage
 

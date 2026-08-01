@@ -4,6 +4,20 @@
 
 ### aif 0.12.0 (manifest bumped 2026-07-25; tag pending — cut at the Phase-3 release point)
 
+- Nesting (#41, closes the #39 deferral): `impl<S: Agent, I: InternalAgent> InternalAgent
+  for GroupAgent<S, I, VotingAgent>` — a group can be a member of an outer group.
+  `action_probabilities` returns the distribution the group's voter WOULD have sampled
+  from (CW confidence-weighted mixture / normalized vote counts / uniform-over-winners)
+  with NO voter-rng draw — sampling moves up to the outer group; `record_action` is a
+  no-op (VotingAgent is stateless across steps; members already advanced); `reseed`
+  applies the builder scheme (members `s+1+i`, voter `s`, group rng `s+0x9E37_79B9`;
+  the sensory slot is not reseeded — documented). Scoped to the concrete `VotingAgent`
+  aggregator (`Aggregator` is a sampling interface with no distribution surface).
+  `VotingAgent::reseed` added (pub, mirrors `POMDPAgent::reseed`); private
+  `vote_counts`/`vote_distribution`/`weighted_mixture` extracted — `aggregate`'s
+  Probabilistic branch still samples the INTEGER counts (f64 weights would change RNG
+  consumption; byte-reproducibility pinned). Figures byte-identical; extension4 guards
+  hold.
 - Trait-object groundwork for extensions 4/8 (#39): new `InternalAgent: Agent` trait
   (`action_probabilities`/`record_action`/`reseed` — the member-slot surface
   `GroupAgent` actually uses; dyn-compatible, `POMDPAgent` implements it, blanket
@@ -36,6 +50,25 @@
   and two `self.beliefs = ..clone()` writes became `clone_from`.
 
 ### reproduce harness (unversioned; no `aif` engine change, no release required)
+
+2026-08-01 (#41 — extension 8 study, nested groups; the aif side is the 0.12.0 nesting
+bullet above):
+
+- New `ext8` module: `inner_group_seed` (avalanche-mixed substream nesting seeds — the
+  builder's `+1+i` offset reused across scales aliases inner 0's member-0 stream with
+  inner 1's voter stream, negative-pinned), `build_ext8_group`/`_inners`/`_meta`, and
+  `run_nested_instrumented` (mirrors `GroupAgent::act` draw-for-draw while recording
+  each inner group's vote stream; gate G1 pins it byte-identical to a `GroupAgent`-built
+  twin in both meta modes, G2 live-seam, G3 determinism).
+- `bin/extension8` (master seed `0xE8_2026`, 5 cells × 2 fixtures × 30 reps, ~70 s):
+  **recovery is scale-free** — meta α ≈ flat α (ratio 0.95–1.06) at every nesting shape
+  (4×4/2×8/8×2) on both fixtures, inner-group αs 0.495–0.508 vs true 0.5; CW meta
+  voting is the one systematic scale effect (≈ +12% α, largest divergence under the
+  contested fixture); fixture contrast is seam liveness (5–7% vs 31–64% of steps moved),
+  not recovery degeneracy — canonical recovers TIGHTER, and the stream concentration is
+  the member's, not the nesting's. Findings guard-pinned; report
+  `docs/extension8-nesting.md`.
+- Test suite 220 → 227.
 
 2026-08-01 (#40 — extension 4 study, POMDP sensory/active slots):
 
