@@ -2,57 +2,10 @@
 
 ## [Unreleased]
 
-### aif 0.12.0 (manifest bumped 2026-07-25; tag pending — cut at the Phase-3 release point)
-
-- Nesting (#41, closes the #39 deferral): `impl<S: Agent, I: InternalAgent> InternalAgent
-  for GroupAgent<S, I, VotingAgent>` — a group can be a member of an outer group.
-  `action_probabilities` returns the distribution the group's voter WOULD have sampled
-  from (CW confidence-weighted mixture / normalized vote counts / uniform-over-winners)
-  with NO voter-rng draw — sampling moves up to the outer group; `record_action` is a
-  no-op (VotingAgent is stateless across steps; members already advanced); `reseed`
-  applies the builder scheme (members `s+1+i`, voter `s`, group rng `s+0x9E37_79B9`;
-  the sensory slot is not reseeded — documented). Scoped to the concrete `VotingAgent`
-  aggregator (`Aggregator` is a sampling interface with no distribution surface).
-  `VotingAgent::reseed` added (pub, mirrors `POMDPAgent::reseed`); private
-  `vote_counts`/`vote_distribution`/`weighted_mixture` extracted — `aggregate`'s
-  Probabilistic branch still samples the INTEGER counts (f64 weights would change RNG
-  consumption; byte-reproducibility pinned). Figures byte-identical; extension4 guards
-  hold.
-- Trait-object groundwork for extensions 4/8 (#39): new `InternalAgent: Agent` trait
-  (`action_probabilities`/`record_action`/`reseed` — the member-slot surface
-  `GroupAgent` actually uses; dyn-compatible, `POMDPAgent` implements it, blanket
-  impls make `Box<dyn InternalAgent>`/`Box<dyn Agent>` usable) and new `Aggregator`
-  trait (`aggregate`/`aggregate_weighted`/`mode`; `VotingAgent` implements it).
-  `GroupAgent` is now generic over its three blanket slots with paper-faithful
-  defaults — `GroupAgent<S: Agent = CopyAgent, I: InternalAgent = POMDPAgent,
-  X: Aggregator = VotingAgent>` — so the unparameterized type, `new`/`new_with_seed`,
-  and the builder are source- and bit-identical to before (`internal_agents()` now
-  returns `&[I]`, concretely `&[POMDPAgent]` at the defaults). Custom slots arrive
-  via `with_slots`/`with_slots_seeded` (seeds only the group RNG, same
-  `+0x9E37_79B9` offset; slot RNGs are the caller's). `InternalAgent for GroupAgent`
-  (nesting) is deliberately deferred to extension 8. All figures byte-identical;
-  reproduce runners `run_group_simulation`/`run_single_simulation` are now generic
-  over `Agent` (the group runner delegates to the single one).
-- Workspace-level `[workspace.package]` inheritance for `edition`/`license`/`repository`
-  (both crate manifests now use `edition.workspace = true` etc.); `version` and
-  `description` deliberately stay per-crate (aif 0.11.0, reproduce 0.5.0 — versions and
-  descriptions differ, so inheriting them would be wrong — a deliberate deviation from
-  issue #9's literal "version" mention, already owner-surfaced).
-- `serde` is now an optional, default-off feature (`features = ["serde"]`) gating the
-  `Serialize`/`Deserialize` derives on the `communication` module's message types
-  (`Message`, `MessageContent`, `InfoRequestType`); default builds no longer pull in
-  serde at all.
-- Non-behavioral hardening from the #11 pedantic burn-down (all anchors and seeded
-  pins bit-identical): the three `n_actions.pow(policy_depth as u32)` sites now
-  `u32::try_from(..).expect("invariant: ..")` instead of truncating (a wrap would have
-  silently mis-sized `E`), `POMDPAgent::from_model` / `with_params` gained `# Panics`
-  sections documenting that path, `CommunicationChannel::new` gained `#[must_use]`,
-  and two `self.beliefs = ..clone()` writes became `clone_from`.
-
 ### reproduce harness (unversioned; no `aif` engine change, no release required)
 
-2026-08-01 (#41 — extension 8 study, nested groups; the aif side is the 0.12.0 nesting
-bullet above):
+2026-08-01 (#41 — extension 8 study, nested groups; the aif side is the [0.12.0] nesting
+bullet below):
 
 - New `ext8` module: `inner_group_seed` (avalanche-mixed substream nesting seeds — the
   builder's `+1+i` offset reused across scales aliases inner 0's member-0 stream with
@@ -187,6 +140,57 @@ release and downstream pins are unaffected.
   identifiability open → #30); β₀/ψ analytically unidentifiable on the MAB
   (deterministic B ⇒ inert γ/β loop).
 - Test suite 149 → 167; all four study binaries byte-reproducible across runs.
+
+## [0.12.0] - 2026-08-01
+
+Engine release riding the Phase-3 arc (#39 generic slots, #41 nesting, #9 serde
+gating, #11 hardening); manifest was bumped 2026-07-25, tag cut 2026-08-01 at the
+ext-8 groundwork landing per the owner tag-timing decision.
+
+- Nesting (#41, closes the #39 deferral): `impl<S: Agent, I: InternalAgent> InternalAgent
+  for GroupAgent<S, I, VotingAgent>` — a group can be a member of an outer group.
+  `action_probabilities` returns the distribution the group's voter WOULD have sampled
+  from (CW confidence-weighted mixture / normalized vote counts / uniform-over-winners)
+  with NO voter-rng draw — sampling moves up to the outer group; `record_action` is a
+  no-op (VotingAgent is stateless across steps; members already advanced); `reseed`
+  applies the builder scheme (members `s+1+i`, voter `s`, group rng `s+0x9E37_79B9`;
+  the sensory slot is not reseeded — documented). Scoped to the concrete `VotingAgent`
+  aggregator (`Aggregator` is a sampling interface with no distribution surface).
+  `VotingAgent::reseed` added (pub, mirrors `POMDPAgent::reseed`); private
+  `vote_counts`/`vote_distribution`/`weighted_mixture` extracted — `aggregate`'s
+  Probabilistic branch still samples the INTEGER counts (f64 weights would change RNG
+  consumption; byte-reproducibility pinned). Figures byte-identical; extension4 guards
+  hold.
+- Trait-object groundwork for extensions 4/8 (#39): new `InternalAgent: Agent` trait
+  (`action_probabilities`/`record_action`/`reseed` — the member-slot surface
+  `GroupAgent` actually uses; dyn-compatible, `POMDPAgent` implements it, blanket
+  impls make `Box<dyn InternalAgent>`/`Box<dyn Agent>` usable) and new `Aggregator`
+  trait (`aggregate`/`aggregate_weighted`/`mode`; `VotingAgent` implements it).
+  `GroupAgent` is now generic over its three blanket slots with paper-faithful
+  defaults — `GroupAgent<S: Agent = CopyAgent, I: InternalAgent = POMDPAgent,
+  X: Aggregator = VotingAgent>` — so the unparameterized type, `new`/`new_with_seed`,
+  and the builder are source- and bit-identical to before (`internal_agents()` now
+  returns `&[I]`, concretely `&[POMDPAgent]` at the defaults). Custom slots arrive
+  via `with_slots`/`with_slots_seeded` (seeds only the group RNG, same
+  `+0x9E37_79B9` offset; slot RNGs are the caller's). `InternalAgent for GroupAgent`
+  (nesting) is deliberately deferred to extension 8. All figures byte-identical;
+  reproduce runners `run_group_simulation`/`run_single_simulation` are now generic
+  over `Agent` (the group runner delegates to the single one).
+- Workspace-level `[workspace.package]` inheritance for `edition`/`license`/`repository`
+  (both crate manifests now use `edition.workspace = true` etc.); `version` and
+  `description` deliberately stay per-crate (aif 0.11.0, reproduce 0.5.0 — versions and
+  descriptions differ, so inheriting them would be wrong — a deliberate deviation from
+  issue #9's literal "version" mention, already owner-surfaced).
+- `serde` is now an optional, default-off feature (`features = ["serde"]`) gating the
+  `Serialize`/`Deserialize` derives on the `communication` module's message types
+  (`Message`, `MessageContent`, `InfoRequestType`); default builds no longer pull in
+  serde at all.
+- Non-behavioral hardening from the #11 pedantic burn-down (all anchors and seeded
+  pins bit-identical): the three `n_actions.pow(policy_depth as u32)` sites now
+  `u32::try_from(..).expect("invariant: ..")` instead of truncating (a wrap would have
+  silently mis-sized `E`), `POMDPAgent::from_model` / `with_params` gained `# Panics`
+  sections documenting that path, `CommunicationChannel::new` gained `#[must_use]`,
+  and two `self.beliefs = ..clone()` writes became `clone_from`.
 
 ## [0.11.0] - 2026-07-17
 

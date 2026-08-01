@@ -43,10 +43,14 @@ liveness, not recovery degeneracy), **11**
 Now a **Cargo workspace** (`crates/aif` engine + `crates/reproduce` harness) serving as
 the reference active-inference engine for the koalisi coalition runtime, which consumes
 the coalition-value primitive `competence_efe` and, since koalisi's K4-v3 arm, builds a
-multi-modality `GenerativeModel` directly (koalisi pins git tag `aif-v0.11.0`, the
-current release — 0.10.0 (#10 seed API, #21 B-novelty, #3/#6 hardening), 0.10.1
+multi-modality `GenerativeModel` directly (koalisi pins git tag `aif-v0.11.0`; the
+current release is **`aif-v0.12.0`, cut 2026-08-01** — #39 generic blanket slots +
+`InternalAgent`/`Aggregator` traits, #41 nesting `InternalAgent for GroupAgent`, #9
+serde default-off gating (the one breaking rider; grep-verified no-op for koalisi),
+#11 hardening; adoption is scheduled pre-EQ4 per the stack decision. Earlier: 0.10.0
+(#10 seed API, #21 B-novelty, #3/#6 hardening), 0.10.1
 (read-only generative-model accessors), 0.11.0 (direct Dirichlet-count injection
-`initial_pa`/`initial_pb`) — the three releases cut 2026-07-17 for koalisi's
+`initial_pa`/`initial_pb`) — those three cut 2026-07-17 for koalisi's
 persistent→query handoff (structured learned counts transferable to fresh query
 agents). **The canonical-AIF parity roadmap is complete**: #12 (multi-factor,
 multi-modality, injectable B via `GenerativeModel`/`from_model`), #15 (opt-in marginal
