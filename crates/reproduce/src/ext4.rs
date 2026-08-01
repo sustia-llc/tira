@@ -601,6 +601,16 @@ mod tests {
             "G3: sharp-limit aggregator must announce the majority in >= 90% of \
              post-burn-in steps, got {rate:.3} ({hits}/{scored})"
         );
+        // The exact pin behind the docs' "gate 180/180" claim: the fixture is fully
+        // deterministic under the fixed seed, so the sharp limit is not just >= 90% —
+        // it is EXACT here. A drop to e.g. 170/180 is a numerics change that must
+        // fail loudly, not hide behind the 90% floor (PR #44 review finding).
+        assert_eq!(
+            (hits, scored),
+            (180, 180),
+            "G3: the seeded sharp-limit fixture must track the majority exactly \
+             (docs cite the pinned 180/180)"
+        );
         Ok(())
     }
 
