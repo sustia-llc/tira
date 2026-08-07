@@ -80,7 +80,7 @@ pub fn inner_group_seed(gseed: u64, index: usize) -> u64 {
 ///
 /// # Errors
 /// Anything [`POMDPAgent::new`] rejects (e.g. an `observation_probs` whose length
-/// is not [`N_ARMS`]).
+/// is not `N_ARMS`).
 pub fn build_ext8_group(
     n_members: usize,
     alpha: f64,

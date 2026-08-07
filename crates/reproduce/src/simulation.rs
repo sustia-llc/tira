@@ -156,7 +156,7 @@ pub fn log_likelihood_learning(
 }
 
 /// Standard deviation of the paper's half-normal α prior. Single-sourced: used by
-/// [`half_normal_log_prior`], the scalar MCMC chains' overdispersed-init spread, and the
+/// `half_normal_log_prior`, the scalar MCMC chains' overdispersed-init spread, and the
 /// study binaries' α priors/init spreads.
 pub const PRIOR_SD: f64 = 4.0;
 

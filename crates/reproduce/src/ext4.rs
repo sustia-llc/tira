@@ -79,7 +79,7 @@ const N_ARMS: usize = 3;
 ///   (`x^0 = 1`).
 ///
 /// The RNG is the filter's own, seeded at construction, and is independent of the
-/// members', the voter's and the group's streams — so swapping [`CopyAgent`] for a
+/// members', the voter's and the group's streams — so swapping [`aif::CopyAgent`] for a
 /// `q = 1` `SensoryFilter` perturbs nothing downstream.
 #[derive(Debug)]
 pub struct SensoryFilter {
