@@ -3,10 +3,139 @@
 #![allow(clippy::cast_precision_loss)]
 
 use reproduce::{
-    CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel, Message, MessageContent,
-    MultiAgentEnvironment, AifError, POMDPAgent, SharedBanditEnvironment, env_seed, group_seed,
-    substream,
+    AifError, CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel, Message,
+    MessageContent, MultiAgentEnvironment, POMDPAgent, SharedBanditEnvironment, env_seed,
+    group_seed, substream,
 };
+
+/// A minimal wrapped agent for the cadence tests — the emission schedule is independent
+/// of what the wrapped agent decides.
+fn cadence_agent(frequency: usize) -> Result<CommunicatingPOMDPAgent, AifError> {
+    let base = POMDPAgent::new(3, Some(vec![0.8, 0.2, 0.2]), None, vec![0.7, 0.3], None, 8.0, false)?;
+    Ok(CommunicatingPOMDPAgent::new(base, 0, true, frequency))
+}
+
+/// Issue #5.1: for any `communication_frequency >= 1`, emission could never fire — the
+/// counter was incremented and reset inside the same call, so its observable values were
+/// `0..frequency-1` and the `>= frequency` test was unreachable. These pin the fixed
+/// cadence at the two frequencies named in the issue, plus the emission-resets-the-counter
+/// invariant that makes the schedule periodic rather than one-shot.
+#[test]
+fn test_emission_cadence_every_step() -> Result<(), AifError> {
+    let mut agent = cadence_agent(1)?;
+    let mut emissions = Vec::new();
+    for _ in 0..6 {
+        agent.act_with_communication(0, Vec::new())?;
+        emissions.push(agent.generate_messages().len());
+    }
+    assert_eq!(
+        emissions,
+        vec![1, 1, 1, 1, 1, 1],
+        "f = 1 must emit on every step"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_emission_cadence_every_third_step() -> Result<(), AifError> {
+    let mut agent = cadence_agent(3)?;
+    let mut emissions = Vec::new();
+    for _ in 0..9 {
+        agent.act_with_communication(0, Vec::new())?;
+        emissions.push(agent.generate_messages().len());
+    }
+    assert_eq!(
+        emissions,
+        vec![0, 0, 1, 0, 0, 1, 0, 0, 1],
+        "f = 3 must emit on every third step, periodically"
+    );
+    Ok(())
+}
+
+/// `share_actions = false` silences emission at every cadence — the flag is read, not
+/// merely stored.
+#[test]
+fn test_share_actions_false_never_emits() -> Result<(), AifError> {
+    let base = POMDPAgent::new(3, Some(vec![0.8, 0.2, 0.2]), None, vec![0.7, 0.3], None, 8.0, false)?;
+    let mut agent = CommunicatingPOMDPAgent::new(base, 0, false, 1);
+    for _ in 0..4 {
+        agent.act_with_communication(0, Vec::new())?;
+        assert!(agent.generate_messages().is_empty());
+    }
+    Ok(())
+}
+
+/// Issue #5.3: broadcast (`recipient_id: None`) and non-default priorities were both
+/// unconstructible through the public API. Both are now reachable, and `receive_all`'s
+/// priority sort — previously sorting a field that was always `None` — has something to
+/// order.
+#[test]
+fn test_broadcast_reaches_every_other_agent() -> Result<(), AifError> {
+    let channel = CommunicationChannel::new(3);
+    let delivered = channel.broadcast(1, &MessageContent::Action(2), None)?;
+    assert_eq!(delivered, 2, "broadcast skips the sender");
+
+    for recipient in [0, 2] {
+        let messages = channel.receive_all(recipient)?;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].sender_id, 1);
+        assert!(
+            messages[0].recipient_id.is_none(),
+            "a broadcast carries no single recipient"
+        );
+        assert_eq!(format!("{}", messages[0]), "From Agent 1 to Everyone: Action: 2 (t=0)");
+    }
+    assert!(!channel.has_messages(1)?, "the sender receives nothing");
+    Ok(())
+}
+
+#[test]
+fn test_receive_all_orders_by_priority_then_timestamp() -> Result<(), AifError> {
+    let mut channel = CommunicationChannel::new(2);
+    channel.send(1, 0, MessageContent::Text("no-priority".into()))?;
+    channel.send_with_priority(1, 0, MessageContent::Text("low".into()), 1)?;
+    channel.advance_step();
+    channel.send_with_priority(1, 0, MessageContent::Text("high-late".into()), 9)?;
+    channel.send_with_priority(1, 0, MessageContent::Text("low-late".into()), 1)?;
+
+    let ordered: Vec<String> = channel
+        .receive_all(0)?
+        .iter()
+        .map(|m| match &m.content {
+            MessageContent::Text(t) => t.clone(),
+            other => panic!("unexpected content: {other:?}"),
+        })
+        .collect();
+
+    assert_eq!(
+        ordered,
+        vec!["high-late", "low", "low-late", "no-priority"],
+        "highest priority first; oldest first within a priority; absent priority sorts as 0"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_channel_rejects_unknown_agent_ids() {
+    let channel = CommunicationChannel::new(2);
+    assert!(matches!(
+        channel.send(0, 7, MessageContent::Action(0)),
+        Err(AifError::InvalidAgentId(7))
+    ));
+    assert!(matches!(
+        channel.broadcast(7, &MessageContent::Action(0), None),
+        Err(AifError::InvalidAgentId(7))
+    ));
+    assert!(matches!(
+        channel.receive_all(7),
+        Err(AifError::InvalidAgentId(7))
+    ));
+    assert!(matches!(
+        channel.has_messages(7),
+        Err(AifError::InvalidAgentId(7))
+    ));
+    assert_eq!(channel.n_agents(), 2);
+}
 
 struct TestEnvironment {
     actions: Vec<Vec<usize>>,
@@ -88,9 +217,8 @@ fn test_communicating_agents() -> Result<(), AifError> {
     )?;
     base_agent2.reseed(substream(group_seed(SEED), 2));
 
-    let mut agent1 = CommunicatingPOMDPAgent::new(base_agent1, 0, n_bandits, true, true, false, 3);
-    let mut agent2 =
-        CommunicatingPOMDPAgent::new(base_agent2, 1, n_bandits, false, true, false, 2);
+    let mut agent1 = CommunicatingPOMDPAgent::new(base_agent1, 0, true, 3);
+    let mut agent2 = CommunicatingPOMDPAgent::new(base_agent2, 1, true, 2);
 
     let mut prev_obs1 = 0;
     let mut prev_obs2 = 0;
@@ -170,8 +298,19 @@ fn test_communicating_agents() -> Result<(), AifError> {
         }
     }
 
-    println!("Agent 1 sent {} messages", test_env.messages_sent[0].len());
-    println!("Agent 2 sent {} messages", test_env.messages_sent[1].len());
+    // Issue #5.1 regression pin: before the cadence fix BOTH counts were 0 — emission
+    // could never fire. Agent 1 (f = 3) emits on steps 3,6,…,30; agent 2 (f = 2) on
+    // steps 2,4,…,30.
+    assert_eq!(
+        test_env.messages_sent[0].len(),
+        10,
+        "agent 1 at f = 3 over 30 steps"
+    );
+    assert_eq!(
+        test_env.messages_sent[1].len(),
+        15,
+        "agent 2 at f = 2 over 30 steps"
+    );
 
     let count_actions = |actions: &[usize]| {
         let mut counts = vec![0; n_bandits];
@@ -246,8 +385,8 @@ fn test_cooperative_communication() -> Result<(), AifError> {
         false,
     )?;
 
-    let mut agent1 = CommunicatingPOMDPAgent::new(base_agent1, 0, n_bandits, false, true, true, 1);
-    let mut agent2 = CommunicatingPOMDPAgent::new(base_agent2, 1, n_bandits, false, true, true, 1);
+    let mut agent1 = CommunicatingPOMDPAgent::new(base_agent1, 0, true, 1);
+    let mut agent2 = CommunicatingPOMDPAgent::new(base_agent2, 1, true, 1);
 
     let mut prev_obs1 = 0;
     let mut prev_obs2 = 0;

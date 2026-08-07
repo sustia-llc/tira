@@ -2,6 +2,50 @@
 
 ## [Unreleased]
 
+### aif engine (unreleased)
+
+2026-08-07 (#5 — `communication.rs`: cadence fix, dead-surface trim, feature gate):
+
+- **BREAKING (feature-gated surface): the `communication` module is now behind a
+  default-off `communication` feature**, and `flume` is an optional dependency. The
+  module is latent extension-6 scaffolding that is not wired into the group-agent
+  pipeline, so downstream consumers no longer carry a channel dependency to reach it.
+  Enable with `features = ["communication"]`. Verified: with the feature off, `flume`
+  is not compiled at all.
+- **Fixed: emission could never fire for any `communication_frequency >= 1.`**
+  `update_communication_counter` incremented and reset inside the same call, so the
+  counter's observable values were `0..frequency-1` and `should_communicate`'s
+  `>= frequency` test was unreachable. The counter is now advanced by
+  `act_with_communication` and reset by `generate_messages` **only when it actually
+  emits**, which also makes the schedule periodic rather than one-shot. Cadence is
+  test-pinned at `f = 1` and `f = 3`.
+  - `CommunicatingAgent::generate_messages` therefore takes `&mut self` (the check and
+    the reset must happen together).
+  - Verified behaviourally neutral: on the seeded two-agent integration fixture the
+    action distributions are **unchanged** (`[13,10,7]` / `[13,11,6]`) while messages
+    sent go `0 / 0 → 10 / 15`. Received messages have no decision effect — see the trim
+    below.
+- **Removed (unreachable surfaces).** `CommunicatingPOMDPAgent` loses `share_beliefs`
+  and `current_beliefs` (the latter was never populated, so the former could never
+  fire), `share_rewards` (stored, never read), `agent_action_beliefs` with its
+  `update_agent_beliefs` writer (a write-only sink — nothing ever read it back), and
+  `n_actions` (used only by that writer). Constructor is now
+  `new(agent, id, share_actions, communication_frequency)`. Wiring messages into
+  inference is issue #46's subject, not an implied contract here.
+- **Added (previously unconstructible).** `CommunicationChannel::broadcast` — `send`
+  hardcoded `recipient_id: Some(..)`, so the `Message::recipient_id: None` broadcast
+  form could not be built through the public API; `send_with_priority` — `priority` was
+  hardcoded `None`, so `receive_all`'s priority sort had nothing to order; `n_agents`;
+  and an `InfoRequestType` re-export, without which `MessageContent::RequestInfo` was
+  unconstructible by downstream callers.
+
+2026-08-07 (#43 — rustdoc intra-doc links): all `cargo doc --workspace --no-deps`
+warnings resolved (**10**, not the 7 the issue estimated — its own list summed to 8 and
+predated the two sites added by #40/#41). Dropped a redundant `#panics` anchor, de-linked
+four private items (`mmp_messages`, `N_ARMS`, `half_normal_log_prior`), qualified
+`aif::CopyAgent`, and gave the bin-doc links full `reproduce::` paths (bin doc scope
+cannot see lib items). No behaviour change.
+
 ### reproduce harness (unversioned; no `aif` engine change, no release required)
 
 2026-08-01 (#41 — extension 8 study, nested groups; the aif side is the [0.12.0] nesting

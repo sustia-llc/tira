@@ -13,6 +13,9 @@ use thiserror::Error;
 
 mod agent;
 mod coalition;
+/// Latent extension-6 scaffolding; default-off since issue #5 so downstream consumers
+/// do not carry `flume` for a module they never reach.
+#[cfg(feature = "communication")]
 mod communication;
 mod group;
 mod special;
@@ -25,9 +28,10 @@ pub use coalition::{
     AgentId, CoalitionHistory, CompatibilityBeliefs, ObsPrecisionParams, TrustBeliefs,
     belief_weighted_preference, competence_efe,
 };
+#[cfg(feature = "communication")]
 pub use communication::{
-    AgentMessage, CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel, Message,
-    MessageContent,
+    AgentMessage, CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel, InfoRequestType,
+    Message, MessageContent,
 };
 pub use group::{Aggregator, GroupAgent, GroupAgentBuilder, VotingAgent, VotingMode};
 

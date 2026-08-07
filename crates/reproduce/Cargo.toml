@@ -8,7 +8,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-aif = { path = "../aif" }
+# The harness opts into `communication` so the extension-6 scaffolding stays compiled
+# and tested in-tree (issue #5); the feature exists to spare *external* consumers.
+aif = { path = "../aif", features = ["communication"] }
 nalgebra = { workspace = true }
 rand = { workspace = true }
 rand_distr = { workspace = true }

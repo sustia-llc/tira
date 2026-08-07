@@ -1,8 +1,20 @@
 //! Reserved infrastructure for the paper's §4.1 network-communication extension
-//! (Extension #6): network topologies where only some internal agents communicate
-//! directly with the active agent, with influence routed through intermediate
-//! connections. This module is currently exercised only by tests — it is not yet
-//! wired into the group-agent pipeline.
+//! (extension 6, tracked as issue #46): network topologies where only some internal
+//! agents communicate directly with the active agent, with influence routed through
+//! intermediate connections. This module is currently exercised only by tests — it is
+//! not wired into the group-agent pipeline.
+//!
+//! Behind the default-off `communication` feature since issue #5, so that downstream
+//! consumers of the engine do not carry a channel dependency for a module they never
+//! reach.
+//!
+//! **Scope, deliberately narrow (issue #5).** The module demonstrates message
+//! *transport* and emission *cadence*, and nothing more: received messages have **no
+//! effect on any agent's decision**. The belief-sharing and reward-sharing surfaces
+//! that previously suggested otherwise were unreachable — `current_beliefs` was never
+//! populated, `share_rewards` was stored and never read, and the received-action
+//! belief map was a write-only sink — so they were removed rather than left as an
+//! implied contract. Wiring messages into inference is issue #46's subject.
 
 use crate::{Agent, AifError};
 use flume::{Receiver, Sender};
@@ -31,6 +43,12 @@ pub enum InfoRequestType {
     Custom(String),
 }
 
+/// A message in transit.
+///
+/// `recipient_id` is `None` for a broadcast (see
+/// [`CommunicationChannel::broadcast`]); the same message is then delivered into every
+/// other agent's queue. `priority` orders delivery within a step — see
+/// [`CommunicationChannel::receive_all`].
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Message {
@@ -90,29 +108,120 @@ impl CommunicationChannel {
         }
     }
 
-    #[allow(clippy::missing_errors_doc)]
+    /// Number of agents this channel was built for.
+    #[must_use]
+    pub fn n_agents(&self) -> usize {
+        self.senders.len()
+    }
+
+    /// Push `message` into `recipient_id`'s queue.
+    fn deliver(&self, recipient_id: usize, message: Message) -> Result<(), AifError> {
+        let Some(tx) = self.senders.get(&recipient_id) else {
+            return Err(AifError::InvalidAgentId(recipient_id));
+        };
+        tx.send(message)
+            .map_err(|e| AifError::Communication(e.to_string()))
+    }
+
+    /// Send `content` to a single recipient at the default (lowest) priority.
+    ///
+    /// # Errors
+    ///
+    /// [`AifError::InvalidAgentId`] if `recipient_id` is not one of this channel's
+    /// agents; [`AifError::Communication`] if the recipient's queue is disconnected.
     pub fn send(
         &self,
         sender_id: usize,
         recipient_id: usize,
         content: MessageContent,
     ) -> Result<(), AifError> {
-        if let Some(tx) = self.senders.get(&recipient_id) {
-            let message = Message {
+        self.deliver(
+            recipient_id,
+            Message {
                 sender_id,
                 recipient_id: Some(recipient_id),
                 content,
                 priority: None,
                 timestamp: self.current_step,
-            };
-            tx.send(message)
-                .map_err(|e| AifError::Communication(e.to_string()))
-        } else {
-            Err(AifError::InvalidAgentId(recipient_id))
-        }
+            },
+        )
     }
 
-    #[allow(clippy::missing_errors_doc)]
+    /// Send `content` to a single recipient at an explicit `priority`.
+    ///
+    /// Higher values are delivered first by [`receive_all`](Self::receive_all); an
+    /// absent priority sorts as `0`.
+    ///
+    /// # Errors
+    ///
+    /// As [`send`](Self::send).
+    pub fn send_with_priority(
+        &self,
+        sender_id: usize,
+        recipient_id: usize,
+        content: MessageContent,
+        priority: u8,
+    ) -> Result<(), AifError> {
+        self.deliver(
+            recipient_id,
+            Message {
+                sender_id,
+                recipient_id: Some(recipient_id),
+                content,
+                priority: Some(priority),
+                timestamp: self.current_step,
+            },
+        )
+    }
+
+    /// Deliver `content` to every agent except `sender_id`, as a broadcast
+    /// (`recipient_id: None`).
+    ///
+    /// Returns the number of recipients the message was delivered to.
+    ///
+    /// # Errors
+    ///
+    /// [`AifError::InvalidAgentId`] if `sender_id` is not one of this channel's
+    /// agents; [`AifError::Communication`] if any recipient's queue is disconnected.
+    /// Delivery is not atomic — an error partway through leaves earlier recipients
+    /// holding the message.
+    pub fn broadcast(
+        &self,
+        sender_id: usize,
+        content: &MessageContent,
+        priority: Option<u8>,
+    ) -> Result<usize, AifError> {
+        if !self.senders.contains_key(&sender_id) {
+            return Err(AifError::InvalidAgentId(sender_id));
+        }
+
+        // Deterministic recipient order: `senders` is a HashMap, so iterate the index
+        // range rather than its arbitrary iteration order.
+        let mut delivered = 0;
+        for recipient_id in 0..self.senders.len() {
+            if recipient_id == sender_id {
+                continue;
+            }
+            self.deliver(
+                recipient_id,
+                Message {
+                    sender_id,
+                    recipient_id: None,
+                    content: content.clone(),
+                    priority,
+                    timestamp: self.current_step,
+                },
+            )?;
+            delivered += 1;
+        }
+        Ok(delivered)
+    }
+
+    /// Whether `agent_id` has any undelivered messages.
+    ///
+    /// # Errors
+    ///
+    /// [`AifError::InvalidAgentId`] if `agent_id` is not one of this channel's agents.
     pub fn has_messages(&self, agent_id: usize) -> Result<bool, AifError> {
         if let Some(rx) = self.receivers.get(&agent_id) {
             Ok(!rx.is_empty())
@@ -121,7 +230,12 @@ impl CommunicationChannel {
         }
     }
 
-    #[allow(clippy::missing_errors_doc)]
+    /// Drain `agent_id`'s queue, highest priority first and oldest first within a
+    /// priority (an absent priority sorts as `0`).
+    ///
+    /// # Errors
+    ///
+    /// [`AifError::InvalidAgentId`] if `agent_id` is not one of this channel's agents.
     pub fn receive_all(&self, agent_id: usize) -> Result<Vec<Message>, AifError> {
         let mut messages = Vec::new();
 
@@ -156,7 +270,13 @@ pub struct AgentMessage {
 #[allow(clippy::missing_errors_doc)]
 pub trait CommunicatingAgent: Agent {
     fn process_messages(&mut self, messages: Vec<Message>) -> Result<(), AifError>;
-    fn generate_messages(&self) -> Vec<AgentMessage>;
+
+    /// Emit this step's outgoing messages, if the emission cadence is due.
+    ///
+    /// Takes `&mut self` because emitting resets the cadence counter — the check and
+    /// the reset must happen together (issue #5).
+    fn generate_messages(&mut self) -> Vec<AgentMessage>;
+
     fn act_with_communication(
         &mut self,
         observation: usize,
@@ -164,20 +284,21 @@ pub trait CommunicatingAgent: Agent {
     ) -> Result<usize, AifError>;
 }
 
+/// A [`POMDPAgent`](crate::POMDPAgent) wrapped with message transport.
+///
+/// Received messages are recorded in `message_history` and **do not influence the
+/// wrapped agent's decisions** — see the module docs. The one live behaviour is
+/// cadence: the agent emits its last selected action every `communication_frequency`
+/// steps when `share_actions` is set.
 pub struct CommunicatingPOMDPAgent {
     pub agent: crate::POMDPAgent,
     pub id: usize,
-    pub share_beliefs: bool,
     pub share_actions: bool,
-    pub share_rewards: bool,
     pub message_history: Vec<Message>,
-    /// `agent_id` → per-action belief weights
-    pub agent_action_beliefs: HashMap<usize, Vec<f64>>,
+    /// Emit every `n`th step. `0` and `1` both emit every step.
     pub communication_frequency: usize,
     pub steps_since_communication: usize,
-    pub n_actions: usize,
     pub last_selected_action: Option<usize>,
-    pub current_beliefs: Option<Vec<f64>>,
 }
 
 impl CommunicatingPOMDPAgent {
@@ -185,60 +306,29 @@ impl CommunicatingPOMDPAgent {
     pub fn new(
         agent: crate::POMDPAgent,
         id: usize,
-        n_actions: usize,
-        share_beliefs: bool,
         share_actions: bool,
-        share_rewards: bool,
         communication_frequency: usize,
     ) -> Self {
         Self {
             agent,
             id,
-            share_beliefs,
             share_actions,
-            share_rewards,
             message_history: Vec::new(),
-            agent_action_beliefs: HashMap::new(),
             communication_frequency,
             steps_since_communication: 0,
-            n_actions,
             last_selected_action: None,
-            current_beliefs: None,
         }
     }
 
-    fn update_agent_beliefs(&mut self, sender_id: usize, action: usize) {
-        let n = self.n_actions;
-        let beliefs = self
-            .agent_action_beliefs
-            .entry(sender_id)
-            .or_insert_with(|| vec![1.0 / n as f64; n]);
-
-        for (i, belief) in beliefs.iter_mut().enumerate() {
-            if i == action {
-                *belief += 0.1;
-            } else {
-                *belief *= 0.9;
-            }
-        }
-
-        let sum: f64 = beliefs.iter().sum();
-        if sum > 0.0 {
-            for belief in beliefs.iter_mut() {
-                *belief /= sum;
-            }
-        }
-    }
-
+    /// Whether an emission is due.
+    ///
+    /// The counter is advanced by [`act_with_communication`](CommunicatingAgent::act_with_communication)
+    /// and reset by [`generate_messages`](CommunicatingAgent::generate_messages) — and
+    /// only when it actually emits. Resetting anywhere else is the issue-#5 bug: the
+    /// old code incremented and reset inside the same call, so the counter's observable
+    /// values were `0..frequency-1` and the `>= frequency` test could never be true.
     fn should_communicate(&self) -> bool {
         self.steps_since_communication >= self.communication_frequency
-    }
-
-    fn update_communication_counter(&mut self) {
-        self.steps_since_communication += 1;
-        if self.steps_since_communication >= self.communication_frequency {
-            self.steps_since_communication = 0;
-        }
     }
 }
 
@@ -252,31 +342,20 @@ impl Agent for CommunicatingPOMDPAgent {
 
 impl CommunicatingAgent for CommunicatingPOMDPAgent {
     fn process_messages(&mut self, messages: Vec<Message>) -> Result<(), AifError> {
-        self.message_history.extend(messages.iter().cloned());
+        self.message_history.extend(messages);
         if self.message_history.len() > 100 {
             self.message_history.drain(0..50);
-        }
-        for message in &messages {
-            if let MessageContent::Action(action) = &message.content {
-                self.update_agent_beliefs(message.sender_id, *action);
-            }
         }
         Ok(())
     }
 
-    fn generate_messages(&self) -> Vec<AgentMessage> {
-        let mut messages = Vec::new();
+    fn generate_messages(&mut self) -> Vec<AgentMessage> {
         if !self.should_communicate() {
-            return messages;
+            return Vec::new();
         }
-        if self.share_beliefs
-            && let Some(ref beliefs) = self.current_beliefs
-        {
-            messages.push(AgentMessage {
-                sender_id: self.id,
-                content: MessageContent::Beliefs(beliefs.clone()),
-            });
-        }
+        self.steps_since_communication = 0;
+
+        let mut messages = Vec::new();
         if self.share_actions
             && let Some(action) = self.last_selected_action
         {
@@ -296,7 +375,7 @@ impl CommunicatingAgent for CommunicatingPOMDPAgent {
         self.process_messages(messages)?;
         let action = self.agent.act(observation)?;
         self.last_selected_action = Some(action);
-        self.update_communication_counter();
+        self.steps_since_communication += 1;
         Ok(action)
     }
 }

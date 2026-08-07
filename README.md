@@ -188,7 +188,7 @@ Environment (BanditEnvironment)
 | `crates/aif/src/agent.rs` | POMDP active inference agent: A–E matrices (multi-factor/multi-modality via `GenerativeModel`), expected free energy G (pragmatic + info-gain + novelty), α/γ precision, Dirichlet learning (pA/pB/pD/pE, η/ω, `parameter_free_energies()`), `StateInference` (MeanField / marginal message passing), `variational_free_energy()`, opt-in `PrecisionDynamics` (Smith Table 2 γ/β loop) |
 | `crates/aif/src/group.rs` | VotingMode, GroupAgent (generic blanket slots since #39; nests via `InternalAgent for GroupAgent`, #41), VotingAgent (discrete + certainty-weighted), GroupAgentBuilder |
 | `crates/aif/src/coalition.rs` | `competence_efe` + `ObsPrecisionParams` (the coalition-value primitive, opt-in `transition_noise` since 0.6.0), `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory`, `belief_weighted_preference` |
-| `crates/aif/src/communication.rs` | Flume-based inter-agent messaging (for extended scenarios) |
+| `crates/aif/src/communication.rs` | Flume-based inter-agent messaging — latent scaffolding for extension 6, behind the default-off `communication` feature (#5) |
 | `crates/reproduce/src/simulation.rs` | Simulation runner, parameter recovery (grid MAP: `recover_alpha[_learning]`; MCMC: `recover_alpha_mcmc[_learning]`, #25; vector MH `recover_mcmc_vec` + `McmcVecConfig`/`ModelParams`/`log_likelihood_params` with `ProposalMode` JointScale/Covariance proposals, extension 2 / #29+#30), 5 experiment factories taking `&ExperimentOpts` (seed + optional A-learning) |
 | `crates/reproduce/src/plotter.rs` | Figure rendering for `bin/reproduce.rs` — `plot_figure4`/`plot_figure5`/`plot_figure6` (consolidated per #7; the binary is orchestration-only) |
 | `crates/reproduce/src/bin/reproduce.rs` | Full paper reproduction binary — computes the recovery/experiment data, renders via `plotter.rs`, and (#7) exits nonzero with a stderr summary if any run was dropped |
@@ -324,7 +324,7 @@ this downstream surface.
 | rand / rand_distr | Sampling, Dirichlet, Beta distributions |
 | rayon | Parallel parameter sweeps |
 | plotters | Figure generation |
-| flume | Inter-agent message channels |
+| flume | Inter-agent message channels (in `aif`, optional — pulled only by the default-off `communication` feature) |
 | thiserror | Error types |
 | serde | Trial data serialization (`reproduce`; in `aif` an optional default-off feature gating the communication-type derives) |
 

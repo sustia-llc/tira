@@ -65,7 +65,7 @@ learned per-bit precisions + novelty at fixed γ, no precision dynamics) beat th
 magnitude arm 0.4406 vs 0.2720 out-of-sample, the first arm to do so; arm choice is
 now koalisi #54 (cost-quality tradeoff)).
 
-- **227 tests** (226 `#[test]` + 1 doctest), edition 2024, 0 clippy warnings under both
+- **233 tests** (232 `#[test]` + 1 doctest), edition 2024, 0 clippy warnings under both
   the default lints **and** `-W clippy::pedantic` since #11 — pedantic is zero-warning
   *fixed-or-justified*, not pedantic-clean: benign/drift-risky lints
   (`cast_precision_loss` crate-wide, `float_cmp` on bit-identity pins, `manual_midpoint`,
@@ -85,7 +85,7 @@ is the paper-reproduction harness and depends on `aif`.
 | `crates/aif/src/agent.rs` | `Agent` trait, `CopyAgent`, `POMDPAgent` — fully factorized internals since 0.6.0: `GenerativeModel` + `AgentParams` + `from_model()` (multi-factor states, multi-modality observations, injectable per-factor-per-control B, `n_actions` decoupled), little-endian joint flattening (factor 0 fastest), mean-field state inference (single-factor short-circuits to exact one-pass Bayes), `efe_step()` neg-G, `expected_free_energy()` scalar accessor, shared `policy_posterior()`, α/γ separation, multi-step policies over joint controls, per-modality pA→A learning, `act_multi`/`action_probabilities_multi`, `action_probabilities()` replay, input validation. `new()`/`with_params()` build the 1-factor/1-modality MAB special case (numerics bit-identical to pre-0.6.0). 0.7.0: `StateInference` (MeanField default / opt-in MMP over trajectory windows, Smith Eq. 23), `variational_free_energy()`, `policy_free_energies()`, `bma_state_belief()`, `reset_window()`. 0.8.0: full learning surface — `learn_b/d/e` + concentration scales `initial_precision_b/d/e`, per-step `eta`/`omega` (defaults 1.0 bit-identical), novelty EFE term (`use_param_info_gain`, Smith Eq. 39–40), `parameter_free_energies()` (Dirichlet KL vs trial start, backed by private `special.rs` lgamma/digamma), learning-aware `action_probabilities` (replays the flag-selected generation path), MMP+learn_a lifted. 0.9.0: `PrecisionDynamics` (opt-in Table-2 γ/β loop, requires MMP; `beta()`, `gamma_trajectory()`), per-policy future-τ windows → genuinely per-policy `policy_free_energies()`, BMA write-back under dynamics. 0.10.0: `AgentParams::seed` + `reseed(u64)` (unseeded = entropy, bit-identical), `use_b_info_gain` B-novelty (pymdp `calc_pB_info_gain`, `pb > 0` mask, per-factor `next·W_B·prev` on the policy's control; a_novelty floor → same mask), `update_a` skips the MeanField t=0 obs (MMP t=0 learning retained), pA precondition centralized in `validate_agent_params`. 0.10.1: read accessors `observation_model`/`transition_model`/`state_prior`/`pa`/`pb`/`pd` (learning-aware views of A/B/D and the pA/pB/pD Dirichlet counts — `Some` iff the matching `learn_*` flag). 0.11.0: `initial_pa`/`initial_pb` count injection (A/B ≡ normalize(counts) at construction; requires `learn_a`/`learn_b`, mutually exclusive with the `initial_precision`/`initial_precision_b` scale path; learn-a/b precondition now "exactly one of scale or counts"). 0.12.0 (#39): `InternalAgent: Agent` trait (`action_probabilities`/`record_action`/`reseed` — the member-slot surface; dyn-compatible, `POMDPAgent` impl, blanket `Box<dyn …>` impls for both traits; `variational_free_energy` deliberately NOT on it — groups have no native F) |
 | `crates/aif/src/group.rs` | `VotingMode` enum (Probabilistic/Deterministic/CertaintyWeighted), `VotingAgent` (discrete votes + confidence-weighted distribution mixing), `GroupAgent` (Markov blanket: sensory→internal→active), `GroupAgentBuilder` (0.8.0: `initial_precision` setter makes `learn_a(true)` groups buildable; CW branch learns via the learning-aware replay path — #4; 0.10.0: `.seed()` reseeds every internal agent — full-pipeline determinism in ALL voting modes, streams voter = `s`, group = `s + 0x9E37_79B9`, internal i = `s + 1 + i`; 0.12.0/#39: `Aggregator` trait (`aggregate`/`aggregate_weighted`/`mode`; `VotingAgent` impl), `GroupAgent<S: Agent = CopyAgent, I: InternalAgent = POMDPAgent, X: Aggregator = VotingAgent>` generic slots — defaults bit-identical, custom slots via `with_slots`/`with_slots_seeded` (group-RNG-only seeding), `internal_agents() -> &[I]`; #41: `InternalAgent for GroupAgent<S, I, VotingAgent>` — nesting: `action_probabilities` = the distribution the voter WOULD have sampled from (CW mixture / normalized counts / uniform-over-winners; extracted private `vote_distribution`/`weighted_mixture`), NO voter draw, sampling moves up; `record_action` no-op; `reseed` = builder scheme (sensory slot not reseeded — documented); `VotingAgent::reseed` pub; aggregate's Probabilistic branch still samples INTEGER counts — f64 weights would change RNG consumption, bit-identity pinned) |
 | `crates/aif/src/coalition.rs` | `competence_efe()` + `ObsPrecisionParams` — the reusable coalition-**value** primitive (scalar competence `c∈[0,1]` → observation precision → G; the supported bridge for downstream value calculators). `ObsPrecisionParams.transition_noise` (0.6.0, default 0.0) opts into a stochastic-B bridge POMDP so G includes the live info-gain term (note: G *rises* with noise over most of the competence range — pragmatic blurring dominates; competence monotonicity preserved). Default-parameter anchors: `G(0)=1.204, G(0.5)=0.710, G(1)=0.215`. `TrustBeliefs`/`CompatibilityBeliefs`/`CoalitionHistory` + `belief_weighted_preference()`. `CoalitionEvaluator`/`CapabilityProvider` **removed in 0.6.0** (#1) |
-| `crates/aif/src/communication.rs` | `CommunicationChannel` (flume), `Message`, `MessageContent`, `CommunicatingPOMDPAgent` — used by multi-agent tests, not by the group-agent pipeline. `Message`/`MessageContent`/`InfoRequestType` derive `Serialize`/`Deserialize` only behind the optional, default-off `serde` feature (#9) |
+| `crates/aif/src/communication.rs` | **Behind the default-off `communication` feature since #5** (`flume` is optional; feature-off ⇒ flume never compiled — the module is latent ext-6 scaffolding, not wired into the group-agent pipeline, so downstream shouldn't carry a channel dep for it). `CommunicationChannel` (flume) — `send`/`send_with_priority`/`broadcast`/`n_agents`/`has_messages`/`receive_all` (priority desc, then timestamp asc); `Message`, `MessageContent`, `InfoRequestType` (now re-exported — `RequestInfo` was unconstructible), `CommunicatingPOMDPAgent`. #5 fixed the cadence bug (counter advanced by `act_with_communication`, reset by `generate_messages` **only on emit** — the old increment-and-reset-in-one-call made `>= f` unreachable for every `f >= 1`; `generate_messages` now takes `&mut self`) and TRIMMED the unreachable surfaces (`share_beliefs`/`current_beliefs`/`share_rewards`/`agent_action_beliefs`/`n_actions` all gone; ctor is `new(agent, id, share_actions, frequency)`). **Received messages still have zero decision effect** — deliberate, wiring is #46's subject; pinned by the seeded fixture whose action distributions are unchanged by the cadence fix while messages go 0/0 → 10/15. `Message`/`MessageContent`/`InfoRequestType` derive `Serialize`/`Deserialize` only behind the optional, default-off `serde` feature (#9) |
 | `crates/aif/src/lib.rs` | `AifError` (0.10.0: `InvalidLength { expected, got }` for length/dimension mismatches; `InvalidAction` retained for genuine out-of-range actions/votes), re-exports of the engine + coalition surface |
 | `crates/reproduce/src/lib.rs` | `BanditEnvironment`, `SharedBanditEnvironment` (with `agents_acted` tracking) — both `StdRng`-backed since issue #2: `new()` = entropy, `with_seed(…, seed)` = deterministic, NOT `Clone` (rand 0.10 removed `Clone` from `StdRng`; nothing cloned them) — plus `PositionalBanditEnvironment` (extension 2b / #33: foraging restless bandit — deterministic clamped `{left, stay, right}` walk, reward at current position, good arm on a seeded hazard chain with swap semantics; two RNGs: rewards on the env role, switches on the `switch_seed` role so reward noise is comparable across hazards) — `Environment`/`MultiAgentEnvironment` traits, re-exports from `aif` + simulation (incl. `substream`/`heterogeneity_seed`/`group_seed`/`env_seed`/`switch_seed`/`sensory_seed`/`active_seed`) + `mod ext4` re-exports (`SensoryFilter`/`AgreementAggregator`/`build_ext4_group`) + `mod ext8` re-exports (`NestedRun`/`build_ext8_group`/`build_ext8_inners`/`build_ext8_meta`/`inner_group_seed`/`run_nested_instrumented`) |
 | `crates/reproduce/src/ext4.rs` | Extension 4 / #40 slot agents: `SensoryFilter` (S1 inference relay — binary latent state, identity persistence, confusion precision `q`, exact Bayes + posterior-predictive resample; `q = 1` ⇒ exact identity relay with a zero-evidence fallback that makes the delta-likelihood override an impossible prior; S2 optimism via `with_bias`, emission ∝ `p(ô)·C[ô]^κ`), `AgreementAggregator` (A1 — two-factor `from_model` POMDP: controlled announcement × identity-B good arm, majority-vote + agreement modalities, C uniform on votes / `[0.3, 0.7]` on agreement; the agreement channel is NEGATIVE evidence — responsive under churn, lags after held majorities), `build_ext4_group` (learn_a members on the builder's `s+1+i` scheme via `with_slots_seeded`). Gates G1 (q=1 byte-equality) / G2 (q<1 live + deterministic) / G3 (sharp limit 180/180) test-pinned |
@@ -294,16 +294,28 @@ Figure 6 (`plots/figure6_certainty_weighted.png`) for the side-by-side compariso
 **Implemented in**: `VotingMode::CertaintyWeighted`, `VotingAgent::aggregate_weighted()`,
 `GroupAgentBuilder::certainty_weighted(true)`, `experiment_certainty_weighted()`.
 
-### 6. Network communication structures
+### 6. Network communication structures (#46 — filed, unscheduled)
 Replace simple all-to-active-agent voting with network topologies where only some internal
 agents communicate directly with the active agent, and agents influence each other through
-intermediate connections. The `CommunicatingPOMDPAgent` and `CommunicationChannel`
-infrastructure in `src/communication.rs` already supports this.
+intermediate connections.
 
-**Where**: New `NetworkGroupAgent` that uses `CommunicationChannel` for internal agent
-interactions before the final vote. Could use `petgraph` for the network topology.
+**Starting point (post-#5)**: `communication.rs` supplies *transport* only — behind the
+default-off `communication` feature, with a working emission cadence, constructible
+broadcast/priority, and **no decision effect from received messages**. The belief- and
+reward-sharing surfaces that implied otherwise were removed as unreachable, so this
+extension wires messages into inference rather than fixing scaffolding. The channel-crate
+evaluation (flume vs alternatives) also lands here — it needs this extension's workload as
+its benchmark, and sync-vs-async is the prior design question.
 
-### 7. Game-theoretic inter-group competition
+**Where**: New `NetworkGroupAgent` (or a topology-aware slot under the #39 generic-slot
+surface) that uses `CommunicationChannel` for internal agent interactions before the final
+vote. Could use `petgraph` for the network topology.
+
+**Question**: does recovered group α depend on topology at fixed headcount and member
+precision? Ext-4 says the aggregation rule dominates recovered-precision identity (so it
+should), ext-8 says nesting shape is α-invisible (so it might not) — genuinely open.
+
+### 7. Game-theoretic inter-group competition (#47 — filed, unscheduled)
 Two GroupAgents facing each other in a competitive environment (e.g., prisoner's dilemma,
 coordination games). Each group is a Markov-blanketed collective; the environment is another
 group. Tests whether group-level game-theoretic behavior emerges from individual agent dynamics.
@@ -335,7 +347,7 @@ moves up; `VotingAgent::reseed` added), `crates/reproduce/src/ext8.rs`
 `crates/reproduce/src/bin/extension8.rs` (master seed `0xE8_2026`, 5 cells × 2 fixtures ×
 30 reps).
 
-### 9. Dynamically emerging Markov blankets
+### 9. Dynamically emerging Markov blankets (#48 — filed, unscheduled)
 Current implementation uses a fixed blanket structure. The paper mentions simulations where
 blankets emerge dynamically (primordial soup, ant colonies, fish schools). Would require
 agents to join/leave the group based on some proximity or synchrony criterion.
@@ -343,7 +355,7 @@ agents to join/leave the group based on some proximity or synchrony criterion.
 **Where**: `GroupAgent` would need dynamic add/remove of internal agents, and a criterion
 function for blanket membership. Substantial architectural change.
 
-### 10. Evolutionary selection
+### 10. Evolutionary selection (#49 — filed, unscheduled)
 Apply evolutionary algorithms at individual and/or group level. Test the paper's hypothesis
 that group-level selection pressure fosters altruistic individual preferences, while
 individual-level selection fosters self-oriented preferences.
@@ -373,7 +385,7 @@ own sampled arm) and replays the recovered (obs, action) blanket stream through 
 canonical `POMDPAgent` (group F, conditioning on the group action). F is α-independent
 (belief path is α-free), so the recovered α is reported for completeness only.
 
-### 12. Continuous state-space models
+### 12. Continuous state-space models (#50 — filed, unscheduled)
 Move beyond discrete POMDP to continuous generalized coordinates. Would enable modeling
 spatial dynamics (fish schools, cell migration) where the group-level Markov blanket
 involves continuous position/velocity states.
