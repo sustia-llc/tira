@@ -3,7 +3,8 @@
 **Waade, P.T.; Olesen, C.L.; Laursen, J.E.; Nehrer, S.W.; Heins, C.; Friston, K.; Mathys, C.**
 
 *Entropy* 2025, 27, 143. <https://doi.org/10.3390/e27020143>
-Published 1 February 2025. Full PDF: [entropy-27-00143.pdf](entropy-27-00143.pdf).
+Published 1 February 2025. Full text: [doi.org/10.3390/e27020143](https://doi.org/10.3390/e27020143)
+(open access, CC BY).
 
 *This is a summary of the paper. For the section-by-section mapping of paper → tira code — and
 for what tira deliberately does differently — see [aif-coverage.md](aif-coverage.md).*

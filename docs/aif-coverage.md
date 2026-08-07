@@ -5,8 +5,9 @@
 — section by section, equation by equation, experiment by experiment? **Axis 2**: how much of the
 canonical discrete active-inference (POMDP) specification does the `aif` engine cover — i.e. "is
 `aif` a full AIF backend?" A paper summary lives in [abstract.md](abstract.md); the full text is
-[entropy-27-00143.md](entropy-27-00143.md) (markdown, for equation-level anchoring) /
-[entropy-27-00143.pdf](entropy-27-00143.pdf).*
+open access at [doi.org/10.3390/e27020143](https://doi.org/10.3390/e27020143) (CC BY). Local
+copies of both source papers — PDFs plus markdown conversions used for equation-level
+anchoring — are kept outside this repository and are not tracked here.*
 
 Legend: ✅ implemented · ⚠️ partial / deviates (documented) · ❌ not implemented · ➕ beyond the source.
 
@@ -64,7 +65,7 @@ beyond-paper scaffolding for the multi-agent extensions.
 | 4 — Beta(0.8, 0.8)-varying preferences; crushed group α (Fig 5D) | ✅ | `experiment_varying_preferences` + `beta_preferences`; data generated from heterogeneous preferences but scored against the canonical C — the paper's intended method, not a bug |
 | Fig 4 parameter recovery | ✅ | `plots/figure4_recovery.png` |
 | Fig 5 four-panel | ✅ | `plots/figure5_experiments.png` |
-| Appendix Fig A1 (internal-α distributions) | ❌ | not reproduced (diagnostic plot only; the Dirichlet construction it visualizes is implemented and unit-tested) |
+| Appendix Fig A1 (internal-α distributions) | ❌ | not reproduced (diagnostic plot only; the Dirichlet construction it visualizes is implemented and unit-tested). **No issue — deliberate**: reproducing a diagnostic plot adds no coverage the unit tests do not already give |
 | Fig 5 shape claims regression-tested | ✅ | seeded foundations from issue #2 (bit-reproducibility `test_seeded_runs_are_bit_reproducible`; Ext-5/Fig-6 matched-seed assertion `test_certainty_weighted_more_faithful_than_probabilistic`); issue #8 completed the set — `test_experiment_shape_ordering_seeded` pins the per-panel ordering (Exp4 crushed < Exp2 sub-linear < Exp3 inflated, straddling the true mean; robustness noted at 4 seeds), and each experiment smoke test carries a seeded recovered-α band |
 
 ### §4 Discussion — extension coverage
@@ -79,13 +80,13 @@ CLAUDE.md §"Possible extensions"); the paper lists these in prose in §4.
 | 3 | Parameter learning in group experiments (temporal dynamics) | ✅ **study run** — `crates/reproduce/src/bin/extension3.rs`, report `docs/extension3-learning.md`. `ExperimentOpts { seed, learn_a }` opts the factories into `learn_a`; `recover_alpha_learning` is the learning-aware grid MAP (shares `recover_alpha_with` with `recover_alpha`). Finding: individual A-learning shifts the recovered **group** α sharply downward (mean aware 0.083 vs fixed-A 0.597 at matched seeds, falling further with n — diffuse early A flattens members' action distributions), but mis-specified fixed-A recovery barely biases the *point* α (mean gap ≈ +0.01) even though the aware model is a strictly better *fit*. Interval-level claims now available via `recover_alpha_mcmc_learning` (extension 1 / #25) |
 | 4 | Sensory/active agents as proper AIF agents | ✅ study run (#40, 2026-08-01) — `SensoryFilter` (S1 exact-Bayes relay) + `AgreementAggregator` (A1 two-factor EFE announcer) in the #39 generic slots; **the active slot dominates the blanket identity** (recovered α ~10× toward true member α; sensory distortion second-order; effects don't compose). Report `docs/extension4-pomdp-blanket.md` |
 | 5 | Certainty-weighted voting (§4: "certainty-weighted Bayesian model average") | ➕✅ implemented **and evaluated** — `VotingMode::CertaintyWeighted`, weights `exp(−H(P_i))`, mixture `Σ w_i P_i / Σ w_i`; Figure 6 (`plots/figure6_certainty_weighted.png`) shows CW tracks the identity line closer than probabilistic voting, confirming the paper's prediction. Beyond-paper: the paper proposes but does not simulate this |
-| 6 | Network communication structures | ⚠️ latent scaffolding only — `communication.rs` (`CommunicationChannel`, `CommunicatingPOMDPAgent`, flume) exists and is exercised by tests, but is not wired into the group pipeline and has known dead surfaces (tracked in issues) |
-| 7 | Game-theoretic inter-group competition | ❌ |
+| 6 | Network communication structures | ⚠️ latent scaffolding only — `communication.rs` (`CommunicationChannel`, `CommunicatingPOMDPAgent`, flume) exists and is exercised by tests, but is not wired into the group pipeline: **received messages have no decision effect**. Since #5 the module is behind the default-off `communication` feature, its emission cadence actually fires (test-pinned at `f = 1`/`f = 3`), the unreachable belief/reward-sharing surfaces are removed, and broadcast/priority are constructible. Wiring it into the pipeline is #46 |
+| 7 | Game-theoretic inter-group competition | ❌ **#47** (filed, unscheduled) — two `GroupAgent`s facing each other; needs a `GroupCompetitionEnvironment` (`SharedBanditEnvironment` is a starting point but shares one bandit rather than pitting two blankets against each other) and payoffs encoded in each group's observation/preference model. Note the recovery pipeline assumes a stationary environment: a learning opponent is the first setting here where `recover_alpha` may not be measuring the same quantity |
 | 8 | Greater-than-two-scale nesting (groups of groups) | ✅ study run (#41, 2026-08-01) — `InternalAgent for GroupAgent<S, I, VotingAgent>` (aif 0.12.0) + instrumented meta loop; **recovery is scale-free** (meta α ≈ inner α ≈ true α at every nesting shape, both fixtures; CW meta = the one systematic scale effect, ≈ +12% α). Report `docs/extension8-nesting.md` |
-| 9 | Dynamically emerging Markov blankets | ❌ |
-| 10 | Evolutionary selection (group vs individual pressure) | ❌ |
+| 9 | Dynamically emerging Markov blankets | ❌ **#48** (filed, unscheduled) — `GroupAgent`'s internal-agent vector is fixed at construction. Needs dynamic add/remove plus a membership criterion (proximity/synchrony/free-energy). Two open questions: does recovered α track true member α under membership churn, or does turnover read as low precision (the ext-3 shape)? And is a self-selected group's α different from an imposed one's at matched headcount? Sharp edge is seeding — the builder derives internal streams at `s + 1 + i`, so a member joining at step *t* has no defined stream (same hazard class as the ext-8 aliasing finding) |
+| 10 | Evolutionary selection (group vs individual pressure) | ❌ **#49** (filed, unscheduled) — the one §4 extension carrying a **directional prediction** from the paper (group-level selection → altruistic preferences; individual-level → self-oriented), so it is falsifiable rather than exploratory. Fitness surfaces already exist: `variational_free_energy()` on the replayed blanket stream (group) and via `internal_agents()` (individual), both as in `bin/extension11.rs`. ⚠ Design hazard from ext-11: group F is **intensive**, not the sum of member Fs, so the two selection regimes' fitnesses are not on a common scale — normalization is a design decision, not a detail |
 | 11 | Free energy extensivity (sum of individual F vs group F) | ✅ **study run** — `crates/reproduce/src/bin/extension11.rs`, report `docs/extension11-extensivity.md`. Finding: group F is NOT the sum of individual Fs (strict extensivity fails ~1/n: F_grp intensive ~150, F_sum extensive O(n)); the group is instead ~intensive — `R_mean = F_grp/F_mean ≈ 0.98` at α=0.7 (group ≈ typical member) and ≈0.70 at α=0.3 (group F below the member mean; the blanket averages out members' exploration noise). Precision-controlled, not size-controlled |
-| 12 | Continuous state-space models | ❌ planned |
+| 12 | Continuous state-space models | ❌ **#50** (filed, unscheduled) — the only unbuilt extension that is a **new engine** rather than a study over the existing one: continuous generalized coordinates, gradient descent on F instead of discrete belief updating, so almost none of `agent.rs` transfers (the reusable seams are the surfaced-F contract, the EFE sign convention, and the seeding discipline). It is also the only way to learn which findings here are artifacts of the discrete encoding — every result in this document is stated over discrete factors and enumerated policies. nalgebra 0.35 is already a workspace dependency |
 
 The paper's §4 additionally floats renormalization-group detection of Markov blankets at slower
 timescales and application to systems with unknown generative models (animals, artificial systems,
@@ -105,8 +106,8 @@ builder seed), input validation with typed errors (`AifError`).
 `aif` reimplements the paper's MAB-POMDP slice. Scored against the canonical spec — Smith,
 Friston & Whyte (2022) *J. Math. Psychol.* [10.1016/j.jmp.2021.102632](https://doi.org/10.1016/j.jmp.2021.102632)
 (the equation-by-equation checklist; paper ref [61]; "Smith Eq. N" below refers to its
-equation numbering — a local full-text conversion lives at
-`docs/1-s2.0-S0022249621000973-main.md`, untracked because the paper is CC BY-NC-ND),
+equation numbering — a local full-text conversion is kept outside this repository, since
+the paper is CC BY-NC-ND and the DOI is the public pointer),
 Parr, Pezzulo & Friston (2022) *Active
 Inference* (MIT Press; ref [1]), `pymdp` (Heins et al. 2022, JOSS), and `ActiveInference.jl`
 (Nehrer et al.; ref [57], the library the paper uses):
@@ -120,7 +121,7 @@ Inference* (MIT Press; ref [1]), `pymdp` (Heins et al. 2022, JOSS), and `ActiveI
 | Retrospective inference (smoothing) | ✅ | MMP mode (0.7.0): later observations revise earlier-τ beliefs, strictly toward the exact posterior (tested); variational, not exact smoothing (see row above) |
 | Policy inference: γ-softmax posterior → marginalize → α-softmax | ✅ | `policy_posterior` / `infer_policies`, α/γ separate (Smith Eq. 22, 28) |
 | Bayesian model average over policies (X = Σ_π π·q(s\|π)) | ✅ | `bma_state_belief()` (0.7.0, MMP mode; Smith MDP.X) |
-| Occam-window policy pruning | ❌ | all enumerated policies scored every step (Smith `mdp.zeta`); irrelevant at MAB scale, needed for deep-policy spaces |
+| Occam-window policy pruning | ❌ | all enumerated policies scored every step (Smith `mdp.zeta`); irrelevant at MAB scale, needed for deep-policy spaces. **No issue — deliberate**: file one if a deep-policy consumer ever makes enumeration the bottleneck |
 | EFE — pragmatic value | ✅ | `efe_step` |
 | EFE — state info gain (salience) | ✅ | exact MI, summed per modality; live for stochastic injectable B since 0.6.0 (zero for deterministic-B constructions — see Axis 1 §2.1) |
 | EFE — novelty / parameter info gain | ✅ | 0.8.0 (#13): opt-in `use_param_info_gain` (pymdp flag/default; SPM auto-enables — documented deviation, default-off preserves numerics). A-novelty per Smith Eq. 39–40: `As′·(W s′)` added to neg-G, `W = ½(pa^{⊙−1} − pa_sums^{⊙−1})` masked to `pa > 0` (pymdp mask — structural zeros contribute nothing, no 1e-10 floor); paper's worked anchors (0.505 / 0.00505) pinned as tests. B-novelty ✅ **0.10.0** ([#21](https://github.com/sustia-llc/tira/issues/21)): opt-in `use_b_info_gain` — a **separate** flag from `use_param_info_gain` (documented divergence from pymdp's single flag, so A/B novelty toggle independently). pymdp `calc_pB_info_gain` form `W_B = ½(pb^{⊙−1} − colsum^{⊙−1})` masked to `pb > 0`, contracted against the predicted transition coincidence `s′ ⊗ s`, ½ factor per Eq. 39/40 convention (no explicit paper form — L1057). Zero-mask semantics: a deterministic B gives **exactly 0** (each nonzero entry equals its column sum); anchor 0.505 pinned as a test |
@@ -143,8 +144,11 @@ numerics bit-identical through the generalization) — **plus** multi-scale grou
 coalition value layer that the reference implementations do not have. **The parity roadmap is
 complete as of 0.9.0**: generalized generative model (0.6.0, #12), trajectory message passing + F
 (0.7.0, #15/#16), full learning + novelty (0.8.0, #13/#4), and precision dynamics (0.9.0, #14).
-Remaining ❌ rows are deliberate scope choices (Occam-window pruning — irrelevant at MAB scale),
-each documented in place. B-novelty (transition-model parameter info gain) shipped in 0.10.0 (#21,
+Remaining ❌ rows split two ways, each documented in place. On **Axis 2** (canonical-AIF parity)
+they are deliberate scope choices with no issue filed — Occam-window pruning (irrelevant at MAB
+scale) and Appendix Fig A1 (a diagnostic plot). On **Axis 1** (extension coverage) the five
+unbuilt extensions are all **filed and unranked**: #46 (ext-6, gated on #5) · #47 (ext-7) ·
+#48 (ext-9) · #49 (ext-10) · #50 (ext-12). Filing is not scheduling — none is committed work. B-novelty (transition-model parameter info gain) shipped in 0.10.0 (#21,
 pymdp `calc_pB_info_gain` form — the paper gives no explicit B form).
 
 ### Roadmap to "full backend" (priority order)

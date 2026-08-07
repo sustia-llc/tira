@@ -51,7 +51,7 @@ use reproduce::{
 
 const N_TRIALS: usize = 300;
 const REPS: usize = 10;
-/// Master seed; per-cell/per-rep seeds are derived via [`substream`] (issue #2).
+/// Master seed; per-cell/per-rep seeds are derived via [`reproduce::substream`] (issue #2).
 /// Deliberately distinct from `reproduce.rs`'s 2026 so the two binaries' seed-derivation
 /// trees share no root (in particular `substream(2026, 4)` — reproduce's Figure-4 base).
 const MASTER_SEED: u64 = 0xE11_2026;

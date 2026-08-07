@@ -630,8 +630,7 @@ impl POMDPAgent {
     ///
     /// # Panics
     ///
-    /// Only if `policy_depth` exceeds `u32::MAX` — see
-    /// [`Self::from_model`](Self::from_model#panics).
+    /// Only if `policy_depth` exceeds `u32::MAX` — see [`Self::from_model`].
     #[allow(clippy::missing_errors_doc, clippy::too_many_arguments)]
     pub fn with_params(
         n_states: usize,
@@ -2504,7 +2503,7 @@ impl POMDPAgent {
     /// left the window), the pending pD accumulation is flushed here from the
     /// smoothed `X₁`. The learned `D` write-back (`D = pd/Σ`) is then applied here,
     /// at the trial boundary, for **both** inference modes: under MMP it was
-    /// deferred (mid-trial `D` mutation would corrupt the [`Self::mmp_messages`]
+    /// deferred (mid-trial `D` mutation would corrupt the `mmp_messages`
     /// `τ = 0` anchor); under `MeanField` it was already written mid-trial and this
     /// re-sync is idempotent. `D` thus updates exactly at the trial boundary,
     /// matching the paper's trial-indexed Eq. 34. The method then re-snapshots the

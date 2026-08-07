@@ -6,11 +6,9 @@
 #![allow(clippy::cast_precision_loss)]
 
 pub use aif::{
-    Agent, Aggregator, CopyAgent, CommunicatingAgent, CommunicatingPOMDPAgent,
-    CommunicationChannel,
-    AgentMessage, InternalAgent, Message, MessageContent,
-    GroupAgent, GroupAgentBuilder, VotingAgent, VotingMode,
-    AifError, POMDPAgent,
+    Agent, AgentMessage, Aggregator, AifError, CommunicatingAgent, CommunicatingPOMDPAgent,
+    CommunicationChannel, CopyAgent, GroupAgent, GroupAgentBuilder, InfoRequestType, InternalAgent,
+    Message, MessageContent, POMDPAgent, VotingAgent, VotingMode,
 };
 
 use rand::rngs::StdRng;

@@ -12,10 +12,17 @@ rand = { workspace = true }
 rand_distr = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, optional = true }
-flume = { workspace = true }
+flume = { workspace = true, optional = true }
 
 [features]
-serde = ["dep:serde"]
+# Every `serde` derive site in this crate is on a `communication` type, so `serde`
+# without `communication` would compile serde + serde_derive for zero effect and expose
+# no serializable types at all. It therefore implies `communication`.
+serde = ["dep:serde", "communication"]
+# Latent extension-6 scaffolding (`communication`). Default-off since issue #5: the
+# module is not wired into the group-agent pipeline, so downstream consumers should not
+# carry `flume` for it.
+communication = ["dep:flume"]
 
 [dev-dependencies]
 approx = { workspace = true }

@@ -13,7 +13,7 @@
 //!    otherwise-identical fixed-A group?
 //! 2. **Does mis-specified (fixed-A) recovery of learning-group data bias α?** I.e. is
 //!    the learning-aware replay ([`recover_alpha_learning`]) load-bearing for unbiased
-//!    recovery, or does the ordinary fixed-A [`recover_alpha`] land in the same place?
+//!    recovery, or does the ordinary fixed-A [`reproduce::recover_alpha`] land in the same place?
 //!
 //! # Method
 //!
@@ -23,9 +23,9 @@
 //! differing only in whether learning is on):
 //!
 //! - **(a) fixed-A baseline**: `experiment_identical` with learning off → its returned
-//!   [`recover_alpha`] fit (the #2-era baseline).
+//!   [`reproduce::recover_alpha`] fit (the #2-era baseline).
 //! - **(b-misspec)**: `experiment_identical` with learning on (weak pA prior
-//!   `[1,1,1]`) → its returned fixed-A [`recover_alpha`] fit, i.e. mis-specified
+//!   `[1,1,1]`) → its returned fixed-A [`reproduce::recover_alpha`] fit, i.e. mis-specified
 //!   recovery of learning data.
 //! - **(b-aware)**: the same learning-group blanket stream re-scored with
 //!   [`recover_alpha_learning`] under the same `initial_precision` — the well-specified
@@ -54,7 +54,7 @@ const N_TRIALS: usize = 300;
 const REPS: usize = 5;
 const N_SWEEP: [usize; 3] = [4, 8, 16];
 const ALPHA_SWEEP: [f64; 5] = [0.1, 0.3, 0.5, 0.7, 0.9];
-/// Master seed; per-cell/per-rep seeds are derived via [`substream`] (issue #2).
+/// Master seed; per-cell/per-rep seeds are derived via [`reproduce::substream`] (issue #2).
 /// Deliberately distinct from `reproduce.rs`'s 2026 and `extension11.rs`'s `0xE11_2026`
 /// so none of the three binaries' seed-derivation trees share a root.
 const MASTER_SEED: u64 = 0xE3_2026;

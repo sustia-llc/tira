@@ -4,9 +4,14 @@
 /.claude/
 /CLAUDE.local.md
 
-# Smith, Friston & Whyte (2022) local copies — CC BY-NC-ND forbids derivative
-# redistribution, so the markdown conversion (and the PDF, to stay clearly
-# non-commercial) stay local-only; the public pointer is the DOI.
+# Source-paper local copies. Both papers now live OUTSIDE this repository (tracked with
+# the other private artifacts); these rules stay as a guard so a stray copy dropped into
+# docs/ cannot be committed by accident. The public pointers are the DOIs:
+#   Waade et al. (2025) Entropy      — 10.3390/e27020143      (CC BY)
+#   Smith, Friston & Whyte (2022) JMP — 10.1016/j.jmp.2021.102632 (CC BY-NC-ND: no
+#   derivative redistribution, so neither the conversion nor the PDF may be tracked here)
 /docs/1-s2.0-S0022249621000973-main.md
 /docs/1-s2.0-S0022249621000973-main.pdf
 /docs/1-s2.0-S0022249621000973-main_images/
+/docs/entropy-27-00143.md
+/docs/entropy-27-00143.pdf
