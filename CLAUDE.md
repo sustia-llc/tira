@@ -65,7 +65,7 @@ learned per-bit precisions + novelty at fixed γ, no precision dynamics) beat th
 magnitude arm 0.4406 vs 0.2720 out-of-sample, the first arm to do so; arm choice is
 now koalisi #54 (cost-quality tradeoff)).
 
-- **233 tests** (232 `#[test]` + 1 doctest), edition 2024, 0 clippy warnings under both
+- **235 tests** (234 `#[test]` + 1 doctest), edition 2024, 0 clippy warnings under both
   the default lints **and** `-W clippy::pedantic` since #11 — pedantic is zero-warning
   *fixed-or-justified*, not pedantic-clean: benign/drift-risky lints
   (`cast_precision_loss` crate-wide, `float_cmp` on bit-identity pins, `manual_midpoint`,
@@ -118,6 +118,13 @@ cargo run --release -p reproduce --bin reproduce
 
 # Tests (whole workspace)
 cargo test
+
+# Default-feature gate — REQUIRED alongside the workspace run (#5). `reproduce` enables
+# `aif/communication`, and cargo unifies features, so `--workspace` ALWAYS builds aif
+# with the feature on. Only a crate-scoped run exercises the default configuration that
+# downstream consumers actually get.
+cargo check -p aif
+cargo clippy -p aif --all-targets -- -W clippy::pedantic
 
 # Single experiment from Rust (reproduce crate)
 use reproduce::{ExperimentOpts, experiment_identical, experiment_certainty_weighted, recover_alpha_learning};

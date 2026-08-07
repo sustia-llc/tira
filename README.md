@@ -326,7 +326,7 @@ this downstream surface.
 | plotters | Figure generation |
 | flume | Inter-agent message channels (in `aif`, optional — pulled only by the default-off `communication` feature) |
 | thiserror | Error types |
-| serde | Trial data serialization (`reproduce`; in `aif` an optional default-off feature gating the communication-type derives) |
+| serde | Trial data serialization (`reproduce`; in `aif` an optional default-off feature gating the communication-type derives — it therefore implies the `communication` feature, since every derive site lives there) |
 
 ## License
 

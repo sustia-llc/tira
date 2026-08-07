@@ -12,6 +12,13 @@
   pipeline, so downstream consumers no longer carry a channel dependency to reach it.
   Enable with `features = ["communication"]`. Verified: with the feature off, `flume`
   is not compiled at all.
+  - **`serde` now implies `communication`.** Every `serde` derive site in the crate is
+    on a `communication` type, so `serde` alone would compile `serde` + `serde_derive`
+    for zero effect and expose no serializable types. Downstreams enabling `serde` get
+    `communication` (and `flume`) with it; downstreams wanting neither are unaffected.
+  - Gate note: `cargo test`/`clippy --workspace` unify features and therefore always
+    build `aif` **with** the feature (`reproduce` enables it). The default configuration
+    needs its own gate — `cargo check -p aif` / `cargo clippy -p aif --all-targets`.
 - **Fixed: emission could never fire for any `communication_frequency >= 1.`**
   `update_communication_counter` incremented and reset inside the same call, so the
   counter's observable values were `0..frequency-1` and `should_communicate`'s
@@ -20,11 +27,18 @@
   emits**, which also makes the schedule periodic rather than one-shot. Cadence is
   test-pinned at `f = 1` and `f = 3`.
   - `CommunicatingAgent::generate_messages` therefore takes `&mut self` (the check and
-    the reset must happen together).
+    the reset must happen together). A due slot is consumed even when `share_actions`
+    is off, so the schedule stays periodic instead of latching true — pinned.
+  - **`Agent::act` now advances the cadence too.** `CommunicatingAgent: Agent` and the
+    harness runners take `&mut impl Agent`, so an agent driven only through that path
+    previously never emitted at any frequency. `act_with_communication` delegates to it,
+    so the two entry points cannot drift.
   - Verified behaviourally neutral: on the seeded two-agent integration fixture the
     action distributions are **unchanged** (`[13,10,7]` / `[13,11,6]`) while messages
-    sent go `0 / 0 → 10 / 15`. Received messages have no decision effect — see the trim
-    below.
+    sent go `0 / 0 → 10 / 15`. That fixture also had to be fixed to mean anything: it
+    recorded messages by draining the *recipient's* queue, so nothing was ever actually
+    delivered. It now records at send time and asserts receipts (14 / 10), which is what
+    makes the no-decision-effect pin non-vacuous.
 - **Removed (unreachable surfaces).** `CommunicatingPOMDPAgent` loses `share_beliefs`
   and `current_beliefs` (the latter was never populated, so the former could never
   fire), `share_rewards` (stored, never read), `agent_action_beliefs` with its
@@ -32,6 +46,7 @@
   `n_actions` (used only by that writer). Constructor is now
   `new(agent, id, share_actions, communication_frequency)`. Wiring messages into
   inference is issue #46's subject, not an implied contract here.
+- Test suite 227 → **235**.
 - **Added (previously unconstructible).** `CommunicationChannel::broadcast` — `send`
   hardcoded `recipient_id: Some(..)`, so the `Message::recipient_id: None` broadcast
   form could not be built through the public API; `send_with_priority` — `priority` was
@@ -42,7 +57,7 @@
 2026-08-07 (#43 — rustdoc intra-doc links): all `cargo doc --workspace --no-deps`
 warnings resolved (**10**, not the 7 the issue estimated — its own list summed to 8 and
 predated the two sites added by #40/#41). Dropped a redundant `#panics` anchor, de-linked
-four private items (`mmp_messages`, `N_ARMS`, `half_normal_log_prior`), qualified
+three private items (`mmp_messages`, `N_ARMS`, `half_normal_log_prior`), qualified
 `aif::CopyAgent`, and gave the bin-doc links full `reproduce::` paths (bin doc scope
 cannot see lib items). No behaviour change.
 

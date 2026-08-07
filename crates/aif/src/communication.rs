@@ -322,11 +322,16 @@ impl CommunicatingPOMDPAgent {
 
     /// Whether an emission is due.
     ///
-    /// The counter is advanced by [`act_with_communication`](CommunicatingAgent::act_with_communication)
-    /// and reset by [`generate_messages`](CommunicatingAgent::generate_messages) — and
-    /// only when it actually emits. Resetting anywhere else is the issue-#5 bug: the
-    /// old code incremented and reset inside the same call, so the counter's observable
-    /// values were `0..frequency-1` and the `>= frequency` test could never be true.
+    /// The counter is advanced by every step — [`Agent::act`] and
+    /// [`act_with_communication`](CommunicatingAgent::act_with_communication) alike —
+    /// and reset by [`generate_messages`](CommunicatingAgent::generate_messages)
+    /// **whenever the cadence slot comes due**, whether or not anything is actually
+    /// emitted (with `share_actions` off there is nothing to send, and the slot is
+    /// still consumed, so the schedule stays periodic instead of latching true).
+    ///
+    /// Resetting inside the *advance* is the issue-#5 bug: the old code incremented and
+    /// reset in the same call, so the counter's observable values were
+    /// `0..frequency-1` and the `>= frequency` test could never be true.
     fn should_communicate(&self) -> bool {
         self.steps_since_communication >= self.communication_frequency
     }
@@ -336,6 +341,11 @@ impl Agent for CommunicatingPOMDPAgent {
     fn act(&mut self, observation: usize) -> Result<usize, AifError> {
         let action = self.agent.act(observation)?;
         self.last_selected_action = Some(action);
+        // Advance the cadence here too. `CommunicatingAgent: Agent`, and the harness
+        // runners take `&mut impl Agent`, so an agent can legitimately be driven through
+        // this path alone — if only `act_with_communication` advanced the counter, such
+        // an agent would never emit at any frequency.
+        self.steps_since_communication += 1;
         Ok(action)
     }
 }
@@ -373,9 +383,8 @@ impl CommunicatingAgent for CommunicatingPOMDPAgent {
         messages: Vec<Message>,
     ) -> Result<usize, AifError> {
         self.process_messages(messages)?;
-        let action = self.agent.act(observation)?;
-        self.last_selected_action = Some(action);
-        self.steps_since_communication += 1;
-        Ok(action)
+        // Delegates to `Agent::act`, which records the action and advances the cadence —
+        // one place, so the two entry points cannot drift.
+        <Self as Agent>::act(self, observation)
     }
 }
