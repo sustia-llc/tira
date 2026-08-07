@@ -5,7 +5,9 @@ the Cargo workspace and crate names remain `aif` + `reproduce`.)
 
 Rust implementation of Waade et al., "As One and Many: Relating Individual and Emergent
 Group-Level Generative Models in Active Inference" (*Entropy* 2025, 27, 143).
-DOI: 10.3390/e27020143. Full paper PDF: `docs/entropy-27-00143.pdf`.
+DOI: 10.3390/e27020143 — the public pointer. Local full-text copies (PDF + a markdown
+conversion for equation-level anchoring) live outside this repository at
+`.claude/docs/papers/`; they are not tracked here.
 
 Paper summary: [abstract.md](docs/abstract.md). Paper→code coverage and canonical-AIF
 parity: [aif-coverage.md](docs/aif-coverage.md).
