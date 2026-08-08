@@ -344,6 +344,77 @@ impl AgreementAggregator {
         Ok(action)
     }
 
+    /// The distribution [`aggregate`](Self::aggregate) would have sampled from,
+    /// **without drawing from any RNG** — the no-draw twin that backs
+    /// [`GroupAgent::group_distribution`](aif::GroupAgent::group_distribution)
+    /// (issue #53).
+    ///
+    /// Same observation construction as [`aggregate`](Self::aggregate) (majority of
+    /// the votes on m0, previous-announcement agreement on m1), but the POMDP is
+    /// driven through [`POMDPAgent::action_probabilities_multi`] instead of
+    /// [`POMDPAgent::act_multi`]: identical belief update and policy inference,
+    /// minus the `WeightedIndex` draw. The aggregator's RNG stream is therefore left
+    /// exactly where it was, which is what makes the group-level read reproducible.
+    ///
+    /// # This read **does** advance the announcement history
+    ///
+    /// The recorded announcement is the returned distribution's **argmax** (ties to
+    /// the lowest arm index) — the deterministic stand-in for the draw
+    /// [`aggregate`](Self::aggregate) would have made — written to both
+    /// [`last_action`](Self::last_action) and the POMDP's own recorded action, in the
+    /// same order [`POMDPAgent::act_multi`] writes them. The read is a full timestep:
+    /// perceive, infer, announce.
+    ///
+    /// This is the *opposite* of what
+    /// [`GroupAgent::group_distribution`](aif::GroupAgent::group_distribution) does
+    /// to its members, and the asymmetry is deliberate. The obvious objection is that
+    /// the group never tells its active slot which action it resolved to, so an
+    /// argmax is a guess. Three things outweigh it:
+    ///
+    /// 1. **Not recording makes the read permanently inert — measured, not
+    ///    predicted.** [`POMDPAgent`]'s `MeanField` inference discards an observation
+    ///    while `last_action` is `None` (beliefs stay at `D`; the same rule that makes
+    ///    `update_a` skip the `t = 0` observation). A twin that never records
+    ///    therefore never leaves `None`, never perceives, and returns
+    ///    `[1/3, 1/3, 1/3]` on *every* call forever — pinned in the tests as the
+    ///    fresh-aggregator case. A group whose active slot is A1 would read a uniform
+    ///    distribution for the whole run. That is a faithful answer (`aggregate` at
+    ///    that same state samples uniformly too) and a useless capability.
+    /// 2. **Under `MeanField`, beliefs and the action history must advance
+    ///    together.** The next step's prior is `B[last_action]·beliefs`. Perceiving
+    ///    without recording — the interleaved case, where `last_action` is already
+    ///    set — leaves the pair mismatched: the belief has moved on but the next
+    ///    prior re-applies the *same* transition. Recording keeps the pair in the
+    ///    relation `aggregate` maintains.
+    /// 3. **The aggregator has no commit path to defer to.** Members can be frozen by
+    ///    the read because
+    ///    [`record_group_action`](aif::GroupAgent::record_group_action) exists to
+    ///    advance them once the caller resolves the action; it fans out across the
+    ///    internal roster only and never reaches the active slot. For the aggregator,
+    ///    "don't record yet" is not deferral, it is never.
+    ///
+    /// The cost, stated plainly: a caller that resolves the returned distribution to
+    /// something other than its argmax leaves the aggregator scoring m1 against an
+    /// announcement the group did not make, and a read interleaved with
+    /// [`aggregate`](Self::aggregate) calls shifts the announcement history those
+    /// calls see. Both are visible to the caller and neither can arise inside
+    /// [`aggregate`](Self::aggregate)-only use, which is what the study runs and what
+    /// gates G1–G3 pin.
+    ///
+    /// # Errors
+    /// Exactly what [`aggregate`](Self::aggregate) returns for the same votes, plus
+    /// anything [`POMDPAgent::action_probabilities_multi`] rejects (it cannot fire
+    /// here: the observation slice is always the model's two modalities).
+    pub fn aggregate_distribution(&mut self, votes: &[usize]) -> Result<Vec<f64>, AifError> {
+        let majority = majority_vote(votes)?;
+        let agree = usize::from(self.last_action == Some(majority));
+        let probs = self.agent.action_probabilities_multi(&[majority, agree])?;
+        let announced = argmax(probs.as_slice());
+        self.agent.record_action(announced);
+        self.last_action = Some(announced);
+        Ok(probs.as_slice().to_vec())
+    }
+
     /// Distribution form: each member's action distribution is collapsed to its
     /// argmax (ties to the lowest index) and the resulting votes take the
     /// [`aggregate`](Self::aggregate) path.
@@ -363,13 +434,7 @@ impl AgreementAggregator {
                     got: dist.len(),
                 });
             }
-            let mut best = 0;
-            for i in 1..N_ARMS {
-                if dist[i] > dist[best] {
-                    best = i;
-                }
-            }
-            votes.push(best);
+            votes.push(argmax(dist.as_slice()));
         }
         self.aggregate(&votes)
     }
@@ -394,6 +459,40 @@ impl Aggregator for AgreementAggregator {
     fn mode(&self) -> VotingMode {
         VotingMode::Probabilistic
     }
+
+    /// The no-draw twin of [`aggregate`](AgreementAggregator::aggregate), delegating
+    /// to the inherent method.
+    ///
+    /// Its weighted counterpart is deliberately **left at the trait's `Ok(None)`
+    /// default**. [`GroupAgent::group_distribution`](aif::GroupAgent::group_distribution)
+    /// dispatches on [`mode`](Self::mode) exactly as
+    /// [`GroupAgent::act`](aif::GroupAgent::act) does, and this aggregator reports
+    /// [`VotingMode::Probabilistic`], so the weighted twin is unreachable through the
+    /// group pipeline. Supplying one for symmetry would advertise a capability the
+    /// group can never route to, and the inherent
+    /// [`aggregate_weighted`](AgreementAggregator::aggregate_weighted) it would have
+    /// to mirror is itself only an argmax adapter onto the discrete path.
+    fn aggregate_distribution(&mut self, votes: &[usize]) -> Result<Option<Vec<f64>>, AifError> {
+        AgreementAggregator::aggregate_distribution(self, votes).map(Some)
+    }
+}
+
+/// Index of the largest entry; ties resolve to the lowest index — the
+/// deterministic stand-in for a draw, used both to collapse a member's
+/// distribution into a vote and to pick the announcement in
+/// [`AgreementAggregator::aggregate_distribution`].
+///
+/// An empty slice yields `0`; unreachable at both call sites (the weighted path
+/// length-checks against `N_ARMS`, and the POMDP's action distribution always spans
+/// its action space).
+fn argmax(values: &[f64]) -> usize {
+    let mut best = 0;
+    for (i, v) in values.iter().enumerate().skip(1) {
+        if *v > values[best] {
+            best = i;
+        }
+    }
+    best
 }
 
 /// Majority of a discrete vote slice; ties resolve to the lowest arm index.
@@ -766,6 +865,125 @@ mod tests {
             assert_eq!(
                 Aggregator::aggregate_weighted(&mut from_dists, &dists)?,
                 Aggregator::aggregate(&mut from_votes, &votes)?
+            );
+        }
+        Ok(())
+    }
+
+    /// The `Aggregator` distribution twin (#53): `aggregate_distribution` must be
+    /// the distribution `aggregate` samples from, produced without touching the
+    /// aggregator's RNG.
+    ///
+    /// Four claims, one fixture:
+    /// - **(a) shape** — a genuine distribution over the three arms, and the
+    ///   announcement advanced to its argmax (the recorded-state decision, pinned).
+    /// - **(b) no draw** — two aggregators identical except for their seeds return
+    ///   the same distribution at every step of a live, twin-driven vote sequence.
+    ///   Were the twin sampling, the two streams would diverge.
+    /// - **(c1) it is `aggregate`'s distribution, sharp case** — from a *matched*
+    ///   state (same seed, same warm-up), the action `aggregate` samples is the
+    ///   twin's argmax, on a step where the twin is near-one-hot so the draw is
+    ///   effectively determined.
+    /// - **(c2) …and flat case** — at the fresh state the twin is exactly uniform;
+    ///   `aggregate` over many independently seeded fresh aggregators must be uniform
+    ///   too. This is the regime (c1) cannot see, and it is also the measured basis
+    ///   for recording: a twin that did not record would stay in it forever.
+    ///
+    /// All four exercise the twin only; `aggregate`'s own behaviour is unchanged and
+    /// still pinned by G1/G2/G3 and `aggregate_weighted_matches_the_argmax_votes`.
+    #[test]
+    fn aggregate_distribution_is_the_no_draw_twin_of_aggregate() -> Result<(), AifError> {
+        const SAMPLES: usize = 900;
+        let votes = [1usize, 1, 0];
+
+        // ----- (a) shape, and the recorded-state decision -----
+        let mut agg = AgreementAggregator::new(0.9, 0.9, 5150)?;
+        let dist = Aggregator::aggregate_distribution(&mut agg, &votes)?
+            .expect("invariant: A1 overrides the trait's Ok(None) default");
+        assert_eq!(dist.len(), N_ARMS, "the twin must span the group action space");
+        assert!(
+            dist.iter().all(|p| p.is_finite() && *p >= 0.0),
+            "twin must be a non-negative, finite distribution: {dist:?}"
+        );
+        let total: f64 = dist.iter().sum();
+        assert!(
+            (total - 1.0).abs() < 1e-12,
+            "twin must sum to 1, got {total} from {dist:?}"
+        );
+        assert_eq!(
+            agg.last_action(),
+            Some(argmax(&dist)),
+            "the twin announces its argmax — see the recorded-state rationale on \
+             AgreementAggregator::aggregate_distribution"
+        );
+
+        // ----- (b) no randomness consumed -----
+        // Driven by the twin alone, so both trajectories are deterministic by
+        // construction and any RNG touch would show up as a divergence.
+        let mut seeded = AgreementAggregator::new(0.9, 0.9, 1)?;
+        let mut other = AgreementAggregator::new(0.9, 0.9, 0xDEAD_BEEF)?;
+        let mut seen = Vec::new();
+        for t in 0..20 {
+            let step = [t % N_ARMS, t % N_ARMS, (t + 1) % N_ARMS];
+            let a = Aggregator::aggregate_distribution(&mut seeded, &step)?
+                .expect("invariant: A1 overrides the trait's Ok(None) default");
+            let b = Aggregator::aggregate_distribution(&mut other, &step)?
+                .expect("invariant: A1 overrides the trait's Ok(None) default");
+            assert_eq!(
+                a, b,
+                "step {t}: the twin must be seed-independent (it draws nothing)"
+            );
+            seen.push(a);
+        }
+        // Guard against a vacuous pass: an inert twin would satisfy (b) trivially —
+        // and is exactly what a non-recording twin degenerates to.
+        assert!(
+            seen.iter().any(|d| d != &seen[0]),
+            "fixture is degenerate — the twin never moves across the vote sequence: {seen:?}"
+        );
+
+        // ----- (c1) matched state, sharp step -----
+        // Warm both through the twin, which (b) just showed to be deterministic, so
+        // the two aggregators reach the probe step in provably the same state and
+        // the only difference there is twin vs draw.
+        let warm = [[0usize, 0, 0], [1, 1, 1]];
+        let probe = [2usize, 2, 2];
+        let mut reader = AgreementAggregator::new(0.9, 0.9, 31_337)?;
+        let mut sampler = AgreementAggregator::new(0.9, 0.9, 8_675_309)?;
+        for step in &warm {
+            assert_eq!(
+                Aggregator::aggregate_distribution(&mut reader, step)?,
+                Aggregator::aggregate_distribution(&mut sampler, step)?,
+                "twin-driven warm-up must leave both aggregators in the same state"
+            );
+        }
+        let sharp = Aggregator::aggregate_distribution(&mut reader, &probe)?
+            .expect("invariant: A1 overrides the trait's Ok(None) default");
+        let peak = argmax(&sharp);
+        println!("c1 twin at the probe step: {sharp:?}");
+        assert!(
+            sharp[peak] > 0.99,
+            "c1 fixture must be near-deterministic for the argmax pin to bite: {sharp:?}"
+        );
+        assert_eq!(
+            Aggregator::aggregate(&mut sampler, &probe)?,
+            peak,
+            "the sampled action must be the twin's peak: {sharp:?}"
+        );
+
+        // ----- (c2) flat step, empirically -----
+        let mut counts = [0usize; N_ARMS];
+        for s in 0..SAMPLES {
+            let mut fresh = AgreementAggregator::new(0.9, 0.9, 900_000 + s as u64)?;
+            counts[Aggregator::aggregate(&mut fresh, &votes)?] += 1;
+        }
+        let empirical: Vec<f64> = counts.iter().map(|&c| c as f64 / SAMPLES as f64).collect();
+        println!("c2 twin {dist:?} vs empirical aggregate {empirical:?}");
+        for (arm, (&p, &q)) in dist.iter().zip(empirical.iter()).enumerate() {
+            assert!(
+                (p - q).abs() < 0.06,
+                "arm {arm}: twin says {p:.4}, aggregate sampled {q:.4} over {SAMPLES} \
+                 fresh seeds — the twin is not the distribution being sampled"
             );
         }
         Ok(())

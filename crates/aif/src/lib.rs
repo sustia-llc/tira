@@ -35,7 +35,16 @@ pub use communication::{
 };
 pub use group::{Aggregator, GroupAgent, GroupAgentBuilder, VotingAgent, VotingMode};
 
+/// Errors returned across the engine surface.
+///
+/// `#[non_exhaustive]` since 0.13.0: downstream `match`es must carry a `_` arm, and
+/// in exchange every future variant is a non-breaking addition. Added at the same
+/// time as [`AifError::Unsupported`] precisely because that variant's arrival
+/// showed the cost of the alternative — before it, "this configuration has no such
+/// capability" had to borrow [`AifError::InvalidDistribution`], which says
+/// something different.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum AifError {
     #[error("Invalid probability value: {0}")]
     InvalidProbability(f64),
@@ -55,4 +64,11 @@ pub enum AifError {
     ResourceConflict(usize),
     #[error("Communication error: {0}")]
     Communication(String),
+    /// The configuration is valid but does not provide the requested capability —
+    /// distinct from an input being wrong. Raised by
+    /// [`GroupAgent::group_distribution`] when the active slot leaves the
+    /// [`Aggregator`] distribution twins at their defaults, i.e. exposes no
+    /// distribution behind its choice.
+    #[error("Unsupported: {0}")]
+    Unsupported(String),
 }
