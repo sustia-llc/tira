@@ -2,7 +2,177 @@
 
 ## [Unreleased]
 
-### aif engine (unreleased)
+## [0.13.0] - 2026-08-08
+
+Engine release cut for the deterministic group read (#53), which koalisi
+[#78](https://github.com/sustia-llc/koalisi/issues/78) (EQ5b) is blocked on; it also
+carries the hygiene work merged since 0.12.0 (#5 `communication` cadence + feature
+gate, #43 rustdoc links). Behaviourally additive — the `Aggregator` trait grows two
+defaulted methods and no existing surface changes what it computes — with one
+compile-level breaking rider: `AifError` becomes `#[non_exhaustive]` and gains a
+variant (see the first bullet; no-op for koalisi).
+
+### aif engine
+
+- **BREAKING (error surface): `AifError` is now `#[non_exhaustive]`, and gains
+  `AifError::Unsupported(String)`.** Downstream `match`es on `AifError` need a `_`
+  arm; in exchange every future variant is a non-breaking addition. Both landed
+  together because the second showed the cost of not having the first: "this
+  configuration has no such capability" is not "this distribution is invalid", and
+  before `Unsupported` the deterministic read had to borrow
+  `InvalidDistribution` to say it. `Unsupported` is raised by
+  `GroupAgent::group_distribution` when the active slot leaves the `Aggregator`
+  distribution twins defaulted, so the read's two failure kinds — no capability vs
+  a bad value — are now distinguishable by variant at the call site. Grep-verified
+  no-op for koalisi, which only propagates `aif::AifError` and never matches on it.
+
+2026-08-08 (#53 — deterministic group read: no-sample, no-stochastic-advance group
+distribution for flat groups):
+
+- **Added: `GroupAgent::group_distribution(observation)`** — the group's action
+  distribution formed **without drawing from any RNG** and **without advancing any
+  member's `last_action`**. Generic over all three blanket slots
+  (`GroupAgent<S: Agent, I: InternalAgent, X: Aggregator>`), so it is available to
+  custom-slot groups, not only the paper's default construction.
+  - Every draw `Agent::act` makes is replaced by its deterministic counterpart:
+    members report `action_probabilities` (which does not sample); under
+    `Probabilistic`/`Deterministic` a member's **vote** is the argmax of that
+    distribution (ties to the lowest index) rather than a draw from it; under
+    `CertaintyWeighted` the members' distributions go straight to the
+    confidence-weighted mixture. The result is a deterministic function of
+    `(group state, observation)`.
+  - Not side-effect-free, and documented as such: `action_probabilities` still
+    updates each member's beliefs and (under `learn_*`) its Dirichlet counts,
+    exactly as `act` does. What is held fixed is `last_action`.
+  - **But the pure read alone does not advance the trial clock.** Under the
+    default `MeanField` inference a member ignores observations while
+    `last_action` is `None` (beliefs reset to `D`, `update_a` returns early) —
+    `act`'s own `t = 0` rule, except `act` then records and this does not. So a
+    group that is only ever read, never committed, is a **fixed point**: the same
+    distribution forever, no learning. Read → decide → commit is the intended
+    shape, not one option among several; `group_distribution_recording` records
+    for you and so never sits at `t = 0`. Pinned in both directions by
+    `test_uncommitted_reads_stay_at_t0` (frozen without a commit, moving with
+    one). An earlier draft of this entry and of the rustdoc claimed the opposite
+    — that consecutive reads see a state that has moved on — which was wrong.
+  - RNG-freedom is inherited from the slots: it holds for a deterministic sensory
+    slot, `POMDPAgent` members and a `VotingAgent` aggregator. A member that is
+    itself a `GroupAgent` does **not** qualify — nested `action_probabilities` runs
+    the sampling member loop from `act` verbatim. This is a **flat**-group surface;
+    nesting genericity stays #51.
+- **Added: `GroupAgent::group_distribution_recording`** — the same read, except each
+  member records the argmax of its own distribution (the deterministic stand-in for
+  the draw `act` would have made), for callers who want members to keep advancing
+  without arbitrating the group's choice.
+- **Added: `GroupAgent::record_group_action(action)`** — the explicit commit that
+  pairs with the pure read: fans the caller's resolved group action out across the
+  roster (read → decide → commit), so members advance to the **group's** action
+  rather than a per-member surrogate. Validates before it fans out; an out-of-range
+  action advances nobody.
+  - Both member-advance semantics ship because they answer different questions and
+    neither subsumes the other; the issue left the choice open and the owner took
+    both entry points.
+- **Fixed (engine, MMP): an observation arriving with no action recorded since the
+  previous one now supersedes the pending observation instead of opening a new
+  window node.** The smoother's invariant is
+  `mmp_act_hist.len() == mmp_obs_hist.len() - 1` and `mmp_messages` indexes it
+  unguarded, so two consecutive non-advancing reads used to panic with an
+  index-out-of-bounds. Window nodes are timesteps and timesteps advance by
+  actions, so a read that records nothing is a second look at the same timestep —
+  that is now what it does (its belief update, and under `learn_*` its Dirichlet
+  update, apply twice). **Unreachable from every paired path** (`act`/`act_multi`,
+  and every `action_probabilities` replay that records the action it scored), so
+  MMP numerics — including the exact-smoother anchor and the ext-2b
+  dynamics-replay fidelity pins — are bit-identical. Pinned by a test that panics
+  at `agent.rs` without the rule.
+  - Two qualifiers, for the record. The old panic was **horizon ≥ 2** only: at
+    `horizon: 1` (legal — `validate_agent_params` requires only
+    `horizon >= policy_depth`) the push-then-slide path trimmed the window back
+    each time and worked, and its slide fired `commit_pd_mmp`, so superseding is a
+    real behaviour change in the degenerate `learn_d` + `horizon: 1` +
+    commit-free-read corner. And the **symmetric** asymmetry is unguarded: two
+    `record_action`s with no observation between them (reachable by combining
+    `group_distribution_recording` with `record_group_action`, which the rustdoc
+    now warns against) leaves the action history one long — no panic, but
+    `last_action` and the smoother's next transition disagree until the window
+    slides.
+- **Added (additive trait change): `Aggregator::aggregate_distribution` and
+  `Aggregator::aggregate_weighted_distribution`** — no-draw twins of the two
+  sampling methods, **defaulted to `Ok(None)`** ("this aggregator exposes no
+  distribution behind its choice"), so existing implementors keep compiling
+  untouched. Both take `&mut self`, matching their sampling siblings: an
+  aggregator that is itself an active-inference agent (ext-4's
+  `AgreementAggregator`) has to run inference to say what it would have chosen,
+  and `&self` would have permanently excluded exactly those implementors. A group whose active slot leaves them defaulted reports
+  `AifError::Unsupported` from the read and is unaffected otherwise. The
+  default is deliberately *not* a one-hot on the aggregated action: that would both
+  draw from the RNG and discard the certainty information the read exists to expose.
+  This is also #51's shared piece (option 1), landing here first.
+- **Added: `VotingAgent::vote_mixture`** (tally + per-mode distribution, the
+  no-draw twin of `aggregate`) and **`VotingAgent::weighted_mixture` is now
+  `pub`** — the CW mixture was private, which is what made the mixture unreachable
+  downstream without going through the sampling path. The inherent method is
+  *not* named `aggregate_distribution`: it would shadow the trait method of that
+  name at every concrete-receiver call site while returning a different type
+  (`Vec<f64>` vs `Option<Vec<f64>>`). `aggregate`/`aggregate_weighted` may share
+  their names with the trait because they mirror it exactly; these do not.
+- **Bit-identity preserved.** `Agent::act` and the nested
+  `<GroupAgent as InternalAgent>::action_probabilities` paths are untouched,
+  including the `Probabilistic` branch's **integer**-count sampling (f64 weights
+  change RNG consumption and would break the ext-8 pins). The three paper figures
+  regenerate byte-identical.
+- **Validation the read performs that `act` gets for free.** `act` hands its
+  vectors to `WeightedIndex`, which rejects non-finite entries, negative weights
+  and a zero total; the read never samples, so it makes those checks itself —
+  **on both sides**, what a member reports and what the aggregator answers with,
+  the latter being the last hop before the caller and the one place a nonsense
+  value could leave the crate. A member whose distribution is not `n_actions`
+  long is additionally rejected (`InvalidLength`) rather than having its vote —
+  and its recorded action — silently aliased modulo its own control count. Every
+  check runs before anything is recorded, and the recording read defers each
+  `record_action` until the whole read has succeeded, so the *advance* is
+  all-or-nothing like `record_group_action` (member beliefs and Dirichlet counts
+  still move during the member loop, as they do in `act` — a *failed* read has
+  therefore still moved them, and there is no side-effect-free way to probe
+  whether a group supports the read; both stated in the rustdoc).
+  `VotingAgent`'s weighted twin mirrors `aggregate_weighted`'s **mode branching**,
+  not just its mixture: under `Deterministic` that method collapses to a uniform
+  choice over the mixture's argmax winners, so the twin reports that support
+  rather than the raw mixture (unreachable through `GroupAgent`, which routes
+  weighted↔CW, but the trait contract is what direct callers read).
+- **Doc note on what the discrete-mode read is.** Under `CertaintyWeighted` the
+  return is exactly the mixture `act` samples from. Under the vote modes it is a
+  tally over member **argmaxes** — supported on `k/n` under `Probabilistic` and on
+  `1/|winners|` under `Deterministic`, and systematically sharper than `act`'s
+  action marginal either way (four members at `[0.6, 0.4]` read as `[1.0, 0.0]`
+  where `act` induces ≈ `[0.71, 0.29]`). It is "the vote the group would
+  deterministically cast", not "the group's policy".
+- **Contract notes written down while the trait is still unreleased.** An
+  `Aggregator` distribution twin may mutate its own state to answer (that is what
+  `&mut self` is for) but must not draw; whether it advances its own action
+  history is its own call, because **the group never tells the aggregator which
+  action the caller resolved** — `record_group_action` fans out to members only. A
+  defaulted `Aggregator::record_action` could close that later without breaking
+  implementors, and is deliberately not guessed at now. `group_distribution`'s
+  first paragraph now leads with the flat-group caveat (nested-group members and
+  sampling sensory slots break the RNG-freedom promise and nothing rejects them),
+  and `group_distribution_recording` warns against being combined with the commit.
+- Test suite 235 → **248** (247 `#[test]` + 1 doctest). New pins: the read consumes
+  no randomness (a fully entropy-seeded group must match a seeded one step for step,
+  in all three modes, with a non-vacuity guard that the read actually moves); the
+  read equals the aggregator's own no-draw arithmetic over standalone member twins;
+  pure-read + commit reproduces the recording read on a single-member CW group while
+  the two genuinely diverge on a real roster; a defaulted aggregator is rejected and
+  a custom one that implements the twins is served; a rejected commit advances
+  nobody; a *failed* recording read advances nobody either (counted through a
+  wrapper member, with the succeeding group as the non-vacuity leg); malformed
+  member distributions (wrong length, non-finite) are rejected; a stateful
+  aggregator's answer advances across reads (the `&mut self` pin); and MMP members
+  survive four consecutive commit-free reads.
+  - The read fixtures run `learn_a` members. With a fixed `A` and the MAB's rank-1
+    deterministic `B`, a member's action distribution is constant and `last_action`
+    is inert, which would make every read/commit assertion vacuous (the ext-3/ext-4
+    constraint again).
 
 2026-08-07 (#5 — `communication.rs`: cadence fix, dead-surface trim, feature gate):
 
@@ -62,6 +232,37 @@ three private items (`mmp_messages`, `N_ARMS`, `half_normal_log_prior`), qualifi
 cannot see lib items). No behaviour change.
 
 ### reproduce harness (unversioned; no `aif` engine change, no release required)
+
+2026-08-08 (#53 — `AgreementAggregator` serves the deterministic read):
+
+- `AgreementAggregator` (ext-4's A1 active slot) implements
+  `Aggregator::aggregate_distribution`, so an ext-4 group answers
+  `GroupAgent::group_distribution` instead of reporting `Unsupported`. It is the
+  motivating implementor the aif-side `&mut self` decision was made for — a POMDP
+  that must run inference to say what it would have chosen — so leaving it
+  unimplemented would have left that rationale hypothetical.
+  - Same observation construction as `aggregate`, driven through
+    `action_probabilities_multi` instead of `act_multi`: identical belief update and
+    policy inference, minus the `WeightedIndex` draw.
+  - **The twin advances the announcement history** (records its own argmax), which
+    is the *opposite* of what the group's pure read does to its members — a
+    measured decision, not a preference. `POMDPAgent` discards an observation while
+    `last_action` is `None` (`agent.rs`: beliefs stay at `D`), so a non-recording
+    twin never leaves `None`, never perceives, and returns uniform forever; a group
+    with an A1 slot would read `[1/3, 1/3, 1/3]` for an entire run. The members can
+    be frozen because `record_group_action` exists to advance them later; the
+    aggregator has no such commit path, so "don't record yet" would mean never.
+    Cost written down in the rustdoc: a caller resolving to a non-argmax action
+    leaves the aggregator scoring agreement against an announcement the group never
+    made.
+  - `aggregate_weighted_distribution` deliberately left at `Ok(None)` — `mode()` is
+    `Probabilistic`, so the group never routes there.
+  - `aggregate` is byte-for-byte untouched; gates G1/G2/G3 unchanged, the study
+    binary reproduces its published numbers (A1 aware α 0.385 / misspec 0.240 /
+    divergence 0.618, null arm exactly 0.000) with every assert-before-print guard
+    firing. The one non-additive line is an argmax extraction out of
+    `aggregate_weighted`, behaviour-identical and covered by the existing
+    `aggregate_weighted_matches_the_argmax_votes`.
 
 2026-08-01 (#41 — extension 8 study, nested groups; the aif side is the [0.12.0] nesting
 bullet below):

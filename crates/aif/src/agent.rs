@@ -469,6 +469,11 @@ pub struct POMDPAgent {
     /// Flat joint-control taken between consecutive windowed timesteps.
     /// `mmp_act_hist[k]` is the action driving the transition from window node
     /// `k` to `k + 1`; length is `mmp_obs_hist.len() - 1` at inference time.
+    ///
+    /// That length relation is a hard invariant of the smoother — `mmp_messages`
+    /// and `transition_action` index this vector directly — and it is maintained
+    /// by superseding rather than appending an observation that arrives with no
+    /// action recorded since the last one (see `perceive_and_learn`).
     mmp_act_hist: Vec<usize>,
     /// Converged smoothed trajectory beliefs, indexed `[window_node][factor]`.
     mmp_traj: Vec<Vec<DVector<f64>>>,
@@ -1201,7 +1206,25 @@ impl POMDPAgent {
             StateInference::MarginalMessagePassing { horizon, iters } => {
                 // Invalidate the cached policy posterior for this new observation.
                 self.cached_policy_posterior = None;
-                self.mmp_obs_hist.push(obs.to_vec());
+                // Window nodes are timesteps, and timesteps advance by ACTIONS: the
+                // smoother's invariant is `mmp_act_hist.len() == mmp_obs_hist.len() - 1`
+                // (`mmp_messages` indexes it unguarded). An observation arriving with no
+                // action recorded since the previous one is therefore a second look at
+                // the SAME timestep — it supersedes the pending observation instead of
+                // opening a node the smoother has no transition for.
+                //
+                // Unreachable from the paired paths (`act`/`act_multi`, and every
+                // `action_probabilities` replay that records the action it scored), so
+                // this is bit-identical for all of them. It is reachable from
+                // `GroupAgent::group_distribution`, the deliberately non-advancing read
+                // (#53), where two reads with no commit between them used to index past
+                // the end of `mmp_act_hist` and panic.
+                if self.mmp_act_hist.len() < self.mmp_obs_hist.len() {
+                    let last = self.mmp_obs_hist.len() - 1;
+                    self.mmp_obs_hist[last] = obs.to_vec();
+                } else {
+                    self.mmp_obs_hist.push(obs.to_vec());
+                }
                 // Slide the window: drop the oldest observation (and the transition
                 // leaving it) once the window exceeds `horizon`.
                 while self.mmp_obs_hist.len() > horizon {

@@ -41,6 +41,96 @@ fn max_count_winners(counts: &[usize]) -> Vec<usize> {
         .collect()
 }
 
+/// The index of the largest entry of `dist`, ties broken by **lowest index** —
+/// the deterministic stand-in for a draw, used by
+/// [`GroupAgent::group_distribution`] to turn a member's action distribution into
+/// the vote (and, in the recording variant, into the action the member advances
+/// to).
+///
+/// `NaN` entries are skipped outright rather than compared, so the answer is the
+/// largest *finite-or-infinite* entry wherever the slice has one. `None` means
+/// there is no such entry at all — an empty slice, or one that is entirely `NaN`
+/// — which callers report as an error rather than resolving to an arbitrary
+/// index.
+fn argmax_index(dist: &[f64]) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (i, &p) in dist.iter().enumerate() {
+        if p.is_nan() {
+            continue;
+        }
+        let better = match best {
+            Some((_, b)) => p > b,
+            None => true,
+        };
+        if better {
+            best = Some((i, p));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Whether a deterministic group read advances its members' `last_action`.
+///
+/// The two [`GroupAgent::group_distribution`] entry points differ only in this
+/// flag; see their docs for the contract each one carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemberAdvance {
+    /// Leave every member's `last_action` untouched — a pure read.
+    Hold,
+    /// Record each member's own argmax, the deterministic stand-in for the draw
+    /// [`Agent::act`] would have made.
+    Argmax,
+}
+
+/// The value checks `WeightedIndex::new` performs on the sampling path, made
+/// explicit for the deterministic read: every entry finite and non-negative, and
+/// a strictly positive total.
+///
+/// [`Agent::act`] gets these for free — it hands the vector to `WeightedIndex`,
+/// which rejects negatives, non-finite entries and an all-zero total as
+/// [`AifError::Weight`]. [`GroupAgent::group_distribution`] never samples, so
+/// without this a bad vector would flow through the mixture arithmetic and be
+/// **returned to the caller** as the group's distribution — the one place a
+/// nonsense value could escape the crate. `source` names the offending slot and
+/// is formatted **only on the error paths** — this runs per member per read, the
+/// consumer's per-decision hot path, so the success path allocates nothing.
+fn validate_sampleable(weights: &[f64], source: &dyn std::fmt::Display) -> Result<(), AifError> {
+    let mut total = 0.0f64;
+    for (i, &w) in weights.iter().enumerate() {
+        if !w.is_finite() || w < 0.0 {
+            return Err(AifError::InvalidDistribution(format!(
+                "{source} reported {w} at index {i}: entries must be finite and \
+                 non-negative, the condition `WeightedIndex` enforces for `Agent::act`"
+            )));
+        }
+        total += w;
+    }
+    if total <= 0.0 {
+        return Err(AifError::InvalidDistribution(format!(
+            "{source} reported a distribution with no mass (total {total}); \
+             `WeightedIndex` rejects it on the sampling path"
+        )));
+    }
+    Ok(())
+}
+
+/// The entries of `mixture` tied (within `1e-10`) for its largest value — the
+/// winner set [`VotingAgent::aggregate_weighted`] resolves under
+/// `Deterministic`, and the support of the distribution its no-draw twin reports
+/// in that mode.
+///
+/// The tolerance matters: unlike the integer vote counts of
+/// [`max_count_winners`], a confidence-weighted mixture ties only approximately.
+fn mixture_winners(mixture: &[f64]) -> Vec<usize> {
+    let max_p = mixture.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    mixture
+        .iter()
+        .enumerate()
+        .filter(|&(_, &p)| (p - max_p).abs() < 1e-10)
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// Confidence weight of one agent's action distribution: `w = exp(−H)`, where
 /// `H = −Σ p ln p` is the Shannon entropy in nats.
 ///
@@ -156,7 +246,9 @@ impl VotingAgent {
     ///
     /// This is the group-as-member view:
     /// [`InternalAgent::action_probabilities`] for a nested [`GroupAgent`] returns
-    /// it verbatim, so the sampling moves up to the outer group.
+    /// it verbatim, so the sampling moves up to the outer group. The tally-taking
+    /// wrapper [`vote_mixture`](Self::vote_mixture) is the public form, reached
+    /// from [`GroupAgent::group_distribution`].
     ///
     /// It is deliberately **not** used for `aggregate`'s own sampling:
     /// `WeightedIndex` over the integer counts and over these `f64` weights
@@ -215,6 +307,32 @@ impl VotingAgent {
         }
     }
 
+    /// The distribution [`aggregate`](Self::aggregate) would have sampled its
+    /// group action from, given one discrete `votes` entry per internal agent —
+    /// formed **without** drawing from the voter's RNG.
+    ///
+    /// The no-draw twin of `aggregate`: it carries that method's validation
+    /// (returning [`AifError::InvalidAction`] for the first out-of-range vote) and
+    /// its mode branching — uniform over the winner set under `Deterministic`,
+    /// the counts normalized by their total otherwise (uniform when there are no
+    /// votes at all) — and leaves only the sampling step to the caller.
+    ///
+    /// Reached generically through [`Aggregator::aggregate_distribution`], which
+    /// is how [`GroupAgent::group_distribution`] resolves the discrete-vote modes.
+    ///
+    /// Named to match [`weighted_mixture`](Self::weighted_mixture) rather than the
+    /// trait method it backs: an inherent `aggregate_distribution` would **shadow**
+    /// the trait's at every concrete-receiver call site while returning a different
+    /// type (`Vec<f64>` vs `Option<Vec<f64>>`), so which one a reader gets would
+    /// depend on whether the receiver is concrete or generic. `aggregate` and
+    /// `aggregate_weighted` may share their names with the trait because they
+    /// mirror it exactly; these two do not.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn vote_mixture(&self, votes: &[usize]) -> Result<Vec<f64>, AifError> {
+        let counts = self.vote_counts(votes)?;
+        Ok(self.vote_distribution(&counts))
+    }
+
     /// Aggregate full action-probability distributions weighted by confidence.
     ///
     /// Each agent contributes its action distribution `P_i(a)`, weighted by
@@ -239,16 +357,7 @@ impl VotingAgent {
         let mixture = self.weighted_mixture(distributions)?;
 
         if self.mode == VotingMode::Deterministic {
-            let max_p = mixture
-                .iter()
-                .copied()
-                .fold(f64::NEG_INFINITY, f64::max);
-            let winners: Vec<usize> = mixture
-                .iter()
-                .enumerate()
-                .filter(|&(_, &p)| (p - max_p).abs() < 1e-10)
-                .map(|(i, _)| i)
-                .collect();
+            let winners = mixture_winners(&mixture);
             if winners.len() == 1 {
                 Ok(winners[0])
             } else {
@@ -275,8 +384,11 @@ impl VotingAgent {
     ///
     /// This is the group-as-member view under `CertaintyWeighted`:
     /// [`InternalAgent::action_probabilities`] for a nested [`GroupAgent`] returns
-    /// it verbatim, so the sampling moves up to the outer group.
-    fn weighted_mixture(&self, distributions: &[DVector<f64>]) -> Result<Vec<f64>, AifError> {
+    /// it verbatim, so the sampling moves up to the outer group. It is also what
+    /// [`GroupAgent::group_distribution`] returns in that mode, reached
+    /// generically through [`Aggregator::aggregate_weighted_distribution`].
+    #[allow(clippy::missing_errors_doc)]
+    pub fn weighted_mixture(&self, distributions: &[DVector<f64>]) -> Result<Vec<f64>, AifError> {
         for dist in distributions {
             if dist.len() != self.n_actions {
                 return Err(AifError::InvalidLength {
@@ -337,6 +449,39 @@ impl VotingAgent {
 /// the inherent methods, which stay the public API). The trait exists so the
 /// active slot can be a proper active-inference agent instead of a rule-based
 /// tallier — the paper's §4.1 suggestion, tracked as extension 4.
+///
+/// # The distribution twins
+///
+/// Both aggregation methods *sample*: they return a chosen action and may draw
+/// from the implementor's RNG to do it. The two `*_distribution` methods are
+/// their no-draw twins — the distribution behind the choice — and are what
+/// [`GroupAgent::group_distribution`] reads to answer without consuming
+/// randomness (issue #53).
+///
+/// They are **defaulted to `Ok(None)`**, meaning "this aggregator exposes no
+/// distribution behind its choice", so existing implementors keep compiling; a
+/// group whose active slot leaves them defaulted simply cannot serve the
+/// deterministic read (it reports [`AifError::Unsupported`]) and is
+/// unaffected otherwise. The default is deliberately *not* a one-hot on the
+/// aggregated action: that would both draw from the RNG and discard exactly the
+/// certainty information the read exists to expose.
+///
+/// ## What a twin may do to its own state
+///
+/// It may mutate whatever it needs to in order to answer — that is what
+/// `&mut self` is for, and an aggregator that is itself an active-inference agent
+/// has to run inference. What it must **not** do is draw from an RNG: the whole
+/// contract of [`GroupAgent::group_distribution`] is that no randomness is
+/// consumed anywhere beneath it.
+///
+/// Whether to advance its own action history is the implementor's call, and there
+/// is no right answer the group can supply: **the group never tells the aggregator
+/// which action the caller finally resolved.** `record_group_action` fans out to
+/// the *members* only, so an aggregator that records something in its twin is
+/// recording a guess (its own argmax, say), and one that records nothing leaves
+/// its history un-advanced. Document whichever you choose. A defaulted
+/// `record_action` on this trait could close the gap later without breaking
+/// implementors; it is deliberately not being guessed at now.
 pub trait Aggregator {
     /// Collapse one discrete vote per internal agent into a group action.
     #[allow(clippy::missing_errors_doc)]
@@ -352,6 +497,41 @@ pub trait Aggregator {
 
     /// Which of the two aggregation paths [`GroupAgent::act`] should feed.
     fn mode(&self) -> VotingMode;
+
+    /// The distribution [`aggregate`](Self::aggregate) would have sampled from,
+    /// **without** drawing from any RNG.
+    ///
+    /// `Ok(None)` — the default — means this aggregator exposes no such
+    /// distribution. Implementors that do return `Ok(Some(dist))` with
+    /// `dist.len() == n_actions`, and report input validation (e.g. an
+    /// out-of-range vote) through `Err` exactly as `aggregate` does.
+    ///
+    /// Takes `&mut self` to match `aggregate`, not because a distribution is
+    /// expected to mutate anything: an aggregator that is itself an
+    /// active-inference agent (extension 4's `AgreementAggregator` is one) must
+    /// run belief updates to say what it would have chosen, and `&self` would shut
+    /// exactly those implementors out of the deterministic read. Implementors that
+    /// *can* answer immutably — [`VotingAgent`] does — should keep the underlying
+    /// inherent method on `&self` and delegate.
+    #[allow(clippy::missing_errors_doc)]
+    fn aggregate_distribution(&mut self, votes: &[usize]) -> Result<Option<Vec<f64>>, AifError> {
+        let _ = votes;
+        Ok(None)
+    }
+
+    /// The distribution [`aggregate_weighted`](Self::aggregate_weighted) would
+    /// have sampled from, **without** drawing from any RNG. `Ok(None)` — the
+    /// default — means this aggregator exposes no such distribution. `&mut self`
+    /// for the reason given on
+    /// [`aggregate_distribution`](Self::aggregate_distribution).
+    #[allow(clippy::missing_errors_doc)]
+    fn aggregate_weighted_distribution(
+        &mut self,
+        distributions: &[DVector<f64>],
+    ) -> Result<Option<Vec<f64>>, AifError> {
+        let _ = distributions;
+        Ok(None)
+    }
 }
 
 impl Aggregator for VotingAgent {
@@ -368,6 +548,32 @@ impl Aggregator for VotingAgent {
 
     fn mode(&self) -> VotingMode {
         self.mode
+    }
+
+    fn aggregate_distribution(&mut self, votes: &[usize]) -> Result<Option<Vec<f64>>, AifError> {
+        self.vote_mixture(votes).map(Some)
+    }
+
+    /// Mirrors [`aggregate_weighted`](VotingAgent::aggregate_weighted)'s **mode
+    /// branching**, not just its mixture: under `Deterministic` that method
+    /// collapses the mixture to a uniform choice over its argmax winners, so
+    /// returning the raw mixture there would not be "the distribution it would
+    /// have sampled from". Under the other modes the mixture *is* what it samples.
+    fn aggregate_weighted_distribution(
+        &mut self,
+        distributions: &[DVector<f64>],
+    ) -> Result<Option<Vec<f64>>, AifError> {
+        let mixture = self.weighted_mixture(distributions)?;
+        if self.mode != VotingMode::Deterministic {
+            return Ok(Some(mixture));
+        }
+        let winners = mixture_winners(&mixture);
+        let share = 1.0 / winners.len() as f64;
+        let mut dist = vec![0.0f64; self.n_actions];
+        for &w in &winners {
+            dist[w] = share;
+        }
+        Ok(Some(dist))
     }
 }
 
@@ -516,6 +722,267 @@ impl<S: Agent, I: InternalAgent, X: Aggregator> GroupAgent<S, I, X> {
     #[must_use]
     pub fn voting_mode(&self) -> VotingMode {
         self.active.mode()
+    }
+
+    /// The group's action distribution, formed **without drawing from any RNG**
+    /// and **without advancing any member's `last_action`** — the deterministic
+    /// read (issue #53).
+    ///
+    /// **This is a flat-group surface, and its RNG-freedom is only as good as the
+    /// slots.** It holds for a deterministic sensory slot, [`POMDPAgent`] members
+    /// and a [`VotingAgent`] aggregator. It does **not** hold for a member that is
+    /// itself a [`GroupAgent`] (nested `action_probabilities` runs the sampling
+    /// member loop from [`Agent::act`] verbatim) or for a sampling sensory slot
+    /// (extension 4's `SensoryFilter` resamples). Nothing rejects those
+    /// configurations — the method is on the fully generic impl block — so the
+    /// promise in the first sentence is yours to keep by choosing the slots.
+    ///
+    /// Under `CertaintyWeighted` this is exactly the mixture
+    /// [`Agent::act`] would have sampled its action from. Under the discrete-vote
+    /// modes it is **not** `act`'s action marginal: the members' draws are
+    /// replaced by their argmaxes, so the returned vector is a tally over
+    /// hard-committed votes — supported on `k/n` and systematically sharper than
+    /// the marginal (four members each at `[0.6, 0.4]` read as `[1.0, 0.0]`, where
+    /// `act` induces roughly `[0.71, 0.29]`). Treat it as "the vote the group
+    /// would deterministically cast", not "the group's policy". This is the same
+    /// substitution described below, called out here because a caller scoring the
+    /// return as a probability will otherwise read it as over-confident.
+    ///
+    /// [`Agent::act`] samples in three places: the members' own actions (their
+    /// `act` draw under the vote modes, the group RNG's draw under
+    /// `CertaintyWeighted`), and the aggregator's final collapse. This method
+    /// replaces all of them with their deterministic counterparts:
+    ///
+    /// * each member reports [`InternalAgent::action_probabilities`], which does
+    ///   not sample;
+    /// * under `Probabilistic`/`Deterministic` the member's **vote** is the
+    ///   argmax of that distribution (ties to the lowest index) instead of a
+    ///   draw from it, and the votes are tallied through
+    ///   [`Aggregator::aggregate_distribution`];
+    /// * under `CertaintyWeighted` the members' distributions go straight to
+    ///   [`Aggregator::aggregate_weighted_distribution`] — the confidence-weighted
+    ///   mixture `aggregate_weighted` would have sampled from.
+    ///
+    /// # What "deterministic" does and does not promise
+    ///
+    /// The result is a deterministic function of `(group state, observation)`:
+    /// no randomness enters, so two groups in the same state answer identically,
+    /// and a seeded group's RNG streams are left exactly where they were.
+    ///
+    /// It is **not** side-effect-free: `action_probabilities` moves each member's
+    /// beliefs — and, under `learn_*` flags, its Dirichlet counts — exactly as
+    /// `act` does. What is held fixed is `last_action`.
+    ///
+    /// ## …but on its own it does not advance the trial clock
+    ///
+    /// Under the default [`MeanField`](crate::StateInference) inference a member
+    /// **ignores observations until it has a recorded action**: with `last_action`
+    /// still `None` the belief step resets to `D` and `update_a` returns early.
+    /// That is not new — it is the same `t = 0` rule [`Agent::act`] obeys on its
+    /// first call — but `act` then records, and a pure read does not. So a group
+    /// that is only ever *read*, never committed, stays at `t = 0`: every call
+    /// returns the **same** distribution and no member learns anything.
+    ///
+    /// The read → decide → commit loop is therefore the intended shape, not merely
+    /// one option: after the first [`record_group_action`](Self::record_group_action)
+    /// each subsequent read sees a state that has genuinely moved on. If the
+    /// caller wants members advancing without arbitrating the group's choice, use
+    /// [`group_distribution_recording`](Self::group_distribution_recording), which
+    /// records and so never sits at `t = 0`. Pinned by
+    /// `test_uncommitted_reads_stay_at_t0`.
+    ///
+    /// Advance `last_action` deliberately with
+    /// [`record_group_action`](Self::record_group_action) once the caller has
+    /// resolved the group's action, or use
+    /// [`group_distribution_recording`](Self::group_distribution_recording) to
+    /// have each member advance to its own argmax inside the read.
+    ///
+    /// For members under [`StateInference::MarginalMessagePassing`](crate::StateInference)
+    /// this has a further consequence worth knowing: that smoother's window nodes
+    /// are timesteps and timesteps advance by *actions*, so a read that records
+    /// nothing does not open a new node. Two reads with no commit between them are
+    /// two looks at the **same** timestep — the second observation supersedes the
+    /// first in the member's window (with its belief update and, under `learn_*`,
+    /// its Dirichlet update applied twice). Commit between reads if each is meant
+    /// to be its own timestep.
+    ///
+    /// # RNG-freedom is inherited from the slots
+    ///
+    /// The group draws nothing, but the guarantee only extends as far as the
+    /// slots: it holds for a [`CopyAgent`] (or any deterministic) sensory slot,
+    /// [`POMDPAgent`] members, and a [`VotingAgent`] aggregator, whose
+    /// distribution twins are pure reads. A member that is itself a
+    /// [`GroupAgent`] does **not** qualify — nested
+    /// `action_probabilities` runs the sampling member loop from `Agent::act`
+    /// verbatim. The deterministic read is a flat-group surface.
+    ///
+    /// # Errors
+    ///
+    /// [`AifError::Unsupported`] if the active slot leaves the [`Aggregator`]
+    /// distribution twins defaulted — the configuration is valid, it just has no
+    /// deterministic read. [`AifError::InvalidDistribution`] if a member or the
+    /// aggregator reports something no sampler would take: an empty distribution,
+    /// a non-finite or negative entry, or no mass at all (`WeightedIndex` rejects
+    /// the same for [`Agent::act`]). [`AifError::InvalidLength`] if a member's
+    /// distribution is not `n_actions` long — i.e. its action space is not the
+    /// group's, which would otherwise alias its vote — or if the aggregator
+    /// returns a wrongly sized one. Plus whatever the sensory slot's
+    /// [`Agent::act`] returns.
+    ///
+    /// Every check runs before anything is **recorded** — but not before the
+    /// members are polled, so a failed read has still moved their beliefs (and,
+    /// under `learn_*`, their Dirichlet counts). There is no side-effect-free way
+    /// to probe whether a group supports the read: one built with a defaulted
+    /// aggregator polls its whole roster and only then reports
+    /// [`AifError::Unsupported`].
+    pub fn group_distribution(&mut self, observation: usize) -> Result<DVector<f64>, AifError> {
+        self.group_distribution_with(observation, MemberAdvance::Hold)
+    }
+
+    /// [`group_distribution`](Self::group_distribution), except each member
+    /// records the **argmax of its own distribution** — the deterministic
+    /// stand-in for the action it would have sampled in [`Agent::act`].
+    ///
+    /// Same distribution, same RNG-freedom; the difference is only that members
+    /// keep advancing, one action per read, exactly as they do when the group
+    /// acts. Use this when the members' `last_action` (their transition prior,
+    /// and their MMP action history) must keep moving without the caller
+    /// arbitrating the group's choice; use the pure read plus
+    /// [`record_group_action`](Self::record_group_action) when the members should
+    /// instead advance to the action the *group* settled on.
+    ///
+    /// # Do not combine the two advances
+    ///
+    /// This method and [`record_group_action`](Self::record_group_action) are
+    /// alternatives, not a sequence. Calling the commit after this read advances
+    /// every member **twice** for one observation, which under
+    /// [`MarginalMessagePassing`](crate::StateInference) leaves a member's action
+    /// history one entry longer than its observation window: no panic, but
+    /// `last_action` and the transition the smoother reads for the next node
+    /// disagree until the window next slides. Pick one advance per observation.
+    ///
+    /// # Errors
+    ///
+    /// As [`group_distribution`](Self::group_distribution).
+    pub fn group_distribution_recording(
+        &mut self,
+        observation: usize,
+    ) -> Result<DVector<f64>, AifError> {
+        self.group_distribution_with(observation, MemberAdvance::Argmax)
+    }
+
+    /// Record `action` as every member's last action — the explicit commit that
+    /// pairs with the pure [`group_distribution`](Self::group_distribution) read.
+    ///
+    /// The read deliberately leaves `last_action` alone because the group's
+    /// action is not known until the caller resolves the returned distribution
+    /// (argmax, a threshold, a policy of its own). This is how that resolved
+    /// action gets back into the members: read → decide → commit, with the
+    /// members advancing to the **group's** action rather than to a per-member
+    /// surrogate.
+    ///
+    /// Draws nothing and touches no beliefs; it is exactly
+    /// [`InternalAgent::record_action`] fanned out across the roster.
+    ///
+    /// # Precondition: the members share the group's action space
+    ///
+    /// `action` is validated against the **group's** `n_actions` and then handed
+    /// to every member verbatim. [`InternalAgent::record_action`] does not
+    /// validate, and a [`POMDPAgent`] decodes a flat control modulo its own
+    /// control counts, so a member with a smaller action space would silently
+    /// record an aliased control. The deterministic reads enforce the matching
+    /// space for you — they reject any member whose distribution is not
+    /// `n_actions` long — so the read → decide → commit flow cannot reach that
+    /// state; a commit issued without a preceding read is the caller's to check.
+    ///
+    /// # Errors
+    ///
+    /// [`AifError::InvalidAction`] if `action` is outside the group's action
+    /// space, in which case no member is advanced.
+    pub fn record_group_action(&mut self, action: usize) -> Result<(), AifError> {
+        if action >= self.n_actions {
+            return Err(AifError::InvalidAction(action));
+        }
+        for agent in &mut self.internal {
+            agent.record_action(action);
+        }
+        Ok(())
+    }
+
+    /// Shared body of the two deterministic reads; `advance` is their only
+    /// difference.
+    fn group_distribution_with(
+        &mut self,
+        observation: usize,
+        advance: MemberAdvance,
+    ) -> Result<DVector<f64>, AifError> {
+        let sensory_output = self.sensory.act(observation)?;
+
+        let mut distributions = Vec::with_capacity(self.internal.len());
+        let mut votes = Vec::with_capacity(self.internal.len());
+        for (i, agent) in self.internal.iter_mut().enumerate() {
+            let probs = agent.action_probabilities(sensory_output);
+            // A member whose action space is not the group's would have its vote —
+            // and, worse, its recorded action — silently aliased modulo its own
+            // control count. Reject the configuration here, before anything is
+            // recorded, rather than corrupting the roster. (`Agent::act` cannot hit
+            // this: it samples each member within its own distribution.)
+            if probs.len() != self.n_actions {
+                return Err(AifError::InvalidLength {
+                    expected: self.n_actions,
+                    got: probs.len(),
+                });
+            }
+            validate_sampleable(probs.as_slice(), &format_args!("internal agent {i}"))?;
+            // One argmax per member, serving both roles: the vote under the
+            // discrete modes and the recorded action under `Argmax`. Computing it
+            // unconditionally keeps the two entry points reporting the same errors.
+            let Some(choice) = argmax_index(probs.as_slice()) else {
+                return Err(AifError::InvalidDistribution(format!(
+                    "internal agent {i} reported an empty action distribution"
+                )));
+            };
+            votes.push(choice);
+            distributions.push(probs);
+        }
+
+        let mixture = if self.active.mode() == VotingMode::CertaintyWeighted {
+            self.active.aggregate_weighted_distribution(&distributions)?
+        } else {
+            self.active.aggregate_distribution(&votes)?
+        };
+
+        let mixture = mixture.ok_or_else(|| {
+            AifError::Unsupported(
+                "the active slot exposes no action distribution behind its choice: \
+                 Aggregator::aggregate_distribution / aggregate_weighted_distribution \
+                 are left at their `Ok(None)` defaults, so this group has no \
+                 deterministic read"
+                    .to_string(),
+            )
+        })?;
+
+        if mixture.len() != self.n_actions {
+            return Err(AifError::InvalidLength {
+                expected: self.n_actions,
+                got: mixture.len(),
+            });
+        }
+        // The aggregator is the last hop before the caller, and the caller samples
+        // from what it gets — so a custom `X` returning NaN or negative mass must be
+        // caught here, exactly as `aggregate_weighted`'s own `WeightedIndex` call
+        // would have caught it on the sampling path.
+        validate_sampleable(&mixture, &"the active slot")?;
+
+        // Advance only once the whole read has succeeded, so the recording variant
+        // is all-or-nothing like `record_group_action`: a group that fails at the
+        // aggregation step must not leave half its roster moved on.
+        if advance == MemberAdvance::Argmax {
+            for (agent, &choice) in self.internal.iter_mut().zip(votes.iter()) {
+                agent.record_action(choice);
+            }
+        }
+        Ok(DVector::from_vec(mixture))
     }
 }
 
@@ -1907,6 +2374,788 @@ mod tests {
             group_seq, solo_seq,
             "FirstVote must return internal agent 0's action at every step"
         );
+        Ok(())
+    }
+
+    // ----- Deterministic group read (tira #53) -----
+
+    /// A [`FirstVote`] that also exposes the distribution behind its choice: a
+    /// one-hot on internal agent 0's vote. Proves the deterministic read reaches a
+    /// custom `X: Aggregator` through the trait, not only [`VotingAgent`].
+    #[derive(Debug)]
+    struct FirstVoteDist {
+        n_actions: usize,
+    }
+
+    impl Aggregator for FirstVoteDist {
+        fn aggregate(&mut self, votes: &[usize]) -> Result<usize, AifError> {
+            votes
+                .first()
+                .copied()
+                .ok_or(AifError::InvalidLength { expected: 1, got: 0 })
+        }
+
+        fn aggregate_weighted(
+            &mut self,
+            distributions: &[DVector<f64>],
+        ) -> Result<usize, AifError> {
+            let first = distributions
+                .first()
+                .ok_or(AifError::InvalidLength { expected: 1, got: 0 })?;
+            argmax_index(first.as_slice()).ok_or(AifError::InvalidLength {
+                expected: self.n_actions,
+                got: first.len(),
+            })
+        }
+
+        fn mode(&self) -> VotingMode {
+            VotingMode::Probabilistic
+        }
+
+        fn aggregate_distribution(
+            &mut self,
+            votes: &[usize],
+        ) -> Result<Option<Vec<f64>>, AifError> {
+            let vote = *votes
+                .first()
+                .ok_or(AifError::InvalidLength { expected: 1, got: 0 })?;
+            if vote >= self.n_actions {
+                return Err(AifError::InvalidAction(vote));
+            }
+            let mut dist = vec![0.0; self.n_actions];
+            dist[vote] = 1.0;
+            Ok(Some(dist))
+        }
+    }
+
+    /// The roster the read tests drive: [`NESTED_OBS`] members (they disagree
+    /// often enough that the tally and the mixture are both live) with `learn_a`
+    /// on.
+    ///
+    /// Learning is **required** for these fixtures to pin anything. With a fixed
+    /// `A` and the MAB's rank-1 deterministic `B`, the predictive prior is a delta
+    /// on the arm just taken and the next step's neg-G does not depend on it, so a
+    /// member's action distribution is constant — `last_action` would be inert and
+    /// every read/commit assertion vacuous (the same constraint ext-3/ext-4 hit;
+    /// see [`learning_slot_members`]). pA updates read the belief, i.e. the
+    /// recorded action, which is exactly the channel these tests exercise.
+    fn read_members(n: usize, seed: u64) -> Result<Vec<POMDPAgent>, AifError> {
+        (0..n)
+            .map(|i| {
+                let mut agent = POMDPAgent::new(
+                    3,
+                    Some(NESTED_OBS.to_vec()),
+                    Some(vec![1.0, 1.0, 1.0]),
+                    vec![0.7, 0.3],
+                    None,
+                    0.5,
+                    true,
+                )?;
+                InternalAgent::reseed(&mut agent, seed.wrapping_add(1 + i as u64));
+                Ok(agent)
+            })
+            .collect()
+    }
+
+    fn read_group(n: usize, mode: VotingMode, seed: u64) -> Result<GroupAgent, AifError> {
+        Ok(GroupAgent::with_slots_seeded(
+            CopyAgent,
+            read_members(n, seed)?,
+            VotingAgent::with_seed(3, mode, seed),
+            3,
+            seed,
+        ))
+    }
+
+    /// The core #53 contract: the read consumes no randomness.
+    ///
+    /// Two groups that differ in **every** RNG the read could reach — the group
+    /// RNG and the voter seeded from entropy rather than `SEED`, and members
+    /// reseeded to an unrelated stream — must return bit-identical distributions
+    /// at every step, in all three modes. Anything that drew would decorrelate
+    /// them almost immediately.
+    ///
+    /// Kept in lockstep by committing the same action into both after each read,
+    /// so the only remaining difference stays the RNG state.
+    #[test]
+    fn test_group_distribution_consumes_no_randomness() -> Result<(), AifError> {
+        const SEED: u64 = 53;
+        const N_INTERNAL: usize = 4;
+        const N_STEPS: usize = 20;
+
+        for mode in [
+            VotingMode::CertaintyWeighted,
+            VotingMode::Probabilistic,
+            VotingMode::Deterministic,
+        ] {
+            let mut seeded = read_group(N_INTERNAL, mode, SEED)?;
+            let mut entropic = GroupAgent::with_slots(
+                CopyAgent,
+                // Same models and same alpha; only the members' RNG streams differ.
+                read_members(N_INTERNAL, SEED.wrapping_add(9_999))?,
+                VotingAgent::new(3, mode),
+                3,
+            );
+
+            let mut seen = Vec::with_capacity(N_STEPS);
+            for t in 0..N_STEPS {
+                let a = seeded.group_distribution(t % 2)?;
+                let b = entropic.group_distribution(t % 2)?;
+                assert_eq!(
+                    a.as_slice(),
+                    b.as_slice(),
+                    "{mode:?} step {t}: the deterministic read must not depend on any RNG"
+                );
+                let choice = argmax_index(a.as_slice())
+                    .expect("invariant: a group distribution over 3 actions has a maximum");
+                seeded.record_group_action(choice)?;
+                entropic.record_group_action(choice)?;
+                seen.push(a);
+            }
+
+            // Non-vacuity: the equality above would hold trivially if the read
+            // returned the same vector every step (which is what a fixed-A roster
+            // does — see `read_members`).
+            assert!(
+                seen.iter().any(|d| d.as_slice() != seen[0].as_slice()),
+                "{mode:?}: the read must actually move across steps"
+            );
+        }
+        Ok(())
+    }
+
+    /// Exactness pin: the read is the aggregator's own no-draw arithmetic over the
+    /// members' distributions, not an approximation of it.
+    ///
+    /// Standalone twins of the members supply `action_probabilities`; a standalone
+    /// [`VotingAgent`] supplies the mixture (`CertaintyWeighted`) or the tally over
+    /// argmax votes (the discrete modes). The group must match entry for entry.
+    #[test]
+    fn test_group_distribution_equals_hand_built_aggregation() -> Result<(), AifError> {
+        const SEED: u64 = 77;
+        const N_INTERNAL: usize = 3;
+        const N_STEPS: usize = 15;
+
+        for mode in [
+            VotingMode::CertaintyWeighted,
+            VotingMode::Probabilistic,
+            VotingMode::Deterministic,
+        ] {
+            let mut group = read_group(N_INTERNAL, mode, SEED)?;
+            let mut twins = read_members(N_INTERNAL, SEED)?;
+            let reference = VotingAgent::with_seed(3, mode, SEED);
+
+            for t in 0..N_STEPS {
+                let observation = t % 2;
+                let got = group.group_distribution(observation)?;
+
+                let dists: Vec<DVector<f64>> = twins
+                    .iter_mut()
+                    .map(|a| POMDPAgent::action_probabilities(a, observation))
+                    .collect();
+                let votes: Vec<usize> = dists
+                    .iter()
+                    .map(|d| {
+                        argmax_index(d.as_slice())
+                            .expect("invariant: member distributions are non-empty and finite")
+                    })
+                    .collect();
+                let expected = if mode == VotingMode::CertaintyWeighted {
+                    reference.weighted_mixture(&dists)?
+                } else {
+                    reference.vote_mixture(&votes)?
+                };
+
+                assert_eq!(
+                    got.as_slice(),
+                    expected.as_slice(),
+                    "{mode:?} step {t}: group read must equal the aggregator's own no-draw form"
+                );
+
+                let choice = argmax_index(got.as_slice())
+                    .expect("invariant: a group distribution over 3 actions has a maximum");
+                group.record_group_action(choice)?;
+                for twin in &mut twins {
+                    POMDPAgent::record_action(twin, choice);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The two entry points differ in exactly the documented way, and the
+    /// difference is **live** rather than a distinction on paper.
+    ///
+    /// * A single-member `CertaintyWeighted` group's mixture *is* that member's
+    ///   distribution, so the group argmax and the member argmax coincide: the
+    ///   pure read followed by `record_group_action(argmax)` must reproduce
+    ///   `group_distribution_recording` step for step.
+    /// * With a real roster, a pure read that never advances `last_action`
+    ///   must diverge from the recording variant — otherwise the first pin above
+    ///   would be vacuous.
+    #[test]
+    fn test_recording_read_equals_pure_read_plus_commit() -> Result<(), AifError> {
+        const SEED: u64 = 31;
+        const N_STEPS: usize = 20;
+
+        let mut committed = read_group(1, VotingMode::CertaintyWeighted, SEED)?;
+        let mut recording = read_group(1, VotingMode::CertaintyWeighted, SEED)?;
+        for t in 0..N_STEPS {
+            let read = committed.group_distribution(t % 2)?;
+            let choice = argmax_index(read.as_slice())
+                .expect("invariant: a group distribution over 3 actions has a maximum");
+            committed.record_group_action(choice)?;
+            let advanced = recording.group_distribution_recording(t % 2)?;
+            assert_eq!(
+                read.as_slice(),
+                advanced.as_slice(),
+                "step {t}: with one member the group argmax IS the member argmax, so \
+                 read+commit must track the recording read"
+            );
+        }
+
+        let mut pure = read_group(4, VotingMode::CertaintyWeighted, SEED)?;
+        let mut advancing = read_group(4, VotingMode::CertaintyWeighted, SEED)?;
+        let mut diverged = false;
+        for t in 0..N_STEPS {
+            let a = pure.group_distribution(t % 2)?;
+            let b = advancing.group_distribution_recording(t % 2)?;
+            diverged |= a.as_slice() != b.as_slice();
+        }
+        assert!(
+            diverged,
+            "the recording read must actually advance members — otherwise the \
+             read/commit equivalence above pins nothing"
+        );
+        Ok(())
+    }
+
+    /// An aggregator that leaves the distribution twins defaulted has no
+    /// deterministic read, and says so instead of inventing one.
+    #[test]
+    fn test_group_distribution_rejects_aggregator_without_distribution()
+    -> Result<(), AifError> {
+        let mut group =
+            GroupAgent::with_slots_seeded(CopyAgent, read_members(3, 5)?, FirstVote, 3, 5);
+        assert!(
+            matches!(group.group_distribution(0), Err(AifError::Unsupported(_))),
+            "a default `Ok(None)` aggregator must reject the read as a missing \
+             CAPABILITY, distinguishable from a bad value"
+        );
+        // ...while the sampling path it does support is untouched.
+        assert!(group.act(0).is_ok());
+        Ok(())
+    }
+
+    /// …and one that implements them is served, generically in `X`.
+    #[test]
+    fn test_group_distribution_reaches_custom_aggregator() -> Result<(), AifError> {
+        const SEED: u64 = 11;
+
+        let mut group = GroupAgent::with_slots_seeded(
+            CopyAgent,
+            read_members(3, SEED)?,
+            FirstVoteDist { n_actions: 3 },
+            3,
+            SEED,
+        );
+        let mut twin = read_members(1, SEED)?
+            .pop()
+            .expect("invariant: read_members(1, ..) yields exactly one agent");
+
+        let got = group.group_distribution(0)?;
+        let expected_vote = argmax_index(POMDPAgent::action_probabilities(&mut twin, 0).as_slice())
+            .expect("invariant: member distributions are non-empty and finite");
+        let mut expected = vec![0.0; 3];
+        expected[expected_vote] = 1.0;
+        assert_eq!(
+            got.as_slice(),
+            expected.as_slice(),
+            "FirstVoteDist must place all mass on internal agent 0's argmax vote"
+        );
+        Ok(())
+    }
+
+    /// The commit validates before it fans out: an out-of-range action advances
+    /// nobody, so the next read is the one the group would have produced anyway.
+    #[test]
+    fn test_record_group_action_rejects_out_of_range_action() -> Result<(), AifError> {
+        const SEED: u64 = 19;
+
+        let mut rejected = read_group(3, VotingMode::CertaintyWeighted, SEED)?;
+        let mut untouched = read_group(3, VotingMode::CertaintyWeighted, SEED)?;
+
+        let _ = rejected.group_distribution(0)?;
+        let _ = untouched.group_distribution(0)?;
+        assert!(
+            matches!(rejected.record_group_action(3), Err(AifError::InvalidAction(3))),
+            "action 3 is outside a 3-action group"
+        );
+
+        let after_rejected = rejected.group_distribution(1)?;
+        assert_eq!(
+            after_rejected.as_slice(),
+            untouched.group_distribution(1)?.as_slice(),
+            "a rejected commit must leave every member's last_action alone"
+        );
+
+        // Non-vacuity: an ACCEPTED commit does move the next read, so the equality
+        // above is a statement about the rejection, not about commits being inert.
+        let mut accepted = read_group(3, VotingMode::CertaintyWeighted, SEED)?;
+        let _ = accepted.group_distribution(0)?;
+        accepted.record_group_action(2)?;
+        assert_ne!(
+            accepted.group_distribution(1)?.as_slice(),
+            after_rejected.as_slice(),
+            "an accepted commit must advance the roster"
+        );
+        Ok(())
+    }
+
+    /// A member wrapper that counts how many times it was advanced — the
+    /// observation channel for the all-or-nothing pins ([`POMDPAgent`] exposes no
+    /// `last_action` accessor).
+    #[derive(Debug)]
+    struct CountingMember {
+        inner: POMDPAgent,
+        records: usize,
+    }
+
+    impl Agent for CountingMember {
+        fn act(&mut self, observation: usize) -> Result<usize, AifError> {
+            self.inner.act(observation)
+        }
+    }
+
+    impl InternalAgent for CountingMember {
+        fn action_probabilities(&mut self, observation: usize) -> DVector<f64> {
+            POMDPAgent::action_probabilities(&mut self.inner, observation)
+        }
+
+        fn record_action(&mut self, action: usize) {
+            self.records += 1;
+            POMDPAgent::record_action(&mut self.inner, action);
+        }
+
+        fn reseed(&mut self, seed: u64) {
+            InternalAgent::reseed(&mut self.inner, seed);
+        }
+    }
+
+    fn counting_members(n: usize, seed: u64) -> Result<Vec<CountingMember>, AifError> {
+        Ok(read_members(n, seed)?
+            .into_iter()
+            .map(|inner| CountingMember { inner, records: 0 })
+            .collect())
+    }
+
+    /// The recording read is all-or-nothing: a read that fails after the member
+    /// loop must not leave the roster half-advanced.
+    ///
+    /// [`FirstVote`] leaves the distribution twins defaulted, so the failure lands
+    /// at the aggregation step — after every member has already reported. The
+    /// matching [`VotingAgent`] group is the non-vacuity leg: same fixture, same
+    /// call, one advance each.
+    #[test]
+    fn test_failed_recording_read_advances_nobody() -> Result<(), AifError> {
+        const SEED: u64 = 23;
+
+        let mut failing =
+            GroupAgent::with_slots_seeded(CopyAgent, counting_members(3, SEED)?, FirstVote, 3, SEED);
+        assert!(
+            matches!(
+                failing.group_distribution_recording(0),
+                Err(AifError::Unsupported(_))
+            ),
+            "a defaulted aggregator must reject the recording read"
+        );
+        assert!(
+            failing.internal_agents().iter().all(|m| m.records == 0),
+            "a failed recording read must advance nobody, not the members it \
+             already polled"
+        );
+
+        let mut succeeding = GroupAgent::with_slots_seeded(
+            CopyAgent,
+            counting_members(3, SEED)?,
+            VotingAgent::with_seed(3, VotingMode::CertaintyWeighted, SEED),
+            3,
+            SEED,
+        );
+        succeeding.group_distribution_recording(0)?;
+        assert!(
+            succeeding.internal_agents().iter().all(|m| m.records == 1),
+            "a successful recording read advances every member exactly once"
+        );
+        Ok(())
+    }
+
+    /// The pure read does not advance the trial clock, and on a **fresh** group
+    /// that means it is a fixed point until something commits.
+    ///
+    /// Under `MeanField` a member ignores observations while `last_action` is
+    /// `None` (beliefs reset to `D`, `update_a` returns early) — `act`'s own
+    /// `t = 0` rule, except `act` then records and the pure read does not. So an
+    /// uncommitted read loop returns the identical distribution forever and no
+    /// member learns. This is documented on `group_distribution`; it was
+    /// previously documented as the opposite ("consecutive reads see a state that
+    /// has moved on"), so it is pinned here in both directions: frozen without a
+    /// commit, moving with one.
+    #[test]
+    fn test_uncommitted_reads_stay_at_t0() -> Result<(), AifError> {
+        const SEED: u64 = 47;
+        const N_STEPS: usize = 6;
+
+        let mut frozen = read_group(4, VotingMode::CertaintyWeighted, SEED)?;
+        let first = frozen.group_distribution(0)?;
+        for t in 1..N_STEPS {
+            assert_eq!(
+                frozen.group_distribution(t % 2)?.as_slice(),
+                first.as_slice(),
+                "step {t}: with no commit the members never leave t = 0, so the read \
+                 cannot move — see `group_distribution`'s trial-clock section"
+            );
+        }
+
+        // With a commit after each read the very same fixture does move, so the
+        // pin above is about the missing commit and not about an inert fixture.
+        let mut moving = read_group(4, VotingMode::CertaintyWeighted, SEED)?;
+        let start = moving.group_distribution(0)?;
+        let choice = argmax_index(start.as_slice())
+            .expect("invariant: a group distribution over 3 actions has a maximum");
+        moving.record_group_action(choice)?;
+        let mut moved = false;
+        for t in 1..N_STEPS {
+            let d = moving.group_distribution(t % 2)?;
+            moved |= d.as_slice() != start.as_slice();
+            let c = argmax_index(d.as_slice())
+                .expect("invariant: a group distribution over 3 actions has a maximum");
+            moving.record_group_action(c)?;
+        }
+        assert!(
+            moved,
+            "read -> decide -> commit must actually advance the group; if this fails \
+             the frozen pin above is vacuous"
+        );
+
+        // The recording read records for you, so it never sits at t = 0 either.
+        let mut recording = read_group(4, VotingMode::CertaintyWeighted, SEED)?;
+        let rec_first = recording.group_distribution_recording(0)?;
+        let mut rec_moved = false;
+        for t in 1..N_STEPS {
+            rec_moved |=
+                recording.group_distribution_recording(t % 2)?.as_slice() != rec_first.as_slice();
+        }
+        assert!(
+            rec_moved,
+            "the recording read advances members itself and must not be a fixed point"
+        );
+        Ok(())
+    }
+
+    /// A member whose action space is not the group's: its argmax would be
+    /// aliased modulo its own control count on the way into `record_action`, so
+    /// the read rejects the configuration before anything is recorded.
+    #[derive(Debug)]
+    struct ShortMember;
+
+    impl Agent for ShortMember {
+        fn act(&mut self, _observation: usize) -> Result<usize, AifError> {
+            Ok(0)
+        }
+    }
+
+    impl InternalAgent for ShortMember {
+        fn action_probabilities(&mut self, _observation: usize) -> DVector<f64> {
+            DVector::from_vec(vec![0.4, 0.6])
+        }
+
+        fn record_action(&mut self, _action: usize) {}
+
+        fn reseed(&mut self, _seed: u64) {}
+    }
+
+    /// A member reporting a non-finite probability — the rejection `act` gets for
+    /// free from `WeightedIndex` and the read has to make for itself.
+    #[derive(Debug)]
+    struct NonFiniteMember;
+
+    impl Agent for NonFiniteMember {
+        fn act(&mut self, _observation: usize) -> Result<usize, AifError> {
+            Err(AifError::InvalidDistribution("non-finite member".to_string()))
+        }
+    }
+
+    impl InternalAgent for NonFiniteMember {
+        fn action_probabilities(&mut self, _observation: usize) -> DVector<f64> {
+            DVector::from_vec(vec![f64::NAN, 0.5, 0.5])
+        }
+
+        fn record_action(&mut self, _action: usize) {}
+
+        fn reseed(&mut self, _seed: u64) {}
+    }
+
+    /// A member reporting weights `WeightedIndex` would reject for a different
+    /// reason than non-finiteness: negative mass, or none at all.
+    #[derive(Debug)]
+    struct BadWeightMember(Vec<f64>);
+
+    impl Agent for BadWeightMember {
+        fn act(&mut self, _observation: usize) -> Result<usize, AifError> {
+            Err(AifError::InvalidDistribution("bad-weight member".to_string()))
+        }
+    }
+
+    impl InternalAgent for BadWeightMember {
+        fn action_probabilities(&mut self, _observation: usize) -> DVector<f64> {
+            DVector::from_vec(self.0.clone())
+        }
+
+        fn record_action(&mut self, _action: usize) {}
+
+        fn reseed(&mut self, _seed: u64) {}
+    }
+
+    /// An aggregator that answers the read with mass no sampler would accept —
+    /// the last hop before the caller, and the one place a bad value could leave
+    /// the crate.
+    #[derive(Debug)]
+    struct BadMixture(Vec<f64>);
+
+    impl Aggregator for BadMixture {
+        fn aggregate(&mut self, _votes: &[usize]) -> Result<usize, AifError> {
+            Ok(0)
+        }
+
+        fn aggregate_weighted(
+            &mut self,
+            _distributions: &[DVector<f64>],
+        ) -> Result<usize, AifError> {
+            Ok(0)
+        }
+
+        fn mode(&self) -> VotingMode {
+            VotingMode::Probabilistic
+        }
+
+        fn aggregate_distribution(
+            &mut self,
+            _votes: &[usize],
+        ) -> Result<Option<Vec<f64>>, AifError> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+
+    /// The read rejects everything `WeightedIndex` rejects for [`Agent::act`] —
+    /// on both sides: what a member reports, and what the aggregator answers with.
+    ///
+    /// Without the aggregator-side check the returned "distribution" could carry
+    /// negative or `NaN` mass, and the caller samples from exactly that.
+    #[test]
+    fn test_read_rejects_unsampleable_mass() {
+        for weights in [vec![-1.0, 2.0, 0.0], vec![0.0, 0.0, 0.0]] {
+            let mut group = GroupAgent::with_slots_seeded(
+                CopyAgent,
+                vec![BadWeightMember(weights.clone())],
+                VotingAgent::with_seed(3, VotingMode::CertaintyWeighted, 3),
+                3,
+                3,
+            );
+            assert!(
+                matches!(
+                    group.group_distribution(0),
+                    Err(AifError::InvalidDistribution(_))
+                ),
+                "member weights {weights:?} are unsampleable and must be rejected"
+            );
+        }
+
+        for mixture in [vec![f64::NAN, 1.0, 0.0], vec![-0.5, 1.5, 0.0], vec![0.0; 3]] {
+            let mut group = GroupAgent::with_slots_seeded(
+                CopyAgent,
+                read_members(2, 3).expect("fixture members build"),
+                BadMixture(mixture.clone()),
+                3,
+                3,
+            );
+            assert!(
+                matches!(
+                    group.group_distribution(0),
+                    Err(AifError::InvalidDistribution(_))
+                ),
+                "aggregator mixture {mixture:?} is unsampleable and must not reach the caller"
+            );
+        }
+    }
+
+    #[test]
+    fn test_group_distribution_rejects_malformed_member_distributions() {
+        let mut short = GroupAgent::with_slots_seeded(
+            CopyAgent,
+            vec![ShortMember, ShortMember, ShortMember],
+            VotingAgent::with_seed(3, VotingMode::Probabilistic, 3),
+            3,
+            3,
+        );
+        assert!(
+            matches!(
+                short.group_distribution(0),
+                Err(AifError::InvalidLength { expected: 3, got: 2 })
+            ),
+            "a member whose action space is not the group's must be rejected, not aliased"
+        );
+
+        let mut nan = GroupAgent::with_slots_seeded(
+            CopyAgent,
+            vec![NonFiniteMember],
+            VotingAgent::with_seed(3, VotingMode::CertaintyWeighted, 3),
+            3,
+            3,
+        );
+        assert!(
+            matches!(
+                nan.group_distribution(0),
+                Err(AifError::InvalidDistribution(_))
+            ),
+            "a non-finite member distribution must be rejected by the read, as `act` \
+             rejects it through WeightedIndex"
+        );
+    }
+
+    /// An aggregator whose distribution depends on state it mutates — the case
+    /// `&self` twins would have locked out (extension 4's `AgreementAggregator` is
+    /// the real one: a POMDP that must run inference to answer).
+    #[derive(Debug)]
+    struct StatefulDist {
+        calls: usize,
+        n_actions: usize,
+    }
+
+    impl Aggregator for StatefulDist {
+        fn aggregate(&mut self, votes: &[usize]) -> Result<usize, AifError> {
+            votes
+                .first()
+                .copied()
+                .ok_or(AifError::InvalidLength { expected: 1, got: 0 })
+        }
+
+        fn aggregate_weighted(
+            &mut self,
+            _distributions: &[DVector<f64>],
+        ) -> Result<usize, AifError> {
+            Ok(self.calls % self.n_actions)
+        }
+
+        fn mode(&self) -> VotingMode {
+            VotingMode::Probabilistic
+        }
+
+        fn aggregate_distribution(
+            &mut self,
+            _votes: &[usize],
+        ) -> Result<Option<Vec<f64>>, AifError> {
+            let mut dist = vec![0.0; self.n_actions];
+            dist[self.calls % self.n_actions] = 1.0;
+            self.calls += 1;
+            Ok(Some(dist))
+        }
+    }
+
+    /// The twins take `&mut self`, so a stateful aggregator can serve the read —
+    /// pinned by an implementor whose answer advances with its own state.
+    #[test]
+    fn test_stateful_aggregator_can_serve_the_read() -> Result<(), AifError> {
+        const SEED: u64 = 61;
+
+        let mut group = GroupAgent::with_slots_seeded(
+            CopyAgent,
+            read_members(2, SEED)?,
+            StatefulDist { calls: 0, n_actions: 3 },
+            3,
+            SEED,
+        );
+
+        let first = group.group_distribution(0)?;
+        let second = group.group_distribution(1)?;
+        assert_eq!(first.as_slice(), &[1.0, 0.0, 0.0]);
+        assert_eq!(
+            second.as_slice(),
+            &[0.0, 1.0, 0.0],
+            "the aggregator's own state must advance across reads — the `&mut self` \
+             twins are what allow it"
+        );
+        Ok(())
+    }
+
+    /// Members under marginal message passing survive consecutive pure reads.
+    ///
+    /// MMP window nodes are timesteps and timesteps advance by actions, so a read
+    /// that records nothing must not open a node the smoother has no transition
+    /// for: the second observation supersedes the first. Before that rule the
+    /// second read indexed past the end of `mmp_act_hist` and panicked, which is
+    /// the configuration koalisi #78 drives (persistent MMP members, deterministic
+    /// read).
+    #[test]
+    fn test_mmp_members_survive_consecutive_reads_without_commit() -> Result<(), AifError> {
+        use crate::{AgentParams, GenerativeModel, StateInference};
+        use nalgebra::DMatrix;
+
+        fn mmp_member(seed: u64) -> Result<POMDPAgent, AifError> {
+            let stay = DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8]);
+            let swap = DMatrix::from_row_slice(2, 2, &[0.2, 0.9, 0.8, 0.1]);
+            let a = DMatrix::from_row_slice(2, 2, &[0.8, 0.3, 0.2, 0.7]);
+            POMDPAgent::from_model(
+                GenerativeModel {
+                    a: vec![a],
+                    b: vec![vec![stay, swap]],
+                    c: vec![vec![0.7, 0.3]],
+                    d: vec![vec![0.5, 0.5]],
+                },
+                AgentParams {
+                    alpha: 0.5,
+                    seed: Some(seed),
+                    state_inference: StateInference::MarginalMessagePassing {
+                        horizon: 3,
+                        iters: 8,
+                    },
+                    ..Default::default()
+                },
+            )
+        }
+
+        let members: Vec<POMDPAgent> = (0..3)
+            .map(|i| mmp_member(700 + i))
+            .collect::<Result<_, _>>()?;
+        let mut group = GroupAgent::with_slots_seeded(
+            CopyAgent,
+            members,
+            VotingAgent::with_seed(2, VotingMode::CertaintyWeighted, 700),
+            2,
+            700,
+        );
+
+        // Four consecutive pure reads, no commit anywhere: all four are the same
+        // timestep re-observed, and none may panic.
+        for t in 0..4 {
+            let dist = group.group_distribution(t % 2)?;
+            assert_eq!(dist.len(), 2);
+            assert!(dist.iter().all(|p| p.is_finite()));
+        }
+
+        // …and the read → decide → commit flow keeps working afterwards, which is
+        // the path that genuinely advances the window.
+        for t in 0..4 {
+            let dist = group.group_distribution(t % 2)?;
+            let choice = argmax_index(dist.as_slice())
+                .expect("invariant: a 2-action distribution has a maximum");
+            group.record_group_action(choice)?;
+        }
+
+        // The recording variant maintains the pairing on its own.
+        for t in 0..4 {
+            group.group_distribution_recording(t % 2)?;
+        }
         Ok(())
     }
 
