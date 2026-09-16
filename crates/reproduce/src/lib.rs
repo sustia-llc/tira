@@ -8,7 +8,7 @@
 pub use aif::{
     Agent, AgentMessage, Aggregator, AifError, CommunicatingAgent, CommunicatingPOMDPAgent,
     CommunicationChannel, CopyAgent, GroupAgent, GroupAgentBuilder, InfoRequestType, InternalAgent,
-    Message, MessageContent, POMDPAgent, VotingAgent, VotingMode,
+    Message, MessageContent, POMDPAgent, RoutedAggregator, Topology, VotingAgent, VotingMode,
 };
 
 use rand::rngs::StdRng;
@@ -16,11 +16,16 @@ use rand::{RngExt, SeedableRng};
 use rand_distr::{Bernoulli, Distribution};
 
 mod ext4;
+mod ext6;
 mod ext8;
 mod plotter;
 mod simulation;
 
 pub use ext4::{AgreementAggregator, SensoryFilter, build_ext4_group};
+pub use ext6::{
+    ROUTING_ROLE, RoutedGroup, build_ext6_group, layered_topology, path_topology, ring_topology,
+    routing_seed,
+};
 pub use ext8::{
     NestedRun, build_ext8_group, build_ext8_inners, build_ext8_meta, inner_group_seed,
     run_nested_instrumented,
