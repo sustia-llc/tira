@@ -6,6 +6,11 @@
 // `f64::from(u32::try_from(..)?)`) would add fallible plumbing to hot numeric loops
 // without changing a single computed value.
 #![allow(clippy::cast_precision_loss)]
+// `clippy::manual_midpoint` is allowed crate-wide: every `0.5 * (a + b)` is on bounded
+// log-probabilities or `[0, 1]` scores, so the overflow the lint guards against cannot
+// occur, and the expressions are bit-pinned by seeded tests (`f64::midpoint` takes a
+// different evaluation path).
+#![allow(clippy::manual_midpoint)]
 
 use rand::seq::WeightError;
 use rand_distr::BernoulliError;
@@ -13,12 +18,14 @@ use thiserror::Error;
 
 mod agent;
 mod coalition;
-/// Latent extension-6 scaffolding; default-off since issue #5 so downstream consumers
-/// do not carry `flume` for a module they never reach.
+/// Message transport for a message-passing variant of extension 6 (the shipped routing
+/// is `topology`); default-off since issue #5 so downstream consumers do not carry
+/// `flume` for a module they never reach.
 #[cfg(feature = "communication")]
 mod communication;
 mod group;
 mod special;
+mod topology;
 
 pub use agent::{
     Agent, AgentParams, CopyAgent, GenerativeModel, InternalAgent, POMDPAgent,
@@ -34,6 +41,7 @@ pub use communication::{
     Message, MessageContent,
 };
 pub use group::{Aggregator, GroupAgent, GroupAgentBuilder, VotingAgent, VotingMode};
+pub use topology::{RoutedAggregator, Topology};
 
 /// Errors returned across the engine surface.
 ///
