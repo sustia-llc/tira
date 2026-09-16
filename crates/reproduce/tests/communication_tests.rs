@@ -11,7 +11,15 @@ use reproduce::{
 /// A minimal wrapped agent for the cadence tests — the emission schedule is independent
 /// of what the wrapped agent decides.
 fn cadence_agent(frequency: usize) -> Result<CommunicatingPOMDPAgent, AifError> {
-    let base = POMDPAgent::new(3, Some(vec![0.8, 0.2, 0.2]), None, vec![0.7, 0.3], None, 8.0, false)?;
+    let base = POMDPAgent::new(
+        3,
+        Some(vec![0.8, 0.2, 0.2]),
+        None,
+        vec![0.7, 0.3],
+        None,
+        8.0,
+        false,
+    )?;
     Ok(CommunicatingPOMDPAgent::new(base, 0, true, frequency))
 }
 
@@ -56,7 +64,15 @@ fn test_emission_cadence_every_third_step() -> Result<(), AifError> {
 /// merely stored.
 #[test]
 fn test_share_actions_false_never_emits() -> Result<(), AifError> {
-    let base = POMDPAgent::new(3, Some(vec![0.8, 0.2, 0.2]), None, vec![0.7, 0.3], None, 8.0, false)?;
+    let base = POMDPAgent::new(
+        3,
+        Some(vec![0.8, 0.2, 0.2]),
+        None,
+        vec![0.7, 0.3],
+        None,
+        8.0,
+        false,
+    )?;
     let mut agent = CommunicatingPOMDPAgent::new(base, 0, false, 1);
     for _ in 0..4 {
         agent.act_with_communication(0, Vec::new())?;
@@ -70,7 +86,15 @@ fn test_share_actions_false_never_emits() -> Result<(), AifError> {
 /// produce a backlog — it resumes on the next due step, not immediately.
 #[test]
 fn test_silent_steps_still_consume_the_cadence_slot() -> Result<(), AifError> {
-    let base = POMDPAgent::new(3, Some(vec![0.8, 0.2, 0.2]), None, vec![0.7, 0.3], None, 8.0, false)?;
+    let base = POMDPAgent::new(
+        3,
+        Some(vec![0.8, 0.2, 0.2]),
+        None,
+        vec![0.7, 0.3],
+        None,
+        8.0,
+        false,
+    )?;
     let mut agent = CommunicatingPOMDPAgent::new(base, 0, false, 3);
 
     for _ in 0..6 {
@@ -133,7 +157,10 @@ fn test_broadcast_reaches_every_other_agent() -> Result<(), AifError> {
             messages[0].recipient_id.is_none(),
             "a broadcast carries no single recipient"
         );
-        assert_eq!(format!("{}", messages[0]), "From Agent 1 to Everyone: Action: 2 (t=0)");
+        assert_eq!(
+            format!("{}", messages[0]),
+            "From Agent 1 to Everyone: Action: 2 (t=0)"
+        );
     }
     assert!(!channel.has_messages(1)?, "the sender receives nothing");
     Ok(())
@@ -286,11 +313,8 @@ fn test_communicating_agents() -> Result<(), AifError> {
         let messages_for_agent1 = test_env.comm_channel.receive_all(0)?;
         test_env.record_received(0, messages_for_agent1.len());
         let action1 = agent1.act_with_communication(prev_obs1, messages_for_agent1)?;
-        let (reward1, _) = <SharedBanditEnvironment as MultiAgentEnvironment>::step(
-            &mut bandit_env,
-            0,
-            action1,
-        )?;
+        let (reward1, _) =
+            <SharedBanditEnvironment as MultiAgentEnvironment>::step(&mut bandit_env, 0, action1)?;
         prev_obs1 = reward1;
         test_env.record_action(0, action1, reward1);
 
@@ -307,11 +331,8 @@ fn test_communicating_agents() -> Result<(), AifError> {
         test_env.record_received(1, messages_for_agent2.len());
         let action2 = agent2.act_with_communication(prev_obs2, messages_for_agent2)?;
 
-        match <SharedBanditEnvironment as MultiAgentEnvironment>::step(
-            &mut bandit_env,
-            1,
-            action2,
-        ) {
+        match <SharedBanditEnvironment as MultiAgentEnvironment>::step(&mut bandit_env, 1, action2)
+        {
             Ok((reward2, _)) => {
                 prev_obs2 = reward2;
                 test_env.record_action(1, action2, reward2);
@@ -471,11 +492,8 @@ fn test_cooperative_communication() -> Result<(), AifError> {
         let messages_for_agent1 = test_env.comm_channel.receive_all(0)?;
         test_env.record_received(0, messages_for_agent1.len());
         let action1 = agent1.act_with_communication(prev_obs1, messages_for_agent1)?;
-        let (reward1, _) = <SharedBanditEnvironment as MultiAgentEnvironment>::step(
-            &mut bandit_env,
-            0,
-            action1,
-        )?;
+        let (reward1, _) =
+            <SharedBanditEnvironment as MultiAgentEnvironment>::step(&mut bandit_env, 0, action1)?;
         prev_obs1 = reward1;
         test_env.record_action(0, action1, reward1);
 
@@ -489,11 +507,8 @@ fn test_cooperative_communication() -> Result<(), AifError> {
         let messages_for_agent2 = test_env.comm_channel.receive_all(1)?;
         test_env.record_received(1, messages_for_agent2.len());
         let action2 = agent2.act_with_communication(prev_obs2, messages_for_agent2)?;
-        let (reward2, _) = <SharedBanditEnvironment as MultiAgentEnvironment>::step(
-            &mut bandit_env,
-            1,
-            action2,
-        )?;
+        let (reward2, _) =
+            <SharedBanditEnvironment as MultiAgentEnvironment>::step(&mut bandit_env, 1, action2)?;
         prev_obs2 = reward2;
         test_env.record_action(1, action2, reward2);
 

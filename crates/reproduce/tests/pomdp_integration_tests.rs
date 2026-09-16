@@ -1,4 +1,4 @@
-use reproduce::{Agent, BanditEnvironment, Environment, AifError, POMDPAgent};
+use reproduce::{Agent, AifError, BanditEnvironment, Environment, POMDPAgent};
 
 #[test]
 fn test_complete_pomdp_cycle() -> Result<(), AifError> {

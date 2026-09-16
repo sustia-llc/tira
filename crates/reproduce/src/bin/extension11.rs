@@ -45,8 +45,8 @@
 
 use reproduce::stats::{median, median_iqr};
 use reproduce::{
-    Agent, AifError, BANDIT_PROBS, BanditEnvironment, Environment, GroupAgentBuilder, PREFERENCES,
-    POMDPAgent, TrialData, VotingMode, env_seed, group_seed, recover_alpha, run_sweep,
+    Agent, AifError, BANDIT_PROBS, BanditEnvironment, Environment, GroupAgentBuilder, POMDPAgent,
+    PREFERENCES, TrialData, VotingMode, env_seed, group_seed, recover_alpha, run_sweep,
 };
 
 const N_TRIALS: usize = 300;
@@ -100,7 +100,10 @@ fn instrumented_run(
     for _ in 0..N_TRIALS {
         let action = group.act(prev_obs)?;
         let internals = group.internal_agents();
-        let sum_f: f64 = internals.iter().map(POMDPAgent::variational_free_energy).sum();
+        let sum_f: f64 = internals
+            .iter()
+            .map(POMDPAgent::variational_free_energy)
+            .sum();
         f_sum_total += sum_f;
         f_mean_total += sum_f / internals.len() as f64;
         let obs = env.step(action)?;
@@ -195,6 +198,9 @@ fn main() -> Result<(), AifError> {
     Ok(())
 }
 
+// A linear sequence of `println!`s emitting the report; rustfmt 1.9.0's wrapping
+// pushed it past the pedantic line budget (104/100) without adding a statement.
+#[allow(clippy::too_many_lines)]
 fn print_report(results: &[CellResult]) {
     println!("# Extension 11 — free-energy extensivity study");
     println!();
@@ -209,14 +215,18 @@ fn print_report(results: &[CellResult]) {
         "- Experiment-1 identical group (`build_identical`), standard MAB \
          (obs probs [0.8, 0.2, 0.2], prefs [0.7, 0.3]), `BanditEnvironment`."
     );
-    println!("- {N_TRIALS} trials per run; {REPS} repetitions per cell (distinct per-rep seeds, issue #2 → median · IQR summarizes cross-seed variation).");
+    println!(
+        "- {N_TRIALS} trials per run; {REPS} repetitions per cell (distinct per-rep seeds, issue #2 → median · IQR summarizes cross-seed variation)."
+    );
     println!(
         "- Individual `F`: `variational_free_energy()` per internal agent after each `group.act` (−ln p(o_group) under each member's own arm)."
     );
     println!(
         "- Group `F`: recover the group model from blanket states (`recover_alpha`), replay the (obs, action) stream through a fresh canonical `POMDPAgent`, read `F` per step. `F` is α-independent (belief path is α-free); recovered α reported for completeness."
     );
-    println!("- `R_sum = F_grp / F_sum` (extensive ⇔ ≈ 1); `R_mean = F_grp / F_mean` (group ≈ typical individual ⇔ ≈ 1).");
+    println!(
+        "- `R_sum = F_grp / F_sum` (extensive ⇔ ≈ 1); `R_mean = F_grp / F_mean` (group ≈ typical individual ⇔ ≈ 1)."
+    );
     println!();
     println!("## Results (median · IQR over {REPS} reps)");
     println!();
@@ -242,8 +252,12 @@ fn print_report(results: &[CellResult]) {
     // Scaling-with-n reading (per α × mode), computed from the medians.
     println!("## Scaling with n");
     println!();
-    println!("| α | voting | R_sum(n=4) | R_sum(n=8) | R_sum(n=16) | R_mean(n=4) | R_mean(n=8) | R_mean(n=16) |");
-    println!("|--:|:-------|-----------:|-----------:|------------:|------------:|------------:|-------------:|");
+    println!(
+        "| α | voting | R_sum(n=4) | R_sum(n=8) | R_sum(n=16) | R_mean(n=4) | R_mean(n=8) | R_mean(n=16) |"
+    );
+    println!(
+        "|--:|:-------|-----------:|-----------:|------------:|------------:|------------:|-------------:|"
+    );
     for &alpha in &ALPHA_SWEEP {
         for mode in ["Probabilistic", "CertaintyWeighted"] {
             let get = |n: usize, sum: bool| {

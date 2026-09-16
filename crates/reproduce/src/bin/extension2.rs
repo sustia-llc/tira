@@ -84,8 +84,14 @@ struct Budget {
     samples: usize,
 }
 
-const MAIN_BUDGET: Budget = Budget { burn_in: BURN_IN, samples: SAMPLES };
-const PROBE_BUDGET: Budget = Budget { burn_in: PROBE_BURN_IN, samples: PROBE_SAMPLES };
+const MAIN_BUDGET: Budget = Budget {
+    burn_in: BURN_IN,
+    samples: SAMPLES,
+};
+const PROBE_BUDGET: Budget = Budget {
+    burn_in: PROBE_BURN_IN,
+    samples: PROBE_SAMPLES,
+};
 
 /// One rep's 2-D recovery summary (the two recovered marginals + the recovered *product* +
 /// confound + convergence).
@@ -158,8 +164,18 @@ fn q1_rep(
     run_2d(
         &ModelParams::new(alpha_t, gamma_t, 0.8),
         [
-            McmcDim { initial_sd: 0.5, lo: 0.0, hi: f64::INFINITY, init_spread: PRIOR_SD },
-            McmcDim { initial_sd: 4.0, lo: 0.01, hi: f64::INFINITY, init_spread: 32.0 },
+            McmcDim {
+                initial_sd: 0.5,
+                lo: 0.0,
+                hi: f64::INFINITY,
+                init_spread: PRIOR_SD,
+            },
+            McmcDim {
+                initial_sd: 4.0,
+                lo: 0.01,
+                hi: f64::INFINITY,
+                init_spread: 32.0,
+            },
         ],
         |t| ModelParams::new(t[0], t[1], 0.8),
         |t| half_normal_log_prior_sd(t[0], PRIOR_SD) + half_normal_log_prior_sd(t[1], 32.0),
@@ -180,8 +196,18 @@ fn q2_rep(
     run_2d(
         &ModelParams::new(alpha_t, GAMMA_STD, p_t),
         [
-            McmcDim { initial_sd: 0.5, lo: 0.0, hi: f64::INFINITY, init_spread: PRIOR_SD },
-            McmcDim { initial_sd: 0.1, lo: 0.01, hi: 0.99, init_spread: 0.3 },
+            McmcDim {
+                initial_sd: 0.5,
+                lo: 0.0,
+                hi: f64::INFINITY,
+                init_spread: PRIOR_SD,
+            },
+            McmcDim {
+                initial_sd: 0.1,
+                lo: 0.01,
+                hi: 0.99,
+                init_spread: 0.3,
+            },
         ],
         |t| ModelParams::new(t[0], GAMMA_STD, t[1]),
         |t| half_normal_log_prior_sd(t[0], PRIOR_SD),
@@ -201,13 +227,26 @@ fn q3_rep(
 ) -> Result<RunMetrics, AifError> {
     let prec = vec![1.0; 3];
     let decode_prec = prec.clone();
-    let gen_params = ModelParams::new(0.5, GAMMA_STD, 0.8)
-        .with_learning(LearningParams { eta: eta_t, omega: omega_t, initial_precision: prec });
+    let gen_params = ModelParams::new(0.5, GAMMA_STD, 0.8).with_learning(LearningParams {
+        eta: eta_t,
+        omega: omega_t,
+        initial_precision: prec,
+    });
     run_2d(
         &gen_params,
         [
-            McmcDim { initial_sd: 0.1, lo: 0.01, hi: 1.0, init_spread: 0.3 },
-            McmcDim { initial_sd: 0.1, lo: 0.01, hi: 1.0, init_spread: 0.3 },
+            McmcDim {
+                initial_sd: 0.1,
+                lo: 0.01,
+                hi: 1.0,
+                init_spread: 0.3,
+            },
+            McmcDim {
+                initial_sd: 0.1,
+                lo: 0.01,
+                hi: 1.0,
+                init_spread: 0.3,
+            },
         ],
         move |t| {
             ModelParams::new(0.5, GAMMA_STD, 0.8).with_learning(LearningParams {
@@ -262,8 +301,9 @@ fn run_question<R>(
 where
     R: Fn(f64, f64, u64, ProposalMode, Budget) -> Result<RunMetrics, AifError> + Sync,
 {
-    let per_cell =
-        run_sweep(cells, REPS, base, |&(t0, t1), seed| run(t0, t1, seed, mode, budget))?;
+    let per_cell = run_sweep(cells, REPS, base, |&(t0, t1), seed| {
+        run(t0, t1, seed, mode, budget)
+    })?;
     Ok(cells
         .iter()
         .zip(&per_cell)
@@ -306,8 +346,13 @@ fn main() -> Result<(), AifError> {
     // Extended-budget probe: same cells, same base seed (hence the same generated data per
     // (cell, rep)), Covariance arm only — the ONLY difference from the main Q2 Covariance
     // sweep is the 4× chain length.
-    let q2_probe =
-        run_question(&q2_cells, q2_base, q2_rep, ProposalMode::Covariance, PROBE_BUDGET)?;
+    let q2_probe = run_question(
+        &q2_cells,
+        q2_base,
+        q2_rep,
+        ProposalMode::Covariance,
+        PROBE_BUDGET,
+    )?;
 
     print_report(&q1, &q2, &q3, &q2_probe);
     Ok(())
@@ -344,13 +389,7 @@ fn print_comparison_row(label: &str, arm: &str, cells: &[CellResult]) {
     );
 }
 
-fn print_question(
-    title: &str,
-    label0: &str,
-    label1: &str,
-    corr_label: &str,
-    cells: &[CellResult],
-) {
+fn print_question(title: &str, label0: &str, label1: &str, corr_label: &str, cells: &[CellResult]) {
     println!("## {title}");
     println!();
     println!(
@@ -411,7 +450,8 @@ fn print_report(q1: &Arms, q2: &Arms, q3: &Arms, q2_probe: &[CellResult]) {
     //      guards assert |corr| is large on the JointScale arm; a rerun where that confound
     //      VANISHES is the surprise worth catching. The Covariance arm is deliberately
     //      UNGUARDED — measuring what it does is the point of #30.
-    let abs_corr = |cells: &[CellResult]| mean(&cells.iter().map(|c| c.corr.0.abs()).collect::<Vec<_>>());
+    let abs_corr =
+        |cells: &[CellResult]| mean(&cells.iter().map(|c| c.corr.0.abs()).collect::<Vec<_>>());
     for (cells, label) in [(&q1.joint_scale, "Q1 α–γ"), (&q2.joint_scale, "Q2 α–p")] {
         let m = abs_corr(cells);
         assert!(
@@ -514,9 +554,27 @@ fn print_report(q1: &Arms, q2: &Arms, q3: &Arms, q2_probe: &[CellResult]) {
     println!();
 
     for (q, title, l0, l1, corr) in [
-        (q1, "Q1 — joint (α, γ): the temperature confound", "α", "γ", "corr(α,γ)"),
-        (q2, "Q2 — joint (α, p): A-matrix contents", "α", "p", "corr(α,p)"),
-        (q3, "Q3 — joint (η, ω): learning rates", "η", "ω", "corr(η,ω)"),
+        (
+            q1,
+            "Q1 — joint (α, γ): the temperature confound",
+            "α",
+            "γ",
+            "corr(α,γ)",
+        ),
+        (
+            q2,
+            "Q2 — joint (α, p): A-matrix contents",
+            "α",
+            "p",
+            "corr(α,p)",
+        ),
+        (
+            q3,
+            "Q3 — joint (η, ω): learning rates",
+            "η",
+            "ω",
+            "corr(η,ω)",
+        ),
     ] {
         let js = format!("{title} — JointScale (#29 sampler)");
         let cov = format!("{title} — Covariance (#30 sampler)");
@@ -528,7 +586,10 @@ fn print_report(q1: &Arms, q2: &Arms, q3: &Arms, q2_probe: &[CellResult]) {
     println!();
     print_comparison_header();
     for (label, q) in [("Q1 (α, γ)", q1), ("Q2 (α, p)", q2), ("Q3 (η, ω)", q3)] {
-        for (arm, cells) in [("JointScale", &q.joint_scale), ("Covariance", &q.covariance)] {
+        for (arm, cells) in [
+            ("JointScale", &q.joint_scale),
+            ("Covariance", &q.covariance),
+        ] {
             print_comparison_row(label, arm, cells);
         }
     }
@@ -540,9 +601,24 @@ fn print_report(q1: &Arms, q2: &Arms, q3: &Arms, q2_probe: &[CellResult]) {
     );
     println!();
 
-    print_recovery("### Covariance arm — recovered vs true, Q1 (α, γ)", "α", "γ", &q1.covariance);
-    print_recovery("### Covariance arm — recovered vs true, Q2 (α, p)", "α", "p", &q2.covariance);
-    print_recovery("### Covariance arm — recovered vs true, Q3 (η, ω)", "η", "ω", &q3.covariance);
+    print_recovery(
+        "### Covariance arm — recovered vs true, Q1 (α, γ)",
+        "α",
+        "γ",
+        &q1.covariance,
+    );
+    print_recovery(
+        "### Covariance arm — recovered vs true, Q2 (α, p)",
+        "α",
+        "p",
+        &q2.covariance,
+    );
+    print_recovery(
+        "### Covariance arm — recovered vs true, Q3 (η, ω)",
+        "η",
+        "ω",
+        &q3.covariance,
+    );
 
     println!("## Q2 extended-budget probe — Covariance, 4× budget");
     println!();
@@ -556,7 +632,12 @@ fn print_report(q1: &Arms, q2: &Arms, q3: &Arms, q2_probe: &[CellResult]) {
     print_comparison_header();
     print_comparison_row("Q2 (α, p) probe", "Covariance 4×", q2_probe);
     println!();
-    print_recovery("### Probe — recovered vs true, Q2 (α, p)", "α", "p", q2_probe);
+    print_recovery(
+        "### Probe — recovered vs true, Q2 (α, p)",
+        "α",
+        "p",
+        q2_probe,
+    );
 
     println!("_Numbers only; interpretation follows below._");
     println!();

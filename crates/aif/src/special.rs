@@ -63,9 +63,9 @@ pub(crate) fn digamma(x: f64) -> f64 {
     }
     // Asymptotic expansion: ψ(x) ≈ ln x − 1/(2x) − Σ B_{2n}/(2n x^{2n}).
     let f = 1.0 / (x * x);
-    result + x.ln() - 0.5 / x
-        - f * (1.0 / 12.0
-            - f * (1.0 / 120.0 - f * (1.0 / 252.0 - f * (1.0 / 240.0 - f / 132.0))))
+    result + x.ln()
+        - 0.5 / x
+        - f * (1.0 / 12.0 - f * (1.0 / 120.0 - f * (1.0 / 252.0 - f * (1.0 / 240.0 - f / 132.0))))
 }
 
 /// KL divergence between two Dirichlet distributions with concentration vectors
@@ -153,8 +153,16 @@ mod tests {
     #[test]
     fn test_dirichlet_kl_self_is_zero() {
         // KL(x ‖ x) = 0 for any concentration vector.
-        assert_relative_eq!(dirichlet_kl(&[3.0, 5.0, 2.0], &[3.0, 5.0, 2.0]), 0.0, epsilon = 1e-12);
-        assert_relative_eq!(dirichlet_kl(&[0.25, 0.75], &[0.25, 0.75]), 0.0, epsilon = 1e-12);
+        assert_relative_eq!(
+            dirichlet_kl(&[3.0, 5.0, 2.0], &[3.0, 5.0, 2.0]),
+            0.0,
+            epsilon = 1e-12
+        );
+        assert_relative_eq!(
+            dirichlet_kl(&[0.25, 0.75], &[0.25, 0.75]),
+            0.0,
+            epsilon = 1e-12
+        );
     }
 
     #[test]
@@ -164,8 +172,14 @@ mod tests {
         let b = [1.0, 2.0, 3.0];
         let kl_ab = dirichlet_kl(&a, &b);
         let kl_ba = dirichlet_kl(&b, &a);
-        assert!(kl_ab > 0.0, "KL must be positive for distinct params: {kl_ab}");
-        assert!(kl_ba > 0.0, "KL must be positive for distinct params: {kl_ba}");
+        assert!(
+            kl_ab > 0.0,
+            "KL must be positive for distinct params: {kl_ab}"
+        );
+        assert!(
+            kl_ba > 0.0,
+            "KL must be positive for distinct params: {kl_ba}"
+        );
         assert!(
             (kl_ab - kl_ba).abs() > 1e-6,
             "KL is asymmetric here: {kl_ab} vs {kl_ba}"
@@ -176,8 +190,14 @@ mod tests {
     fn test_dirichlet_kl_zero_concentration_finite() {
         // Zero counts (deterministic-B columns) stay finite through the floor.
         let kl = dirichlet_kl(&[0.0, 1.0], &[0.0, 1.0]);
-        assert!(kl.is_finite(), "KL must stay finite with zero concentrations: {kl}");
+        assert!(
+            kl.is_finite(),
+            "KL must stay finite with zero concentrations: {kl}"
+        );
         let kl2 = dirichlet_kl(&[1.0, 0.0], &[0.5, 0.5]);
-        assert!(kl2.is_finite(), "KL must stay finite with a zero entry: {kl2}");
+        assert!(
+            kl2.is_finite(),
+            "KL must stay finite with a zero entry: {kl2}"
+        );
     }
 }

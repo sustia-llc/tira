@@ -83,8 +83,13 @@ fn run_rep(n: usize, true_alpha: f64, seed: u64) -> Result<RunMetrics, AifError>
     )?;
 
     // (b-aware) well-specified recovery: relearn A during the replay.
-    let aware =
-        recover_alpha_learning(&data_b, 3, &BANDIT_PROBS, &PREFERENCES, &EXT3_INITIAL_PRECISION)?;
+    let aware = recover_alpha_learning(
+        &data_b,
+        3,
+        &BANDIT_PROBS,
+        &PREFERENCES,
+        &EXT3_INITIAL_PRECISION,
+    )?;
 
     Ok(RunMetrics {
         fixed_a: fixed.estimated_alpha,
@@ -123,7 +128,9 @@ fn main() -> Result<(), AifError> {
 
     // Shared seeded cell × rep sweep (issue #2 derivation single-sourced in `run_sweep`);
     // aggregate each cell's reps into medians afterwards.
-    let per_cell = run_sweep(&cells, REPS, MASTER_SEED, |&(n, a), seed| run_rep(n, a, seed))?;
+    let per_cell = run_sweep(&cells, REPS, MASTER_SEED, |&(n, a), seed| {
+        run_rep(n, a, seed)
+    })?;
     let results: Vec<CellResult> = cells
         .iter()
         .zip(&per_cell)
@@ -161,12 +168,8 @@ fn print_report(results: &[CellResult]) {
          differ ONLY in whether `learn_a` is on."
     );
     println!("- **fixed-A**: learning off → `recover_alpha` (the #2-era baseline).");
-    println!(
-        "- **misspec**: learning on → `recover_alpha` (fixed-A recovery of learning data)."
-    );
-    println!(
-        "- **aware**: same learning data → `recover_alpha_learning` (relearns A in replay)."
-    );
+    println!("- **misspec**: learning on → `recover_alpha` (fixed-A recovery of learning data).");
+    println!("- **aware**: same learning data → `recover_alpha_learning` (relearns A in replay).");
     println!("- `gap = aware − misspec` (mis-specification bias in the recovered α).");
     println!();
     println!("## Results (median · IQR over {REPS} reps)");
@@ -192,7 +195,8 @@ fn print_report(results: &[CellResult]) {
 
     // Data-driven summary readings (computed from the medians so the prose stays honest
     // across reruns). `results` is never empty (const sweeps), so no empty guard.
-    let mean = |f: fn(&CellResult) -> f64| results.iter().map(f).sum::<f64>() / results.len() as f64;
+    let mean =
+        |f: fn(&CellResult) -> f64| results.iter().map(f).sum::<f64>() / results.len() as f64;
     let mean_true = mean(|c| c.true_alpha);
     let mean_fixed = mean(|c| c.fixed_a.0);
     let mean_misspec = mean(|c| c.misspec.0);

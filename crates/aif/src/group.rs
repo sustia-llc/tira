@@ -1,10 +1,10 @@
-use crate::agent::{Agent, CopyAgent, InternalAgent, POMDPAgent};
 use crate::AifError;
+use crate::agent::{Agent, CopyAgent, InternalAgent, POMDPAgent};
 use nalgebra::DVector;
-use rand::rngs::StdRng;
 use rand::SeedableRng;
-use rand_distr::weighted::WeightedIndex;
+use rand::rngs::StdRng;
 use rand_distr::Distribution;
+use rand_distr::weighted::WeightedIndex;
 
 /// Sample a uniform index in `0..n`. `n` must be > 0 — guaranteed by the
 /// `VotingAgent` constructor assert (`n_actions` > 0) and by non-empty winner sets.
@@ -490,10 +490,7 @@ pub trait Aggregator {
     /// Collapse one full action distribution per internal agent into a group
     /// action.
     #[allow(clippy::missing_errors_doc)]
-    fn aggregate_weighted(
-        &mut self,
-        distributions: &[DVector<f64>],
-    ) -> Result<usize, AifError>;
+    fn aggregate_weighted(&mut self, distributions: &[DVector<f64>]) -> Result<usize, AifError>;
 
     /// Which of the two aggregation paths [`GroupAgent::act`] should feed.
     fn mode(&self) -> VotingMode;
@@ -539,10 +536,7 @@ impl Aggregator for VotingAgent {
         VotingAgent::aggregate(self, votes)
     }
 
-    fn aggregate_weighted(
-        &mut self,
-        distributions: &[DVector<f64>],
-    ) -> Result<usize, AifError> {
+    fn aggregate_weighted(&mut self, distributions: &[DVector<f64>]) -> Result<usize, AifError> {
         VotingAgent::aggregate_weighted(self, distributions)
     }
 
@@ -947,7 +941,8 @@ impl<S: Agent, I: InternalAgent, X: Aggregator> GroupAgent<S, I, X> {
         }
 
         let mixture = if self.active.mode() == VotingMode::CertaintyWeighted {
-            self.active.aggregate_weighted_distribution(&distributions)?
+            self.active
+                .aggregate_weighted_distribution(&distributions)?
         } else {
             self.active.aggregate_distribution(&votes)?
         };
@@ -1379,10 +1374,10 @@ mod tests {
             vec![0.5, 0.5],
             vec![0.5, 0.25, 0.25],
             vec![0.7, 0.2, 0.1, 0.0],
-            vec![1e-16, 1.0 - 1e-16],      // straddles the 1e-15 guard
-            vec![1e-14, 1.0 - 1e-14],      // just above the guard
-            vec![f64::NAN, 0.5, 0.5],      // NaN fails `p > 1e-15` in both versions
-            vec![0.5; 100],                // the total-weight underflow fixture
+            vec![1e-16, 1.0 - 1e-16], // straddles the 1e-15 guard
+            vec![1e-14, 1.0 - 1e-14], // just above the guard
+            vec![f64::NAN, 0.5, 0.5], // NaN fails `p > 1e-15` in both versions
+            vec![0.5; 100],           // the total-weight underflow fixture
         ];
         for case in &cases {
             let a = confidence_weight(case);
@@ -1484,8 +1479,16 @@ mod tests {
             (w_a * 0.5 + w_b * 1.0) / total,
             (w_a * 0.5 + w_b * 0.0) / total,
         ];
-        assert!((expected[0] - 5.0 / 6.0).abs() < TOL, "mixture[0] = 5/6, got {:.17}", expected[0]);
-        assert!((expected[1] - 1.0 / 6.0).abs() < TOL, "mixture[1] = 1/6, got {:.17}", expected[1]);
+        assert!(
+            (expected[0] - 5.0 / 6.0).abs() < TOL,
+            "mixture[0] = 5/6, got {:.17}",
+            expected[0]
+        );
+        assert!(
+            (expected[1] - 1.0 / 6.0).abs() < TOL,
+            "mixture[1] = 1/6, got {:.17}",
+            expected[1]
+        );
 
         let distributions = vec![agent_a, agent_b];
 
@@ -1507,7 +1510,10 @@ mod tests {
             counts[cw.aggregate_weighted(&distributions)?] += 1;
         }
         let freq0 = counts[0] as f64 / DRAWS as f64;
-        println!("CW mixture pin: expected {:.6}, sampled {freq0:.6}", expected[0]);
+        println!(
+            "CW mixture pin: expected {:.6}, sampled {freq0:.6}",
+            expected[0]
+        );
         assert!(
             (freq0 - expected[0]).abs() < 0.01,
             "seeded CW sampling must reproduce the 5/6 mixture mass, got {freq0:.6} ({counts:?})"
@@ -1546,7 +1552,10 @@ mod tests {
         let mut counts = [0usize; 3];
         for _ in 0..600 {
             let action = voter.aggregate(&[])?;
-            assert!(action < 3, "uniform fallback must stay in range, got {action}");
+            assert!(
+                action < 3,
+                "uniform fallback must stay in range, got {action}"
+            );
             counts[action] += 1;
         }
         // Seeded, so these counts are fixed; every action must be reachable and the
@@ -1569,7 +1578,10 @@ mod tests {
         let mut counts = [0usize; 3];
         for _ in 0..600 {
             let action = voter.aggregate_weighted(&[])?;
-            assert!(action < 3, "empty-input fallback must stay in range, got {action}");
+            assert!(
+                action < 3,
+                "empty-input fallback must stay in range, got {action}"
+            );
             counts[action] += 1;
         }
         println!("empty-distribution uniform fallback: {counts:?}");
@@ -1594,7 +1606,10 @@ mod tests {
         let mut seen = [false; N_WIDE];
         for _ in 0..2000 {
             let action = wide_voter.aggregate_weighted(&wide)?;
-            assert!(action < N_WIDE, "underflow fallback must stay in range, got {action}");
+            assert!(
+                action < N_WIDE,
+                "underflow fallback must stay in range, got {action}"
+            );
             seen[action] = true;
         }
         assert!(
@@ -1664,7 +1679,10 @@ mod tests {
         let mut counts = [0usize; 3];
         for _ in 0..200 {
             let action = voter.aggregate(&votes)?;
-            assert!(action <= 1, "Tied vote must pick a winner (0 or 1), got {action}");
+            assert!(
+                action <= 1,
+                "Tied vote must pick a winner (0 or 1), got {action}"
+            );
             counts[action] += 1;
         }
         // The tie is broken uniformly at random between the two winners, so across 200
@@ -1674,7 +1692,10 @@ mod tests {
             counts[0] > 0 && counts[1] > 0,
             "both tied winners must occur over 200 draws: {counts:?}"
         );
-        assert_eq!(counts[2], 0, "a non-winner must never be selected: {counts:?}");
+        assert_eq!(
+            counts[2], 0,
+            "a non-winner must never be selected: {counts:?}"
+        );
         Ok(())
     }
 
@@ -1738,7 +1759,13 @@ mod tests {
         let wrong = vec![DVector::from_vec(vec![0.5, 0.5])];
         let err = voter.aggregate_weighted(&wrong);
         assert!(
-            matches!(err, Err(AifError::InvalidLength { expected: 3, got: 2 })),
+            matches!(
+                err,
+                Err(AifError::InvalidLength {
+                    expected: 3,
+                    got: 2
+                })
+            ),
             "Wrong-length distribution should be rejected: {err:?}"
         );
 
@@ -1762,7 +1789,10 @@ mod tests {
 
         for _ in 0..100 {
             let action = voter.aggregate_weighted(&distributions)?;
-            assert_eq!(action, 1, "Deterministic direct call should pick mixture argmax");
+            assert_eq!(
+                action, 1,
+                "Deterministic direct call should pick mixture argmax"
+            );
         }
         Ok(())
     }
@@ -1869,8 +1899,20 @@ mod tests {
         assert_eq!(varying_prefs.n_internal(), 2);
 
         // Each path likewise errors when learn_a is on but the precision is missing.
-        assert!(GroupAgentBuilder::new(3).n_internal(3).learn_a(true).build_varying_alpha(&[0.2, 0.5, 0.8]).is_err());
-        assert!(GroupAgentBuilder::new(3).n_internal(2).learn_a(true).build_varying_preferences(&[vec![0.9, 0.1], vec![0.1, 0.9]]).is_err());
+        assert!(
+            GroupAgentBuilder::new(3)
+                .n_internal(3)
+                .learn_a(true)
+                .build_varying_alpha(&[0.2, 0.5, 0.8])
+                .is_err()
+        );
+        assert!(
+            GroupAgentBuilder::new(3)
+                .n_internal(2)
+                .learn_a(true)
+                .build_varying_preferences(&[vec![0.9, 0.1], vec![0.1, 0.9]])
+                .is_err()
+        );
         Ok(())
     }
 
@@ -1908,9 +1950,13 @@ mod tests {
 
         for (i, ag) in group.internal_agents().iter().enumerate() {
             let a_now = &ag.observation_model()[0];
-            let changed = (0..a_now.nrows())
-                .any(|r| (0..a_now.ncols()).any(|c| (a_now[(r, c)] - a_before[i][(r, c)]).abs() > 1e-9));
-            assert!(changed, "internal agent {i} A must change under CW learning");
+            let changed = (0..a_now.nrows()).any(|r| {
+                (0..a_now.ncols()).any(|c| (a_now[(r, c)] - a_before[i][(r, c)]).abs() > 1e-9)
+            });
+            assert!(
+                changed,
+                "internal agent {i} A must change under CW learning"
+            );
             let pa_sum_now: f64 = ag.pa().expect("learn_a ⇒ pA")[0].iter().sum();
             assert!(
                 pa_sum_now > pa_sum_before[i] + 1.0,
@@ -1947,9 +1993,13 @@ mod tests {
 
         for (i, ag) in group.internal_agents().iter().enumerate() {
             let a_now = &ag.observation_model()[0];
-            let changed = (0..a_now.nrows())
-                .any(|r| (0..a_now.ncols()).any(|c| (a_now[(r, c)] - a_before[i][(r, c)]).abs() > 1e-9));
-            assert!(changed, "internal agent {i} A must change under probabilistic learning");
+            let changed = (0..a_now.nrows()).any(|r| {
+                (0..a_now.ncols()).any(|c| (a_now[(r, c)] - a_before[i][(r, c)]).abs() > 1e-9)
+            });
+            assert!(
+                changed,
+                "internal agent {i} A must change under probabilistic learning"
+            );
         }
         Ok(())
     }
@@ -2312,10 +2362,10 @@ mod tests {
 
     impl Aggregator for FirstVote {
         fn aggregate(&mut self, votes: &[usize]) -> Result<usize, AifError> {
-            votes
-                .first()
-                .copied()
-                .ok_or(AifError::InvalidLength { expected: 1, got: 0 })
+            votes.first().copied().ok_or(AifError::InvalidLength {
+                expected: 1,
+                got: 0,
+            })
         }
 
         /// Unused by this aggregator's `Probabilistic` mode; kept coherent with
@@ -2324,9 +2374,10 @@ mod tests {
             &mut self,
             distributions: &[DVector<f64>],
         ) -> Result<usize, AifError> {
-            let first = distributions
-                .first()
-                .ok_or(AifError::InvalidLength { expected: 1, got: 0 })?;
+            let first = distributions.first().ok_or(AifError::InvalidLength {
+                expected: 1,
+                got: 0,
+            })?;
             let mut best = 0;
             for (a, &p) in first.iter().enumerate() {
                 if p > first[best] {
@@ -2389,19 +2440,20 @@ mod tests {
 
     impl Aggregator for FirstVoteDist {
         fn aggregate(&mut self, votes: &[usize]) -> Result<usize, AifError> {
-            votes
-                .first()
-                .copied()
-                .ok_or(AifError::InvalidLength { expected: 1, got: 0 })
+            votes.first().copied().ok_or(AifError::InvalidLength {
+                expected: 1,
+                got: 0,
+            })
         }
 
         fn aggregate_weighted(
             &mut self,
             distributions: &[DVector<f64>],
         ) -> Result<usize, AifError> {
-            let first = distributions
-                .first()
-                .ok_or(AifError::InvalidLength { expected: 1, got: 0 })?;
+            let first = distributions.first().ok_or(AifError::InvalidLength {
+                expected: 1,
+                got: 0,
+            })?;
             argmax_index(first.as_slice()).ok_or(AifError::InvalidLength {
                 expected: self.n_actions,
                 got: first.len(),
@@ -2416,9 +2468,10 @@ mod tests {
             &mut self,
             votes: &[usize],
         ) -> Result<Option<Vec<f64>>, AifError> {
-            let vote = *votes
-                .first()
-                .ok_or(AifError::InvalidLength { expected: 1, got: 0 })?;
+            let vote = *votes.first().ok_or(AifError::InvalidLength {
+                expected: 1,
+                got: 0,
+            })?;
             if vote >= self.n_actions {
                 return Err(AifError::InvalidAction(vote));
             }
@@ -2633,8 +2686,7 @@ mod tests {
     /// An aggregator that leaves the distribution twins defaulted has no
     /// deterministic read, and says so instead of inventing one.
     #[test]
-    fn test_group_distribution_rejects_aggregator_without_distribution()
-    -> Result<(), AifError> {
+    fn test_group_distribution_rejects_aggregator_without_distribution() -> Result<(), AifError> {
         let mut group =
             GroupAgent::with_slots_seeded(CopyAgent, read_members(3, 5)?, FirstVote, 3, 5);
         assert!(
@@ -2688,7 +2740,10 @@ mod tests {
         let _ = rejected.group_distribution(0)?;
         let _ = untouched.group_distribution(0)?;
         assert!(
-            matches!(rejected.record_group_action(3), Err(AifError::InvalidAction(3))),
+            matches!(
+                rejected.record_group_action(3),
+                Err(AifError::InvalidAction(3))
+            ),
             "action 3 is outside a 3-action group"
         );
 
@@ -2760,8 +2815,13 @@ mod tests {
     fn test_failed_recording_read_advances_nobody() -> Result<(), AifError> {
         const SEED: u64 = 23;
 
-        let mut failing =
-            GroupAgent::with_slots_seeded(CopyAgent, counting_members(3, SEED)?, FirstVote, 3, SEED);
+        let mut failing = GroupAgent::with_slots_seeded(
+            CopyAgent,
+            counting_members(3, SEED)?,
+            FirstVote,
+            3,
+            SEED,
+        );
         assert!(
             matches!(
                 failing.group_distribution_recording(0),
@@ -2882,7 +2942,9 @@ mod tests {
 
     impl Agent for NonFiniteMember {
         fn act(&mut self, _observation: usize) -> Result<usize, AifError> {
-            Err(AifError::InvalidDistribution("non-finite member".to_string()))
+            Err(AifError::InvalidDistribution(
+                "non-finite member".to_string(),
+            ))
         }
     }
 
@@ -2903,7 +2965,9 @@ mod tests {
 
     impl Agent for BadWeightMember {
         fn act(&mut self, _observation: usize) -> Result<usize, AifError> {
-            Err(AifError::InvalidDistribution("bad-weight member".to_string()))
+            Err(AifError::InvalidDistribution(
+                "bad-weight member".to_string(),
+            ))
         }
     }
 
@@ -3001,7 +3065,10 @@ mod tests {
         assert!(
             matches!(
                 short.group_distribution(0),
-                Err(AifError::InvalidLength { expected: 3, got: 2 })
+                Err(AifError::InvalidLength {
+                    expected: 3,
+                    got: 2
+                })
             ),
             "a member whose action space is not the group's must be rejected, not aliased"
         );
@@ -3034,10 +3101,10 @@ mod tests {
 
     impl Aggregator for StatefulDist {
         fn aggregate(&mut self, votes: &[usize]) -> Result<usize, AifError> {
-            votes
-                .first()
-                .copied()
-                .ok_or(AifError::InvalidLength { expected: 1, got: 0 })
+            votes.first().copied().ok_or(AifError::InvalidLength {
+                expected: 1,
+                got: 0,
+            })
         }
 
         fn aggregate_weighted(
@@ -3071,7 +3138,10 @@ mod tests {
         let mut group = GroupAgent::with_slots_seeded(
             CopyAgent,
             read_members(2, SEED)?,
-            StatefulDist { calls: 0, n_actions: 3 },
+            StatefulDist {
+                calls: 0,
+                n_actions: 3,
+            },
             3,
             SEED,
         );
@@ -3365,15 +3435,27 @@ mod tests {
 
         // (1) The helper's semantics, on counts tallied by hand.
         let prob = VotingAgent::with_seed(3, VotingMode::Probabilistic, SEED);
-        close(&prob.vote_distribution(&[3, 1, 0]), &[0.75, 0.25, 0.0], "probabilistic tally");
+        close(
+            &prob.vote_distribution(&[3, 1, 0]),
+            &[0.75, 0.25, 0.0],
+            "probabilistic tally",
+        );
         close(
             &prob.vote_distribution(&[0, 0, 0]),
             &[1.0 / 3.0; 3],
             "no votes ⇒ the uniform fallback `aggregate` substitutes",
         );
         let det = VotingAgent::with_seed(3, VotingMode::Deterministic, SEED);
-        close(&det.vote_distribution(&[3, 1, 0]), &[1.0, 0.0, 0.0], "lone winner ⇒ delta");
-        close(&det.vote_distribution(&[2, 2, 0]), &[0.5, 0.5, 0.0], "tie ⇒ uniform over winners");
+        close(
+            &det.vote_distribution(&[3, 1, 0]),
+            &[1.0, 0.0, 0.0],
+            "lone winner ⇒ delta",
+        );
+        close(
+            &det.vote_distribution(&[2, 2, 0]),
+            &[0.5, 0.5, 0.0],
+            "tie ⇒ uniform over winners",
+        );
 
         // (2) + (3) at group level.
         let group = |seed: u64| -> Result<GroupAgent, AifError> {
@@ -3389,7 +3471,10 @@ mod tests {
             assert_eq!(dist.len(), 3, "step {t}: one entry per action");
 
             let total: f64 = dist.iter().sum();
-            assert!((total - 1.0).abs() < TOL, "step {t}: must normalize, got {total}");
+            assert!(
+                (total - 1.0).abs() < TOL,
+                "step {t}: must normalize, got {total}"
+            );
 
             // Each entry is k/N_MEMBERS for an integer k — i.e. a vote tally.
             let counts: Vec<usize> = dist
@@ -3438,7 +3523,13 @@ mod tests {
         // (1) POMDPAgent::new: preferences must have length 2 (n_obs).
         let bad_prefs = POMDPAgent::new(2, None, None, vec![0.5, 0.3, 0.2], None, 1.0, false);
         assert!(
-            matches!(bad_prefs, Err(AifError::InvalidLength { expected: 2, got: 3 })),
+            matches!(
+                bad_prefs,
+                Err(AifError::InvalidLength {
+                    expected: 2,
+                    got: 3
+                })
+            ),
             "wrong preferences length: {bad_prefs:?}"
         );
 
@@ -3446,7 +3537,13 @@ mod tests {
         let mut agent = POMDPAgent::new(2, None, None, vec![0.5, 0.5], None, 1.0, false)?;
         let bad_obs = agent.act_multi(&[0, 0]);
         assert!(
-            matches!(bad_obs, Err(AifError::InvalidLength { expected: 1, got: 2 })),
+            matches!(
+                bad_obs,
+                Err(AifError::InvalidLength {
+                    expected: 1,
+                    got: 2
+                })
+            ),
             "wrong obs length: {bad_obs:?}"
         );
 
@@ -3457,7 +3554,13 @@ mod tests {
             .preferences(vec![0.7, 0.3])
             .build_varying_alpha(&[0.2, 0.4]);
         assert!(
-            matches!(bad_alphas, Err(AifError::InvalidLength { expected: 4, got: 2 })),
+            matches!(
+                bad_alphas,
+                Err(AifError::InvalidLength {
+                    expected: 4,
+                    got: 2
+                })
+            ),
             "wrong alphas length must report {{expected: 4, got: 2}}"
         );
         Ok(())

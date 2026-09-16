@@ -323,11 +323,7 @@ mod tests {
     }
 
     /// The same nesting driven the ordinary way, through `GroupAgent::act`.
-    fn reference(
-        master: u64,
-        meta_mode: VotingMode,
-        probs: &[f64],
-    ) -> Result<TrialData, AifError> {
+    fn reference(master: u64, meta_mode: VotingMode, probs: &[f64]) -> Result<TrialData, AifError> {
         let gseed = group_seed(master);
         let mut env = BanditEnvironment::with_seed(probs.to_vec(), env_seed(master))?;
         let mut meta = build_ext8_meta(
@@ -378,7 +374,9 @@ mod tests {
                 "G1 ({meta_mode:?}): every inner stream must span the whole run"
             );
             assert!(
-                run.inner[1..].iter().any(|d| d.actions != run.inner[0].actions),
+                run.inner[1..]
+                    .iter()
+                    .any(|d| d.actions != run.inner[0].actions),
                 "G1 ({meta_mode:?}): the inner groups must not all vote identically"
             );
         }
@@ -398,13 +396,8 @@ mod tests {
         let nested = instrumented(master, VotingMode::Probabilistic, &CONTESTED)?;
 
         let mut env = BanditEnvironment::with_seed(CONTESTED.to_vec(), env_seed(master))?;
-        let mut flat = build_ext8_group(
-            N_FLAT,
-            ALPHA,
-            &CONTESTED,
-            VotingMode::Probabilistic,
-            gseed,
-        )?;
+        let mut flat =
+            build_ext8_group(N_FLAT, ALPHA, &CONTESTED, VotingMode::Probabilistic, gseed)?;
         let flat = run_group_simulation(&mut flat, &mut env, TEST_TRIALS)?;
 
         assert_eq!(flat.len(), nested.meta.len());
@@ -427,10 +420,16 @@ mod tests {
             let master = 0xE8_0003;
             let a = instrumented(master, meta_mode, &CONTESTED)?;
             let b = instrumented(master, meta_mode, &CONTESTED)?;
-            assert_eq!(a.meta.observations, b.meta.observations, "G3 ({meta_mode:?})");
+            assert_eq!(
+                a.meta.observations, b.meta.observations,
+                "G3 ({meta_mode:?})"
+            );
             assert_eq!(a.meta.actions, b.meta.actions, "G3 ({meta_mode:?})");
             for (i, (x, y)) in a.inner.iter().zip(&b.inner).enumerate() {
-                assert_eq!(x.actions, y.actions, "G3 ({meta_mode:?}): inner {i} diverged");
+                assert_eq!(
+                    x.actions, y.actions,
+                    "G3 ({meta_mode:?}): inner {i} diverged"
+                );
             }
         }
         Ok(())
@@ -486,4 +485,3 @@ mod tests {
         }
     }
 }
-

@@ -1,10 +1,10 @@
 use crate::AifError;
 use crate::special::dirichlet_kl;
 use nalgebra::{DMatrix, DVector};
-use rand::rngs::StdRng;
 use rand::SeedableRng;
-use rand_distr::weighted::WeightedIndex;
+use rand::rngs::StdRng;
 use rand_distr::Distribution;
+use rand_distr::weighted::WeightedIndex;
 
 #[allow(clippy::missing_errors_doc)]
 pub trait Agent {
@@ -424,23 +424,23 @@ pub struct ParameterFreeEnergies {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 pub struct POMDPAgent {
-    a: Vec<DMatrix<f64>>,          // per modality: (n_obs[m] × n_joint)
-    b: Vec<Vec<DMatrix<f64>>>,     // per factor, per control: (n_states[f] square)
-    c: Vec<DVector<f64>>,          // per modality: log-preferences over n_obs[m]
-    d: Vec<DVector<f64>>,          // per factor: initial state prior
-    e_vector: DVector<f64>,        // policy prior over n_actions^policy_depth
-    beliefs: Vec<DVector<f64>>,    // per factor: current posterior
-    pa: Option<Vec<DMatrix<f64>>>, // per modality: pA counts, when learning
+    a: Vec<DMatrix<f64>>,               // per modality: (n_obs[m] × n_joint)
+    b: Vec<Vec<DMatrix<f64>>>,          // per factor, per control: (n_states[f] square)
+    c: Vec<DVector<f64>>,               // per modality: log-preferences over n_obs[m]
+    d: Vec<DVector<f64>>,               // per factor: initial state prior
+    e_vector: DVector<f64>,             // policy prior over n_actions^policy_depth
+    beliefs: Vec<DVector<f64>>,         // per factor: current posterior
+    pa: Option<Vec<DMatrix<f64>>>,      // per modality: pA counts, when learning
     pb: Option<Vec<Vec<DMatrix<f64>>>>, // per factor, per control: pB counts, when learning
-    pd: Option<Vec<DVector<f64>>>, // per factor: pD counts, when learning
-    pe: Option<DVector<f64>>,      // over policy space: pE counts, when learning
+    pd: Option<Vec<DVector<f64>>>,      // per factor: pD counts, when learning
+    pe: Option<DVector<f64>>,           // over policy space: pE counts, when learning
     // Trial-boundary snapshots of the Dirichlet parameters (construction / reset),
     // used by `parameter_free_energies` as the `KL(now ‖ start)` reference.
     pa_start: Option<Vec<DMatrix<f64>>>,
     pb_start: Option<Vec<Vec<DMatrix<f64>>>>,
     pd_start: Option<Vec<DVector<f64>>>,
     pe_start: Option<DVector<f64>>,
-    last_action: Option<usize>,    // flat joint-control index
+    last_action: Option<usize>, // flat joint-control index
     gamma: f64,
     alpha: f64,
     learn_a: bool,
@@ -609,8 +609,11 @@ impl POMDPAgent {
 
         // Normalize precision to n_joint (= n_states) length, preserving the old
         // lenient `unwrap_or(1.0)` semantics for short/absent vectors.
-        let precision = initial_precision
-            .map(|p| (0..n_states).map(|i| *p.get(i).unwrap_or(&1.0)).collect::<Vec<f64>>());
+        let precision = initial_precision.map(|p| {
+            (0..n_states)
+                .map(|i| *p.get(i).unwrap_or(&1.0))
+                .collect::<Vec<f64>>()
+        });
 
         let model = GenerativeModel {
             a: vec![a_matrix],
@@ -907,9 +910,7 @@ impl POMDPAgent {
         let c_vectors: Vec<DVector<f64>> = c
             .iter()
             .enumerate()
-            .map(|(m, cm)| {
-                DVector::from_iterator(n_obs[m], cm.iter().map(|&p| p.max(1e-10).ln()))
-            })
+            .map(|(m, cm)| DVector::from_iterator(n_obs[m], cm.iter().map(|&p| p.max(1e-10).ln())))
             .collect();
         let d_vectors: Vec<DVector<f64>> =
             d.iter().map(|df| DVector::from_vec(df.clone())).collect();
@@ -1525,10 +1526,8 @@ impl POMDPAgent {
                 let prior = softmax(&ln_prior);
                 let q = &traj[tau][f];
                 for s in 0..n {
-                    f_total += q[s]
-                        * (q[s].max(LN_FLOOR).ln()
-                            - prior[s].max(LN_FLOOR).ln()
-                            - ln_l[f][s]);
+                    f_total +=
+                        q[s] * (q[s].max(LN_FLOOR).ln() - prior[s].max(LN_FLOOR).ln() - ln_l[f][s]);
                 }
             }
         }
@@ -1590,11 +1589,7 @@ impl POMDPAgent {
     /// Same ½-weighting, `LN_FLOOR`, Jacobi sweeps (`iters`) and `1e-8` early exit
     /// as [`Self::mmp_infer`]; only the message action-routing and the future
     /// (obs-free) nodes differ.
-    fn mmp_policy_infer(
-        &self,
-        seq: &[usize],
-        iters: usize,
-    ) -> (Vec<Vec<DVector<f64>>>, f64) {
+    fn mmp_policy_infer(&self, seq: &[usize], iters: usize) -> (Vec<Vec<DVector<f64>>>, f64) {
         let w = self.mmp_obs_hist.len();
         let n_factors = self.n_states.len();
         let total = w + self.policy_depth;
@@ -1672,10 +1667,8 @@ impl POMDPAgent {
                 let prior = softmax(&ln_prior);
                 let q = &traj[tau][f];
                 for s in 0..n {
-                    f_total += q[s]
-                        * (q[s].max(LN_FLOOR).ln()
-                            - prior[s].max(LN_FLOOR).ln()
-                            - ln_l[f][s]);
+                    f_total +=
+                        q[s] * (q[s].max(LN_FLOOR).ln() - prior[s].max(LN_FLOOR).ln() - ln_l[f][s]);
                 }
             }
         }
@@ -1717,9 +1710,15 @@ impl POMDPAgent {
         let mut q = vec![1.0 / n as f64; n];
         for _ in 0..params.iters {
             let gamma = 1.0 / beta;
-            let pi0 = softmax_slice(&(0..n).map(|i| ln_e[i] + gamma * neg_g[i]).collect::<Vec<_>>());
+            let pi0 = softmax_slice(
+                &(0..n)
+                    .map(|i| ln_e[i] + gamma * neg_g[i])
+                    .collect::<Vec<_>>(),
+            );
             let pi = softmax_slice(
-                &(0..n).map(|i| ln_e[i] - f_pi[i] + gamma * neg_g[i]).collect::<Vec<_>>(),
+                &(0..n)
+                    .map(|i| ln_e[i] - f_pi[i] + gamma * neg_g[i])
+                    .collect::<Vec<_>>(),
             );
             let g_error: f64 = (0..n).map(|i| (pi[i] - pi0[i]) * neg_g[i]).sum();
             beta = (beta - (beta - beta0 + g_error) / psi).max(BETA_FLOOR);
@@ -1793,7 +1792,11 @@ impl POMDPAgent {
             })
             .collect();
 
-        self.mmp_free_energy = q.iter().zip(policy_f.iter()).map(|(&qi, &fi)| qi * fi).sum();
+        self.mmp_free_energy = q
+            .iter()
+            .zip(policy_f.iter())
+            .map(|(&qi, &fi)| qi * fi)
+            .sum();
         self.beliefs.clone_from(&bma[w - 1]);
         self.mmp_traj = bma;
         self.beta = beta;
@@ -1801,8 +1804,11 @@ impl POMDPAgent {
         self.gamma_traj = gamma_traj;
         self.mmp_policy_f = policy_f;
         self.mmp_policy_traj = policy_traj;
-        let policies: Vec<(Vec<usize>, f64)> =
-            seqs.into_iter().zip(neg_g.iter()).map(|(s, &g)| (s, g)).collect();
+        let policies: Vec<(Vec<usize>, f64)> = seqs
+            .into_iter()
+            .zip(neg_g.iter())
+            .map(|(s, &g)| (s, g))
+            .collect();
         self.cached_policy_posterior = Some((policies, q));
     }
 
@@ -1844,9 +1850,7 @@ impl POMDPAgent {
     /// smoothed into the trajectory window, so its learning contribution is
     /// retained.
     fn update_a(&mut self, obs: &[usize]) {
-        if self.last_action.is_none()
-            && matches!(self.state_inference, StateInference::MeanField)
-        {
+        if self.last_action.is_none() && matches!(self.state_inference, StateInference::MeanField) {
             return;
         }
         if self.pa.is_none() {
@@ -1855,7 +1859,10 @@ impl POMDPAgent {
         let joint = joint_belief(&self.beliefs);
         let (omega, eta) = (self.omega, self.eta);
         let a = &mut self.a;
-        let pa = self.pa.as_mut().expect("invariant: pa is Some (checked above)");
+        let pa = self
+            .pa
+            .as_mut()
+            .expect("invariant: pa is Some (checked above)");
         for (m, &o) in obs.iter().enumerate() {
             let n_joint = a[m].ncols();
             pa[m] *= omega;
@@ -1906,7 +1913,10 @@ impl POMDPAgent {
         };
 
         let b = &mut self.b;
-        let pb = self.pb.as_mut().expect("invariant: pb is Some (checked above)");
+        let pb = self
+            .pb
+            .as_mut()
+            .expect("invariant: pb is Some (checked above)");
         for f in 0..st.len() {
             let uf = controls[f];
             let n = st[f].len();
@@ -2150,7 +2160,10 @@ impl POMDPAgent {
 
             // Novelty (parameter information gain, Smith Eq. 39/40).
             if novelty_on {
-                let pa = self.pa.as_ref().expect("invariant: pa is Some (novelty_on)");
+                let pa = self
+                    .pa
+                    .as_ref()
+                    .expect("invariant: pa is Some (novelty_on)");
                 info_gain += a_novelty(&pa[m], &qo, &joint);
             }
         }
@@ -2389,10 +2402,7 @@ impl POMDPAgent {
     /// the flag-selected generation path and mutates the model when `learn_*` flags
     /// are set.
     #[allow(clippy::missing_errors_doc)]
-    pub fn action_probabilities_multi(
-        &mut self,
-        obs: &[usize],
-    ) -> Result<DVector<f64>, AifError> {
+    pub fn action_probabilities_multi(&mut self, obs: &[usize]) -> Result<DVector<f64>, AifError> {
         if obs.len() != self.n_modalities() {
             return Err(AifError::InvalidLength {
                 expected: self.n_modalities(),
@@ -3008,7 +3018,11 @@ fn validate_agent_params(params: &AgentParams) -> Result<(), AifError> {
     }
     // On the scale path, the concentration scale must be finite / positive.
     if params.initial_precision_b.is_some() {
-        validate_precision_scale(params.learn_b, params.initial_precision_b, "initial_precision_b")?;
+        validate_precision_scale(
+            params.learn_b,
+            params.initial_precision_b,
+            "initial_precision_b",
+        )?;
     }
     if let Some(counts) = &params.initial_pb {
         for bf in counts {
@@ -3018,8 +3032,16 @@ fn validate_agent_params(params: &AgentParams) -> Result<(), AifError> {
         }
     }
     // D / E learning each need their concentration scale (finite, > 0).
-    validate_precision_scale(params.learn_d, params.initial_precision_d, "initial_precision_d")?;
-    validate_precision_scale(params.learn_e, params.initial_precision_e, "initial_precision_e")?;
+    validate_precision_scale(
+        params.learn_d,
+        params.initial_precision_d,
+        "initial_precision_d",
+    )?;
+    validate_precision_scale(
+        params.learn_e,
+        params.initial_precision_e,
+        "initial_precision_e",
+    )?;
     // The novelty term is built from the pA counts, so it requires A-matrix learning.
     if params.use_param_info_gain && !params.learn_a {
         return Err(AifError::InvalidDistribution(
@@ -3072,7 +3094,10 @@ fn validate_agent_params(params: &AgentParams) -> Result<(), AifError> {
                 "PrecisionDynamics.iters must be >= 1".to_owned(),
             ));
         }
-        if !matches!(params.state_inference, StateInference::MarginalMessagePassing { .. }) {
+        if !matches!(
+            params.state_inference,
+            StateInference::MarginalMessagePassing { .. }
+        ) {
             return Err(AifError::InvalidDistribution(
                 "PrecisionDynamics requires StateInference::MarginalMessagePassing".to_owned(),
             ));
@@ -3083,11 +3108,7 @@ fn validate_agent_params(params: &AgentParams) -> Result<(), AifError> {
 
 /// Validate that a Dirichlet concentration scale is present and finite/positive
 /// whenever its learning flag is set.
-fn validate_precision_scale(
-    learn: bool,
-    scale: Option<f64>,
-    field: &str,
-) -> Result<(), AifError> {
+fn validate_precision_scale(learn: bool, scale: Option<f64>, field: &str) -> Result<(), AifError> {
     if learn && !matches!(scale, Some(s) if s.is_finite() && s > 0.0) {
         return Err(AifError::InvalidDistribution(format!(
             "AgentParams.{field} must be present, finite and > 0 when its learn flag is set"
@@ -3150,14 +3171,36 @@ mod tests {
 
     #[test]
     fn test_observation_probs_length_validated() {
-        let result = POMDPAgent::new(3, Some(vec![0.8, 0.2]), None, vec![0.7, 0.3], None, 1.0, false);
-        assert!(result.is_err(), "Should reject observation_probs.len() != n_states");
+        let result = POMDPAgent::new(
+            3,
+            Some(vec![0.8, 0.2]),
+            None,
+            vec![0.7, 0.3],
+            None,
+            1.0,
+            false,
+        );
+        assert!(
+            result.is_err(),
+            "Should reject observation_probs.len() != n_states"
+        );
     }
 
     #[test]
     fn test_initial_belief_length_validated() {
-        let result = POMDPAgent::new(3, None, None, vec![0.7, 0.3], Some(vec![0.5, 0.5]), 1.0, false);
-        assert!(result.is_err(), "Should reject initial_belief.len() != n_states");
+        let result = POMDPAgent::new(
+            3,
+            None,
+            None,
+            vec![0.7, 0.3],
+            Some(vec![0.5, 0.5]),
+            1.0,
+            false,
+        );
+        assert!(
+            result.is_err(),
+            "Should reject initial_belief.len() != n_states"
+        );
     }
 
     #[test]
@@ -3177,8 +3220,15 @@ mod tests {
 
     #[test]
     fn test_new_rejects_out_of_range_observation_probs() {
-        let result =
-            POMDPAgent::new(3, Some(vec![1.5, 0.2, 0.2]), None, vec![0.7, 0.3], None, 1.0, false);
+        let result = POMDPAgent::new(
+            3,
+            Some(vec![1.5, 0.2, 0.2]),
+            None,
+            vec![0.7, 0.3],
+            None,
+            1.0,
+            false,
+        );
         assert!(
             matches!(result, Err(AifError::InvalidProbability(_))),
             "Should reject observation_probs outside [0, 1]"
@@ -3235,14 +3285,28 @@ mod tests {
 
     #[test]
     fn test_new_rejects_non_normalized_initial_belief() {
-        let bad_sum =
-            POMDPAgent::new(3, None, None, vec![0.7, 0.3], Some(vec![0.5, 0.2, 0.2]), 1.0, false);
+        let bad_sum = POMDPAgent::new(
+            3,
+            None,
+            None,
+            vec![0.7, 0.3],
+            Some(vec![0.5, 0.2, 0.2]),
+            1.0,
+            false,
+        );
         assert!(
             matches!(bad_sum, Err(AifError::InvalidDistribution(_))),
             "Should reject initial_belief not summing to 1.0"
         );
-        let negative =
-            POMDPAgent::new(3, None, None, vec![0.7, 0.3], Some(vec![1.2, -0.1, -0.1]), 1.0, false);
+        let negative = POMDPAgent::new(
+            3,
+            None,
+            None,
+            vec![0.7, 0.3],
+            Some(vec![1.2, -0.1, -0.1]),
+            1.0,
+            false,
+        );
         assert!(
             matches!(negative, Err(AifError::InvalidDistribution(_))),
             "Should reject negative initial_belief entry"
@@ -3251,8 +3315,15 @@ mod tests {
 
     #[test]
     fn test_new_accepts_valid_initial_belief() {
-        let result =
-            POMDPAgent::new(3, None, None, vec![0.7, 0.3], Some(vec![0.4, 0.3, 0.3]), 1.0, false);
+        let result = POMDPAgent::new(
+            3,
+            None,
+            None,
+            vec![0.7, 0.3],
+            Some(vec![0.4, 0.3, 0.3]),
+            1.0,
+            false,
+        );
         assert!(result.is_ok(), "Should accept a valid initial_belief");
     }
 
@@ -3319,14 +3390,21 @@ mod tests {
         // pA should have accumulated counts
         if let Some(pa) = &agent.pa {
             for col in 0..3 {
-                assert!(pa[0][(1, col)] > 1.0, "pA should accumulate for observation 1");
+                assert!(
+                    pa[0][(1, col)] > 1.0,
+                    "pA should accumulate for observation 1"
+                );
             }
         }
 
         // A matrix should have been updated from pA (not frozen at initial values)
-        let a_changed = (0..agent.a[0].nrows())
-            .any(|r| (0..agent.a[0].ncols()).any(|c| (agent.a[0][(r, c)] - a_before[(r, c)]).abs() > 1e-6));
-        assert!(a_changed, "A matrix should be updated from pA during learning");
+        let a_changed = (0..agent.a[0].nrows()).any(|r| {
+            (0..agent.a[0].ncols()).any(|c| (agent.a[0][(r, c)] - a_before[(r, c)]).abs() > 1e-6)
+        });
+        assert!(
+            a_changed,
+            "A matrix should be updated from pA during learning"
+        );
 
         // Directional + normalization check (deterministic, seed-fixed above).
         // Observation 1 was fed every step, so for every column the row-1 mass must
@@ -3526,7 +3604,10 @@ mod tests {
         let g_conflicting = conflicting.expected_free_energy();
 
         assert!(g_aligned.is_finite(), "G must be finite: {g_aligned}");
-        assert!(g_conflicting.is_finite(), "G must be finite: {g_conflicting}");
+        assert!(
+            g_conflicting.is_finite(),
+            "G must be finite: {g_conflicting}"
+        );
         assert!(
             g_aligned < g_conflicting,
             "Aligned prefs must yield LOWER G (better): aligned={g_aligned}, conflicting={g_conflicting}"
@@ -3591,7 +3672,11 @@ mod tests {
         let mut depth1 = build(1)?;
         let mut depth2 = build(2)?;
         assert_eq!(depth1.e_vector.len(), 3, "depth 1 ⇒ 3 policies (uniform E)");
-        assert_eq!(depth2.e_vector.len(), 9, "depth 2 ⇒ 3² policies (uniform E)");
+        assert_eq!(
+            depth2.e_vector.len(),
+            9,
+            "depth 2 ⇒ 3² policies (uniform E)"
+        );
 
         // Mixed observations and a mixed action script — the same replay path
         // (`action_probabilities` + `record_action`) that recovery drives.
@@ -3614,7 +3699,10 @@ mod tests {
             }
             // Sanity: a real distribution, not two matching degenerate vectors.
             let sum: f64 = p1.iter().sum();
-            assert!((sum - 1.0).abs() < 1e-9, "step {t}: action marginal must normalize, got {sum}");
+            assert!(
+                (sum - 1.0).abs() < 1e-9,
+                "step {t}: action marginal must normalize, got {sum}"
+            );
             assert!(
                 p1.iter().any(|&p| p > 0.05) && p1.iter().any(|&p| p < 0.5),
                 "step {t}: the marginal must be non-degenerate, got {p1:?}"
@@ -3699,7 +3787,10 @@ mod tests {
         // Pragmatic term = qo·C, C = ln 0.5 for both obs → -ln2 (qo sums to 1).
         let pragmatic = -std::f64::consts::LN_2;
         let info_gain = neg_g - pragmatic;
-        assert!(info_gain > 0.0, "epistemic term must be positive: {info_gain}");
+        assert!(
+            info_gain > 0.0,
+            "epistemic term must be positive: {info_gain}"
+        );
         assert_relative_eq!(info_gain, 0.315_952, epsilon = 1e-5);
         Ok(())
     }
@@ -3711,19 +3802,20 @@ mod tests {
         // per-factor posteriors. (Kron operand order A2 ⊗ A1 makes column
         // flat = s0 + 2·s1, i.e. factor 0 fastest, matching multi_to_flat.)
         let a1 = DMatrix::from_row_slice(2, 2, &[0.8, 0.3, 0.2, 0.7]); // factor 0 obs
-        let a2 = DMatrix::from_row_slice(3, 3, &[
-            0.7, 0.2, 0.1, //
-            0.2, 0.6, 0.3, //
-            0.1, 0.2, 0.6,
-        ]); // factor 1 obs
+        let a2 = DMatrix::from_row_slice(
+            3,
+            3,
+            &[
+                0.7, 0.2, 0.1, //
+                0.2, 0.6, 0.3, //
+                0.1, 0.2, 0.6,
+            ],
+        ); // factor 1 obs
         let a_joint = a2.kronecker(&a1); // (6 × 6)
 
         let model = GenerativeModel {
             a: vec![a_joint],
-            b: vec![
-                vec![DMatrix::identity(2, 2)],
-                vec![DMatrix::identity(3, 3)],
-            ],
+            b: vec![vec![DMatrix::identity(2, 2)], vec![DMatrix::identity(3, 3)]],
             c: vec![vec![0.5; 6]],
             d: vec![vec![0.4, 0.6], vec![0.2, 0.3, 0.5]],
         };
@@ -3793,10 +3885,19 @@ mod tests {
         }
 
         // Agent::act rejects a multi-modality agent; act_multi works.
-        assert!(matches!(agent.act(0), Err(AifError::InvalidLength { expected: 1, got: 2 })));
+        assert!(matches!(
+            agent.act(0),
+            Err(AifError::InvalidLength {
+                expected: 1,
+                got: 2
+            })
+        ));
         assert!(matches!(
             agent.action_probabilities_multi(&[0]),
-            Err(AifError::InvalidLength { expected: 2, got: 1 })
+            Err(AifError::InvalidLength {
+                expected: 2,
+                got: 1
+            })
         ));
         let action = agent.act_multi(&[0, 0])?;
         assert!(action < agent.n_actions());
@@ -3808,13 +3909,21 @@ mod tests {
         // 1 factor, 3 states, 2 controls (stay = identity, advance = cycle s→s+1).
         // n_actions = Π n_controls = 2 ≠ n_states = 3.
         let stay = DMatrix::identity(3, 3);
-        let advance = DMatrix::from_row_slice(3, 3, &[
-            0.0, 0.0, 1.0, //
-            1.0, 0.0, 0.0, //
-            0.0, 1.0, 0.0,
-        ]);
+        let advance = DMatrix::from_row_slice(
+            3,
+            3,
+            &[
+                0.0, 0.0, 1.0, //
+                1.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0,
+            ],
+        );
         let model = GenerativeModel {
-            a: vec![DMatrix::from_row_slice(2, 3, &[0.8, 0.5, 0.2, 0.2, 0.5, 0.8])],
+            a: vec![DMatrix::from_row_slice(
+                2,
+                3,
+                &[0.8, 0.5, 0.2, 0.2, 0.5, 0.8],
+            )],
             b: vec![vec![stay, advance]],
             c: vec![vec![0.7, 0.3]],
             d: vec![vec![1.0, 0.0, 0.0]],
@@ -3835,7 +3944,10 @@ mod tests {
         agent.reseed(7);
         for _ in 0..5 {
             let action = agent.act(1)?;
-            assert!(action < 2, "action must be a control index in 0..2: {action}");
+            assert!(
+                action < 2,
+                "action must be a control index in 0..2: {action}"
+            );
             assert_relative_eq!(agent.state_belief().sum(), 1.0, epsilon = 1e-9);
         }
         Ok(())
@@ -3846,14 +3958,29 @@ mod tests {
         // A hand-built MAB `from_model` must reproduce `new` bit-for-bit on a
         // fixed observation/action replay (action_probabilities is rng-free).
         let probs = [0.8, 0.4, 0.4];
-        let mut m_new =
-            POMDPAgent::new(3, Some(probs.to_vec()), None, vec![0.7, 0.3], None, 0.8, false)?;
+        let mut m_new = POMDPAgent::new(
+            3,
+            Some(probs.to_vec()),
+            None,
+            vec![0.7, 0.3],
+            None,
+            0.8,
+            false,
+        )?;
 
         // A: column j = [p_j, 1-p_j]; B: deterministic per-arm; D uniform.
-        let a = DMatrix::from_row_slice(2, 3, &[
-            probs[0], probs[1], probs[2], //
-            1.0 - probs[0], 1.0 - probs[1], 1.0 - probs[2],
-        ]);
+        let a = DMatrix::from_row_slice(
+            2,
+            3,
+            &[
+                probs[0],
+                probs[1],
+                probs[2], //
+                1.0 - probs[0],
+                1.0 - probs[1],
+                1.0 - probs[2],
+            ],
+        );
         let model = GenerativeModel {
             a: vec![a],
             b: vec![mab_transitions(3)],
@@ -3888,10 +4015,18 @@ mod tests {
         // produce identical sampled-action streams; a `None` seed still constructs
         // and runs (entropy path, smoke only).
         let probs = [0.8, 0.4, 0.4];
-        let a = DMatrix::from_row_slice(2, 3, &[
-            probs[0], probs[1], probs[2], //
-            1.0 - probs[0], 1.0 - probs[1], 1.0 - probs[2],
-        ]);
+        let a = DMatrix::from_row_slice(
+            2,
+            3,
+            &[
+                probs[0],
+                probs[1],
+                probs[2], //
+                1.0 - probs[0],
+                1.0 - probs[1],
+                1.0 - probs[2],
+            ],
+        );
         let model = || GenerativeModel {
             a: vec![a.clone()],
             b: vec![mab_transitions(3)],
@@ -3914,12 +4049,19 @@ mod tests {
             seq_a.push(agent_a.act(obs)?);
             seq_b.push(agent_b.act(obs)?);
         }
-        assert_eq!(seq_a, seq_b, "seed: Some(7) must give identical action streams");
+        assert_eq!(
+            seq_a, seq_b,
+            "seed: Some(7) must give identical action streams"
+        );
 
         // Unseeded construction still runs (entropy path).
         let mut agent_none = POMDPAgent::from_model(
             model(),
-            AgentParams { alpha: 0.5, seed: None, ..Default::default() },
+            AgentParams {
+                alpha: 0.5,
+                seed: None,
+                ..Default::default()
+            },
         )?;
         let _ = agent_none.act(0)?;
         Ok(())
@@ -3930,10 +4072,18 @@ mod tests {
         // Constructing with `seed: Some(5)` and constructing unseeded then calling
         // `reseed(5)` must share the same RNG stream, hence identical actions.
         let probs = [0.8, 0.4, 0.4];
-        let a = DMatrix::from_row_slice(2, 3, &[
-            probs[0], probs[1], probs[2], //
-            1.0 - probs[0], 1.0 - probs[1], 1.0 - probs[2],
-        ]);
+        let a = DMatrix::from_row_slice(
+            2,
+            3,
+            &[
+                probs[0],
+                probs[1],
+                probs[2], //
+                1.0 - probs[0],
+                1.0 - probs[1],
+                1.0 - probs[2],
+            ],
+        );
         let model = || GenerativeModel {
             a: vec![a.clone()],
             b: vec![mab_transitions(3)],
@@ -3943,11 +4093,19 @@ mod tests {
 
         let mut agent_a = POMDPAgent::from_model(
             model(),
-            AgentParams { alpha: 0.5, seed: Some(5), ..Default::default() },
+            AgentParams {
+                alpha: 0.5,
+                seed: Some(5),
+                ..Default::default()
+            },
         )?;
         let mut agent_b = POMDPAgent::from_model(
             model(),
-            AgentParams { alpha: 0.5, seed: None, ..Default::default() },
+            AgentParams {
+                alpha: 0.5,
+                seed: None,
+                ..Default::default()
+            },
         )?;
         agent_b.reseed(5);
 
@@ -3958,7 +4116,10 @@ mod tests {
             seq_a.push(agent_a.act(obs)?);
             seq_b.push(agent_b.act(obs)?);
         }
-        assert_eq!(seq_a, seq_b, "reseed(5) must match seed: Some(5) construction");
+        assert_eq!(
+            seq_a, seq_b,
+            "reseed(5) must match seed: Some(5) construction"
+        );
         Ok(())
     }
 
@@ -4030,15 +4191,20 @@ mod tests {
         // Non-square B (ncols mismatch: ns = nrows = 2, but ncols = 3).
         let bad_b = GenerativeModel {
             a: vec![base_a()],
-            b: vec![vec![DMatrix::from_row_slice(2, 3, &[
-                0.5, 0.3, 0.2, 0.5, 0.7, 0.8,
-            ])]],
+            b: vec![vec![DMatrix::from_row_slice(
+                2,
+                3,
+                &[0.5, 0.3, 0.2, 0.5, 0.7, 0.8],
+            )]],
             c: vec![vec![0.5, 0.5]],
             d: vec![vec![0.5, 0.5]],
         };
         assert!(matches!(
             POMDPAgent::from_model(bad_b, params()),
-            Err(AifError::InvalidLength { expected: 2, got: 3 })
+            Err(AifError::InvalidLength {
+                expected: 2,
+                got: 3
+            })
         ));
 
         // B nrows mismatch: the factor's first control fixes ns = 2, but a later
@@ -4051,7 +4217,10 @@ mod tests {
         };
         assert!(matches!(
             POMDPAgent::from_model(bad_b_rows, params()),
-            Err(AifError::InvalidLength { expected: 2, got: 3 })
+            Err(AifError::InvalidLength {
+                expected: 2,
+                got: 3
+            })
         ));
 
         // Wrong C length (3 != n_obs 2).
@@ -4063,7 +4232,10 @@ mod tests {
         };
         assert!(matches!(
             POMDPAgent::from_model(bad_c, params()),
-            Err(AifError::InvalidLength { expected: 2, got: 3 })
+            Err(AifError::InvalidLength {
+                expected: 2,
+                got: 3
+            })
         ));
 
         // Wrong D length (3 != n_states 2).
@@ -4075,7 +4247,10 @@ mod tests {
         };
         assert!(matches!(
             POMDPAgent::from_model(bad_d, params()),
-            Err(AifError::InvalidLength { expected: 2, got: 3 })
+            Err(AifError::InvalidLength {
+                expected: 2,
+                got: 3
+            })
         ));
 
         // Empty modality list.
@@ -4218,12 +4393,28 @@ mod tests {
         // differently. F_π is constant across policies in both modes, so Eq. 22
         // reduces to σ(γ·neg_g)×E either way.
         let probs = [0.8, 0.4, 0.4];
-        let mut mf = POMDPAgent::new(3, Some(probs.to_vec()), None, vec![0.7, 0.3], None, 0.8, false)?;
+        let mut mf = POMDPAgent::new(
+            3,
+            Some(probs.to_vec()),
+            None,
+            vec![0.7, 0.3],
+            None,
+            0.8,
+            false,
+        )?;
 
-        let a = DMatrix::from_row_slice(2, 3, &[
-            probs[0], probs[1], probs[2], //
-            1.0 - probs[0], 1.0 - probs[1], 1.0 - probs[2],
-        ]);
+        let a = DMatrix::from_row_slice(
+            2,
+            3,
+            &[
+                probs[0],
+                probs[1],
+                probs[2], //
+                1.0 - probs[0],
+                1.0 - probs[1],
+                1.0 - probs[2],
+            ],
+        );
         let model = GenerativeModel {
             a: vec![a],
             b: vec![mab_transitions(3)],
@@ -4234,7 +4425,10 @@ mod tests {
             model,
             AgentParams {
                 alpha: 0.8,
-                state_inference: StateInference::MarginalMessagePassing { horizon: 1, iters: 10 },
+                state_inference: StateInference::MarginalMessagePassing {
+                    horizon: 1,
+                    iters: 10,
+                },
                 ..Default::default()
             },
         )?;
@@ -4311,9 +4505,15 @@ mod tests {
         agent.record_action(0);
         agent.action_probabilities(obs[2]);
 
-        let s1 = agent.bma_state_belief(1).expect("invariant: MMP window has node 1");
-        let s2 = agent.bma_state_belief(2).expect("invariant: MMP window has node 2");
-        let s3 = agent.bma_state_belief(3).expect("invariant: MMP window has node 3");
+        let s1 = agent
+            .bma_state_belief(1)
+            .expect("invariant: MMP window has node 1");
+        let s2 = agent
+            .bma_state_belief(2)
+            .expect("invariant: MMP window has node 2");
+        let s3 = agent
+            .bma_state_belief(3)
+            .expect("invariant: MMP window has node 3");
         // Each smoothed marginal is a proper distribution.
         for s in [&s1, &s2, &s3] {
             assert_eq!(s.len(), 1);
@@ -4337,7 +4537,10 @@ mod tests {
         //    MMP moves it the same way and lands closer to exact than the filter.
         let filter_1 = 0.5 * a[(obs[0], 0)] / (0.5 * a[(obs[0], 0)] + 0.5 * a[(obs[0], 1)]);
         assert_relative_eq!(filter_1, 0.727_273, epsilon = 1e-5);
-        assert!(s1[0][0] < filter_1, "MMP τ=1 belief must move away from the filter");
+        assert!(
+            s1[0][0] < filter_1,
+            "MMP τ=1 belief must move away from the filter"
+        );
         assert!(
             (s1[0][0] - brute[0][0]).abs() < (filter_1 - brute[0][0]).abs(),
             "MMP τ=1 belief must be closer to the exact smoother than the filter"
@@ -4372,8 +4575,14 @@ mod tests {
         let filter_1 = 0.5 * a[(obs[0], 0)] / (0.5 * a[(obs[0], 0)] + 0.5 * a[(obs[0], 1)]);
 
         // Direction: the smoothed τ=1 belief moves below the filter (toward truth).
-        assert!(brute[0][0] < filter_1, "exact smoother must revise τ=1 downward");
-        assert!(s1[0][0] < filter_1, "MMP must revise τ=1 downward (same direction)");
+        assert!(
+            brute[0][0] < filter_1,
+            "exact smoother must revise τ=1 downward"
+        );
+        assert!(
+            s1[0][0] < filter_1,
+            "MMP must revise τ=1 downward (same direction)"
+        );
         // Magnitude: MMP closes part of the filter→exact gap (strictly closer).
         assert!(
             (s1[0][0] - brute[0][0]).abs() < (filter_1 - brute[0][0]).abs(),
@@ -4399,16 +4608,27 @@ mod tests {
         };
         let mut agent = POMDPAgent::from_model(
             model,
-            AgentParams { alpha: 1.0, ..Default::default() },
+            AgentParams {
+                alpha: 1.0,
+                ..Default::default()
+            },
         )?;
         // No observation yet → 0.0.
         assert_relative_eq!(agent.variational_free_energy(), 0.0, epsilon = 1e-12);
 
         agent.action_probabilities(0);
-        assert_relative_eq!(agent.variational_free_energy(), -0.9_f64.ln(), epsilon = 1e-9);
+        assert_relative_eq!(
+            agent.variational_free_energy(),
+            -0.9_f64.ln(),
+            epsilon = 1e-9
+        );
         agent.record_action(0);
         agent.action_probabilities(1);
-        assert_relative_eq!(agent.variational_free_energy(), -0.1_f64.ln(), epsilon = 1e-9);
+        assert_relative_eq!(
+            agent.variational_free_energy(),
+            -0.1_f64.ln(),
+            epsilon = 1e-9
+        );
 
         // MeanField exposes no per-policy F or BMA.
         assert!(agent.policy_free_energies().is_none());
@@ -4434,7 +4654,10 @@ mod tests {
             model,
             AgentParams {
                 alpha: 1.0,
-                state_inference: StateInference::MarginalMessagePassing { horizon: 2, iters: 500 },
+                state_inference: StateInference::MarginalMessagePassing {
+                    horizon: 2,
+                    iters: 500,
+                },
                 ..Default::default()
             },
         )?;
@@ -4442,7 +4665,9 @@ mod tests {
         agent.record_action(0);
         agent.action_probabilities(1);
 
-        let fpi = agent.policy_free_energies().expect("invariant: MMP surfaces F_π");
+        let fpi = agent
+            .policy_free_energies()
+            .expect("invariant: MMP surfaces F_π");
         assert_eq!(fpi.len(), agent.n_actions()); // depth 1 → n_policies = n_actions
         for &f in &fpi {
             assert_relative_eq!(f, fpi[0], epsilon = 1e-12);
@@ -4464,8 +4689,12 @@ mod tests {
         agent.action_probabilities(1);
 
         // BMA sanity: one factor, valid distribution, 1-based τ, out-of-range None.
-        let x1 = agent.bma_state_belief(1).expect("invariant: node 1 present");
-        let x2 = agent.bma_state_belief(2).expect("invariant: node 2 present");
+        let x1 = agent
+            .bma_state_belief(1)
+            .expect("invariant: node 1 present");
+        let x2 = agent
+            .bma_state_belief(2)
+            .expect("invariant: node 2 present");
         assert_eq!(x1.len(), 1);
         assert_relative_eq!(x1[0].sum(), 1.0, epsilon = 1e-9);
         assert_relative_eq!(x2[0].sum(), 1.0, epsilon = 1e-9);
@@ -4498,18 +4727,27 @@ mod tests {
             AgentParams {
                 alpha: 1.0,
                 policy_depth: 2,
-                state_inference: StateInference::MarginalMessagePassing { horizon: 1, iters: 5 },
+                state_inference: StateInference::MarginalMessagePassing {
+                    horizon: 1,
+                    iters: 5,
+                },
                 ..Default::default()
             },
         );
-        assert!(matches!(short_horizon, Err(AifError::InvalidDistribution(_))));
+        assert!(matches!(
+            short_horizon,
+            Err(AifError::InvalidDistribution(_))
+        ));
 
         // iters == 0.
         let zero_iters = POMDPAgent::from_model(
             base(),
             AgentParams {
                 alpha: 1.0,
-                state_inference: StateInference::MarginalMessagePassing { horizon: 2, iters: 0 },
+                state_inference: StateInference::MarginalMessagePassing {
+                    horizon: 2,
+                    iters: 0,
+                },
                 ..Default::default()
             },
         );
@@ -4523,7 +4761,10 @@ mod tests {
                 alpha: 1.0,
                 learn_a: true,
                 initial_precision: Some(vec![1.0, 1.0]),
-                state_inference: StateInference::MarginalMessagePassing { horizon: 2, iters: 5 },
+                state_inference: StateInference::MarginalMessagePassing {
+                    horizon: 2,
+                    iters: 5,
+                },
                 ..Default::default()
             },
         );
@@ -4533,11 +4774,7 @@ mod tests {
     // ----- Stage A (tira #13): Dirichlet learning (pB/pD/pE) + novelty EFE -----
 
     /// 1-factor / 1-modality model with `n_controls` explicit transition matrices.
-    fn single_factor_model(
-        a: DMatrix<f64>,
-        b: Vec<DMatrix<f64>>,
-        d: Vec<f64>,
-    ) -> GenerativeModel {
+    fn single_factor_model(a: DMatrix<f64>, b: Vec<DMatrix<f64>>, d: Vec<f64>) -> GenerativeModel {
         let n_obs = a.nrows();
         GenerativeModel {
             a: vec![a],
@@ -4663,8 +4900,16 @@ mod tests {
         let norm = column_normalize(&counts[0]);
         for r in 0..2 {
             for c in 0..2 {
-                assert_relative_eq!(injected.pa().unwrap()[0][(r, c)], counts[0][(r, c)], epsilon = 1e-15);
-                assert_relative_eq!(injected.observation_model()[0][(r, c)], norm[(r, c)], epsilon = 1e-15);
+                assert_relative_eq!(
+                    injected.pa().unwrap()[0][(r, c)],
+                    counts[0][(r, c)],
+                    epsilon = 1e-15
+                );
+                assert_relative_eq!(
+                    injected.observation_model()[0][(r, c)],
+                    norm[(r, c)],
+                    epsilon = 1e-15
+                );
             }
         }
 
@@ -4737,8 +4982,16 @@ mod tests {
                 let norm = column_normalize(bu);
                 for r in 0..2 {
                     for c in 0..2 {
-                        assert_relative_eq!(injected.pb().unwrap()[f][u][(r, c)], bu[(r, c)], epsilon = 1e-15);
-                        assert_relative_eq!(injected.transition_model()[f][u][(r, c)], norm[(r, c)], epsilon = 1e-15);
+                        assert_relative_eq!(
+                            injected.pb().unwrap()[f][u][(r, c)],
+                            bu[(r, c)],
+                            epsilon = 1e-15
+                        );
+                        assert_relative_eq!(
+                            injected.transition_model()[f][u][(r, c)],
+                            norm[(r, c)],
+                            epsilon = 1e-15
+                        );
                     }
                 }
             }
@@ -4814,7 +5067,11 @@ mod tests {
         }
         for r in 0..2 {
             for c in 0..2 {
-                assert_relative_eq!(scaled.pa().unwrap()[0][(r, c)], injected.pa().unwrap()[0][(r, c)], epsilon = 1e-15);
+                assert_relative_eq!(
+                    scaled.pa().unwrap()[0][(r, c)],
+                    injected.pa().unwrap()[0][(r, c)],
+                    epsilon = 1e-15
+                );
                 assert_relative_eq!(
                     scaled.observation_model()[0][(r, c)],
                     injected.observation_model()[0][(r, c)],
@@ -4848,7 +5105,11 @@ mod tests {
         // At construction A ≡ normalize(counts), despite the model supplying a uniform A.
         for r in 0..2 {
             for c in 0..2 {
-                assert_relative_eq!(agent.observation_model()[0][(r, c)], expected_a[(r, c)], epsilon = 1e-15);
+                assert_relative_eq!(
+                    agent.observation_model()[0][(r, c)],
+                    expected_a[(r, c)],
+                    epsilon = 1e-15
+                );
             }
         }
         // First counted action_probabilities must NOT flatten A: it stays strongly
@@ -4865,6 +5126,9 @@ mod tests {
         Ok(())
     }
 
+    // One table-driven validation test over every `initial_pa`/`initial_pb` precondition;
+    // rustfmt 1.9.0's wrapping pushed it past the pedantic line budget (118/100).
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn test_initial_pa_pb_validation() {
         let model = || {
@@ -4895,32 +5159,111 @@ mod tests {
         };
 
         // pA: scale and counts both Some → ambiguous.
-        reject(AgentParams { alpha: 1.0, learn_a: true, initial_precision: Some(vec![1.0, 1.0]), initial_pa: Some(ok_counts()), ..Default::default() });
+        reject(AgentParams {
+            alpha: 1.0,
+            learn_a: true,
+            initial_precision: Some(vec![1.0, 1.0]),
+            initial_pa: Some(ok_counts()),
+            ..Default::default()
+        });
         // pA counts without learn_a.
-        reject(AgentParams { alpha: 1.0, initial_pa: Some(ok_counts()), ..Default::default() });
+        reject(AgentParams {
+            alpha: 1.0,
+            initial_pa: Some(ok_counts()),
+            ..Default::default()
+        });
         // learn_a with neither seed.
-        reject(AgentParams { alpha: 1.0, learn_a: true, ..Default::default() });
+        reject(AgentParams {
+            alpha: 1.0,
+            learn_a: true,
+            ..Default::default()
+        });
         // Bad shape: wrong modality count.
-        reject(AgentParams { alpha: 1.0, learn_a: true, initial_pa: Some(vec![]), ..Default::default() });
+        reject(AgentParams {
+            alpha: 1.0,
+            learn_a: true,
+            initial_pa: Some(vec![]),
+            ..Default::default()
+        });
         // Bad shape: wrong ncols (n_joint = 2).
-        reject(AgentParams { alpha: 1.0, learn_a: true, initial_pa: Some(vec![DMatrix::from_element(2, 3, 1.0)]), ..Default::default() });
+        reject(AgentParams {
+            alpha: 1.0,
+            learn_a: true,
+            initial_pa: Some(vec![DMatrix::from_element(2, 3, 1.0)]),
+            ..Default::default()
+        });
         // Zero-column pA (both entries of column 1 are zero).
-        reject(AgentParams { alpha: 1.0, learn_a: true, initial_pa: Some(vec![DMatrix::from_row_slice(2, 2, &[1.0, 0.0, 3.0, 0.0])]), ..Default::default() });
+        reject(AgentParams {
+            alpha: 1.0,
+            learn_a: true,
+            initial_pa: Some(vec![DMatrix::from_row_slice(2, 2, &[1.0, 0.0, 3.0, 0.0])]),
+            ..Default::default()
+        });
         // Negative entry.
-        reject(AgentParams { alpha: 1.0, learn_a: true, initial_pa: Some(vec![DMatrix::from_row_slice(2, 2, &[-1.0, 1.0, 2.0, 1.0])]), ..Default::default() });
+        reject(AgentParams {
+            alpha: 1.0,
+            learn_a: true,
+            initial_pa: Some(vec![DMatrix::from_row_slice(2, 2, &[-1.0, 1.0, 2.0, 1.0])]),
+            ..Default::default()
+        });
 
         // pB: scale and counts both Some.
-        reject(AgentParams { alpha: 1.0, learn_b: true, initial_precision_b: Some(1.0), initial_pb: Some(ok_pb()), ..Default::default() });
+        reject(AgentParams {
+            alpha: 1.0,
+            learn_b: true,
+            initial_precision_b: Some(1.0),
+            initial_pb: Some(ok_pb()),
+            ..Default::default()
+        });
         // pB counts without learn_b.
-        reject(AgentParams { alpha: 1.0, initial_pb: Some(ok_pb()), ..Default::default() });
+        reject(AgentParams {
+            alpha: 1.0,
+            initial_pb: Some(ok_pb()),
+            ..Default::default()
+        });
         // Bad shape: wrong control count (factor has 2 controls).
-        reject(AgentParams { alpha: 1.0, learn_b: true, initial_pb: Some(vec![vec![DMatrix::from_element(2, 2, 1.0)]]), ..Default::default() });
+        reject(AgentParams {
+            alpha: 1.0,
+            learn_b: true,
+            initial_pb: Some(vec![vec![DMatrix::from_element(2, 2, 1.0)]]),
+            ..Default::default()
+        });
         // Zero-column pB in control 0.
-        reject(AgentParams { alpha: 1.0, learn_b: true, initial_pb: Some(vec![vec![DMatrix::from_row_slice(2, 2, &[0.0, 1.0, 0.0, 2.0]), DMatrix::from_element(2, 2, 1.0)]]), ..Default::default() });
+        reject(AgentParams {
+            alpha: 1.0,
+            learn_b: true,
+            initial_pb: Some(vec![vec![
+                DMatrix::from_row_slice(2, 2, &[0.0, 1.0, 0.0, 2.0]),
+                DMatrix::from_element(2, 2, 1.0),
+            ]]),
+            ..Default::default()
+        });
 
         // Positive controls: valid injected pA / pB construct.
-        assert!(POMDPAgent::from_model(model(), AgentParams { alpha: 1.0, learn_a: true, initial_pa: Some(ok_counts()), ..Default::default() }).is_ok());
-        assert!(POMDPAgent::from_model(model(), AgentParams { alpha: 1.0, learn_b: true, initial_pb: Some(ok_pb()), ..Default::default() }).is_ok());
+        assert!(
+            POMDPAgent::from_model(
+                model(),
+                AgentParams {
+                    alpha: 1.0,
+                    learn_a: true,
+                    initial_pa: Some(ok_counts()),
+                    ..Default::default()
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            POMDPAgent::from_model(
+                model(),
+                AgentParams {
+                    alpha: 1.0,
+                    learn_b: true,
+                    initial_pb: Some(ok_pb()),
+                    ..Default::default()
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -4933,18 +5276,29 @@ mod tests {
         // column must be rejected at construction, so validation and normalization share
         // CONC_NORM_FLOOR. Column 1 here sums to 5e-11 ∈ (0, 1e-10].
         let model = |b: Vec<DMatrix<f64>>| {
-            single_factor_model(DMatrix::from_row_slice(2, 2, &[0.9, 0.1, 0.1, 0.9]), b, vec![0.5, 0.5])
+            single_factor_model(
+                DMatrix::from_row_slice(2, 2, &[0.9, 0.1, 0.1, 0.9]),
+                b,
+                vec![0.5, 0.5],
+            )
         };
         let pa_subfloor = POMDPAgent::from_model(
             model(vec![DMatrix::identity(2, 2)]),
             AgentParams {
                 alpha: 1.0,
                 learn_a: true,
-                initial_pa: Some(vec![DMatrix::from_row_slice(2, 2, &[1.0, 2e-11, 3.0, 3e-11])]),
+                initial_pa: Some(vec![DMatrix::from_row_slice(
+                    2,
+                    2,
+                    &[1.0, 2e-11, 3.0, 3e-11],
+                )]),
                 ..Default::default()
             },
         );
-        assert!(matches!(pa_subfloor, Err(AifError::InvalidDistribution(_))), "sub-floor pA column must be rejected");
+        assert!(
+            matches!(pa_subfloor, Err(AifError::InvalidDistribution(_))),
+            "sub-floor pA column must be rejected"
+        );
 
         // Same guard on pB (control 0, column 0 sums to 5e-11).
         let pb_subfloor = POMDPAgent::from_model(
@@ -4959,7 +5313,10 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(matches!(pb_subfloor, Err(AifError::InvalidDistribution(_))), "sub-floor pB column must be rejected");
+        assert!(
+            matches!(pb_subfloor, Err(AifError::InvalidDistribution(_))),
+            "sub-floor pB column must be rejected"
+        );
     }
 
     #[test]
@@ -5025,7 +5382,10 @@ mod tests {
         let (g1_on, _) = on.efe_step(&on.beliefs, 1);
         assert!(g0_on >= g0_off - 1e-12, "novelty must not lower neg-G");
         assert!(g1_on >= g1_off - 1e-12, "novelty must not lower neg-G");
-        assert!(g1_on > g0_on, "low-count arm 1 must gain more novelty: {g1_on} vs {g0_on}");
+        assert!(
+            g1_on > g0_on,
+            "low-count arm 1 must gain more novelty: {g1_on} vs {g0_on}"
+        );
 
         // G (lower = better) is strictly lower with novelty.
         assert!(
@@ -5037,7 +5397,12 @@ mod tests {
         let p_off = off.infer_policies();
         let p_on = on.infer_policies();
         assert_relative_eq!(p_off[0], p_off[1], epsilon = 1e-9);
-        assert!(p_on[1] > p_off[1], "novelty must shift mass to arm 1: {} vs {}", p_on[1], p_off[1]);
+        assert!(
+            p_on[1] > p_off[1],
+            "novelty must shift mass to arm 1: {} vs {}",
+            p_on[1],
+            p_off[1]
+        );
         Ok(())
     }
 
@@ -5129,7 +5494,13 @@ mod tests {
                 ..Default::default()
             },
         )?;
-        let no_pb = POMDPAgent::from_model(model(), AgentParams { alpha: 1.0, ..Default::default() })?;
+        let no_pb = POMDPAgent::from_model(
+            model(),
+            AgentParams {
+                alpha: 1.0,
+                ..Default::default()
+            },
+        )?;
         assert_eq!(with_pb.expected_free_energy(), no_pb.expected_free_energy());
         Ok(())
     }
@@ -5299,7 +5670,10 @@ mod tests {
             },
         )?;
         d_agent.action_probabilities(0);
-        let pd = d_agent.pd.as_ref().expect("invariant: learn_d ⇒ pd is Some");
+        let pd = d_agent
+            .pd
+            .as_ref()
+            .expect("invariant: learn_d ⇒ pd is Some");
         assert_relative_eq!(pd[0][0], 5.8, epsilon = 1e-12);
         assert_relative_eq!(pd[0][1], 5.2, epsilon = 1e-12);
 
@@ -5412,7 +5786,11 @@ mod tests {
             let col_sum = agent.b[0][0][(0, j)] + agent.b[0][0][(1, j)];
             assert_relative_eq!(col_sum, 1.0, epsilon = 1e-12);
         }
-        assert_relative_eq!(agent.b[0][0][(0, 0)], (0.7 + st0) / (1.0 + st0 + st1), epsilon = 1e-12);
+        assert_relative_eq!(
+            agent.b[0][0][(0, 0)],
+            (0.7 + st0) / (1.0 + st0 + st1),
+            epsilon = 1e-12
+        );
         Ok(())
     }
 
@@ -5438,7 +5816,13 @@ mod tests {
                 ..Default::default()
             },
         )?;
-        let mut plain = POMDPAgent::from_model(model(), AgentParams { alpha: 1.0, ..Default::default() })?;
+        let mut plain = POMDPAgent::from_model(
+            model(),
+            AgentParams {
+                alpha: 1.0,
+                ..Default::default()
+            },
+        )?;
 
         // Step 1, o₁ = 0.
         learner.action_probabilities(0);
@@ -5446,8 +5830,16 @@ mod tests {
         let pd = learner.pd.as_ref().expect("invariant: pd is Some");
         assert_relative_eq!(pd[0][0], 1.3, epsilon = 1e-12);
         assert_relative_eq!(pd[0][1], 0.7, epsilon = 1e-12);
-        assert_relative_eq!(learner.state_belief()[0], plain.state_belief()[0], epsilon = 1e-15);
-        assert_relative_eq!(learner.state_belief()[1], plain.state_belief()[1], epsilon = 1e-15);
+        assert_relative_eq!(
+            learner.state_belief()[0],
+            plain.state_belief()[0],
+            epsilon = 1e-15
+        );
+        assert_relative_eq!(
+            learner.state_belief()[1],
+            plain.state_belief()[1],
+            epsilon = 1e-15
+        );
 
         // Step 2 must NOT re-commit pd (latched once per trial) and beliefs stay in
         // lock-step with the non-learning agent.
@@ -5458,8 +5850,16 @@ mod tests {
         let pd = learner.pd.as_ref().expect("invariant: pd is Some");
         assert_relative_eq!(pd[0][0], 1.3, epsilon = 1e-12);
         assert_relative_eq!(pd[0][1], 0.7, epsilon = 1e-12);
-        assert_relative_eq!(learner.state_belief()[0], plain.state_belief()[0], epsilon = 1e-15);
-        assert_relative_eq!(learner.state_belief()[1], plain.state_belief()[1], epsilon = 1e-15);
+        assert_relative_eq!(
+            learner.state_belief()[0],
+            plain.state_belief()[0],
+            epsilon = 1e-15
+        );
+        assert_relative_eq!(
+            learner.state_belief()[1],
+            plain.state_belief()[1],
+            epsilon = 1e-15
+        );
         Ok(())
     }
 
@@ -5482,7 +5882,10 @@ mod tests {
                     alpha: 1.0,
                     learn_d: true,
                     initial_precision_d: Some(1.0),
-                    state_inference: StateInference::MarginalMessagePassing { horizon, iters: 500 },
+                    state_inference: StateInference::MarginalMessagePassing {
+                        horizon,
+                        iters: 500,
+                    },
                     ..Default::default()
                 },
             )
@@ -5497,7 +5900,10 @@ mod tests {
         agent.record_action(0);
         agent.action_probabilities(1);
         // X₁ of the current 2-node window (about to leave on the next observation).
-        let x1 = agent.bma_state_belief(1).expect("invariant: node 1 present")[0].clone();
+        let x1 = agent
+            .bma_state_belief(1)
+            .expect("invariant: node 1 present")[0]
+            .clone();
         agent.record_action(0);
         agent.action_probabilities(0); // triggers the slide + pD accumulation
 
@@ -5526,13 +5932,19 @@ mod tests {
         agent2.action_probabilities(0);
         agent2.record_action(0);
         agent2.action_probabilities(1);
-        let x1b = agent2.bma_state_belief(1).expect("invariant: node 1 present")[0].clone();
+        let x1b = agent2
+            .bma_state_belief(1)
+            .expect("invariant: node 1 present")[0]
+            .clone();
         // Still no slide ⇒ D untouched before reset.
         assert_relative_eq!(agent2.d[0][0], 0.5, epsilon = 1e-15);
         agent2.reset_window(); // no slide happened ⇒ accumulate + write-back fire here
         // pd is re-snapshotted at reset, so parameter free energies read zero.
         let pf = agent2.parameter_free_energies();
-        assert!(pf.fd.expect("invariant: learn_d")[0].abs() < 1e-12, "fd resets to 0 post-reset");
+        assert!(
+            pf.fd.expect("invariant: learn_d")[0].abs() < 1e-12,
+            "fd resets to 0 post-reset"
+        );
         // The learned value landed in D at the trial boundary (D = pd/Σ).
         let d_sum = 0.5 + x1b[0] + 0.5 + x1b[1]; // = 2 (x1b sums to 1)
         assert_relative_eq!(agent2.d[0][0], (0.5 + x1b[0]) / d_sum, epsilon = 1e-9);
@@ -5555,7 +5967,10 @@ mod tests {
                     alpha: 1.0,
                     learn_d,
                     initial_precision_d: if learn_d { Some(1.0) } else { None },
-                    state_inference: StateInference::MarginalMessagePassing { horizon: 2, iters: 500 },
+                    state_inference: StateInference::MarginalMessagePassing {
+                        horizon: 2,
+                        iters: 500,
+                    },
                     ..Default::default()
                 },
             )
@@ -5583,7 +5998,10 @@ mod tests {
             }
             // Action probabilities likewise identical (single control here).
             for k in 0..p_learn.len() {
-                assert!((p_learn[k] - p_plain[k]).abs() < 1e-15, "step {i}: action probs diverged");
+                assert!(
+                    (p_learn[k] - p_plain[k]).abs() < 1e-15,
+                    "step {i}: action probs diverged"
+                );
             }
             // D stays at the [.5, .5] prior throughout the trial for the learner.
             assert_relative_eq!(learner.d[0][0], 0.5, epsilon = 1e-15);
@@ -5645,8 +6063,14 @@ mod tests {
             asym.action_probabilities(0);
             asym.record_action(0);
         }
-        assert!(asym.e_vector[0] > asym.e_vector[1], "preferred policy mass must rise");
-        assert!(asym.e_vector[0] > 0.5, "arm 0 prior must exceed its uniform start");
+        assert!(
+            asym.e_vector[0] > asym.e_vector[1],
+            "preferred policy mass must rise"
+        );
+        assert!(
+            asym.e_vector[0] > 0.5,
+            "arm 0 prior must exceed its uniform start"
+        );
         assert_relative_eq!(asym.e_vector.sum(), 1.0, epsilon = 1e-12);
         Ok(())
     }
@@ -5663,7 +6087,10 @@ mod tests {
                 alpha: 1.0,
                 learn_a: true,
                 initial_precision: Some(vec![1.0, 1.0]),
-                state_inference: StateInference::MarginalMessagePassing { horizon: 3, iters: 200 },
+                state_inference: StateInference::MarginalMessagePassing {
+                    horizon: 3,
+                    iters: 200,
+                },
                 ..Default::default()
             },
         )?;
@@ -5676,9 +6103,15 @@ mod tests {
         let pa = agent.pa.as_ref().expect("invariant: pa is Some");
         // Total pA mass grew by one count per step (single modality).
         let total: f64 = pa[0].iter().sum();
-        assert!(total > 2.0 + obs.len() as f64 - 1e-6, "pA must accumulate: {total}");
+        assert!(
+            total > 2.0 + obs.len() as f64 - 1e-6,
+            "pA must accumulate: {total}"
+        );
         let changed = (0..2).any(|r| (0..2).any(|c| (agent.a[0][(r, c)] - a[(r, c)]).abs() > 1e-6));
-        assert!(changed, "A must move off its initial value under MMP learning");
+        assert!(
+            changed,
+            "A must move off its initial value under MMP learning"
+        );
         Ok(())
     }
 
@@ -5755,21 +6188,72 @@ mod tests {
             ));
         };
         // η / ω domain.
-        reject(AgentParams { alpha: 1.0, eta: 0.0, ..Default::default() });
-        reject(AgentParams { alpha: 1.0, eta: 1.5, ..Default::default() });
-        reject(AgentParams { alpha: 1.0, omega: 0.0, ..Default::default() });
-        reject(AgentParams { alpha: 1.0, omega: 1.5, ..Default::default() });
-        reject(AgentParams { alpha: 1.0, eta: f64::NAN, ..Default::default() });
+        reject(AgentParams {
+            alpha: 1.0,
+            eta: 0.0,
+            ..Default::default()
+        });
+        reject(AgentParams {
+            alpha: 1.0,
+            eta: 1.5,
+            ..Default::default()
+        });
+        reject(AgentParams {
+            alpha: 1.0,
+            omega: 0.0,
+            ..Default::default()
+        });
+        reject(AgentParams {
+            alpha: 1.0,
+            omega: 1.5,
+            ..Default::default()
+        });
+        reject(AgentParams {
+            alpha: 1.0,
+            eta: f64::NAN,
+            ..Default::default()
+        });
         // learn_b/d/e without their scale.
-        reject(AgentParams { alpha: 1.0, learn_b: true, ..Default::default() });
-        reject(AgentParams { alpha: 1.0, learn_d: true, ..Default::default() });
-        reject(AgentParams { alpha: 1.0, learn_e: true, ..Default::default() });
+        reject(AgentParams {
+            alpha: 1.0,
+            learn_b: true,
+            ..Default::default()
+        });
+        reject(AgentParams {
+            alpha: 1.0,
+            learn_d: true,
+            ..Default::default()
+        });
+        reject(AgentParams {
+            alpha: 1.0,
+            learn_e: true,
+            ..Default::default()
+        });
         // Non-positive / NaN scale.
-        reject(AgentParams { alpha: 1.0, learn_b: true, initial_precision_b: Some(0.0), ..Default::default() });
-        reject(AgentParams { alpha: 1.0, learn_d: true, initial_precision_d: Some(-1.0), ..Default::default() });
-        reject(AgentParams { alpha: 1.0, learn_e: true, initial_precision_e: Some(f64::NAN), ..Default::default() });
+        reject(AgentParams {
+            alpha: 1.0,
+            learn_b: true,
+            initial_precision_b: Some(0.0),
+            ..Default::default()
+        });
+        reject(AgentParams {
+            alpha: 1.0,
+            learn_d: true,
+            initial_precision_d: Some(-1.0),
+            ..Default::default()
+        });
+        reject(AgentParams {
+            alpha: 1.0,
+            learn_e: true,
+            initial_precision_e: Some(f64::NAN),
+            ..Default::default()
+        });
         // Novelty without learn_a.
-        reject(AgentParams { alpha: 1.0, use_param_info_gain: true, ..Default::default() });
+        reject(AgentParams {
+            alpha: 1.0,
+            use_param_info_gain: true,
+            ..Default::default()
+        });
     }
 
     #[test]
@@ -5796,7 +6280,12 @@ mod tests {
             b_agent.act(1)?;
         }
         let pf = b_agent.parameter_free_energies();
-        assert!(pf.fb.expect("invariant: learn_b").iter().all(|&x| x.is_finite()));
+        assert!(
+            pf.fb
+                .expect("invariant: learn_b")
+                .iter()
+                .all(|&x| x.is_finite())
+        );
 
         // (b) learn_a with a zero-count pA column + novelty on: reciprocals hit the
         // floor but expected free energy and the parameter free energies stay finite.
@@ -5817,7 +6306,12 @@ mod tests {
         assert!(a_agent.expected_free_energy().is_finite());
         a_agent.action_probabilities(0);
         let pf = a_agent.parameter_free_energies();
-        assert!(pf.fa.expect("invariant: learn_a").iter().all(|&x| x.is_finite()));
+        assert!(
+            pf.fa
+                .expect("invariant: learn_a")
+                .iter()
+                .all(|&x| x.is_finite())
+        );
         Ok(())
     }
 
@@ -5839,7 +6333,10 @@ mod tests {
             AgentParams {
                 alpha: 1.0,
                 policy_depth: depth,
-                state_inference: StateInference::MarginalMessagePassing { horizon: 3, iters: 500 },
+                state_inference: StateInference::MarginalMessagePassing {
+                    horizon: 3,
+                    iters: 500,
+                },
                 precision_dynamics: Some(PrecisionDynamics {
                     iters: precision_iters,
                     ..Default::default()
@@ -5859,10 +6356,17 @@ mod tests {
         // ⇒ π₀ ≈ [.0417 .8332 .0418 .0417 .0417], π ≈ [0 .9523 .0477 0 0],
         //   G_error ≈ 0.3567, β ← 1 − 0.3567/2 = 0.82165, γ = 1/β ≈ 1.21706.
         let agent = POMDPAgent::from_model(
-            single_factor_model(DMatrix::from_element(2, 5, 0.5), mab_transitions(5), vec![0.2; 5]),
+            single_factor_model(
+                DMatrix::from_element(2, 5, 0.5),
+                mab_transitions(5),
+                vec![0.2; 5],
+            ),
             AgentParams {
                 alpha: 1.0,
-                state_inference: StateInference::MarginalMessagePassing { horizon: 1, iters: 10 },
+                state_inference: StateInference::MarginalMessagePassing {
+                    horizon: 1,
+                    iters: 10,
+                },
                 precision_dynamics: Some(PrecisionDynamics::default()),
                 ..Default::default()
             },
@@ -5872,8 +6376,15 @@ mod tests {
         let g = [12.505, 9.51, 12.5034, 12.505, 12.505];
         let neg_g: Vec<f64> = g.iter().map(|&x| -x).collect();
         let f = [17.0207, 1.7321, 1.7321, 17.0387, 17.0387];
-        let (q, beta, traj) =
-            agent.precision_loop(&f, &neg_g, PrecisionDynamics { beta_prior: 1.0, psi: 2.0, iters: 1 });
+        let (q, beta, traj) = agent.precision_loop(
+            &f,
+            &neg_g,
+            PrecisionDynamics {
+                beta_prior: 1.0,
+                psi: 2.0,
+                iters: 1,
+            },
+        );
 
         assert_relative_eq!(q[1], 0.9523, epsilon = 1e-3);
         assert_relative_eq!(q[2], 0.0477, epsilon = 1e-3);
@@ -5889,10 +6400,17 @@ mod tests {
         // 16 iterations drive β to the fixed point β* = β₀ − G_error(β*): the last
         // two γ entries agree to < 1e-6 and the final β satisfies the fixed point.
         let agent = POMDPAgent::from_model(
-            single_factor_model(DMatrix::from_element(2, 5, 0.5), mab_transitions(5), vec![0.2; 5]),
+            single_factor_model(
+                DMatrix::from_element(2, 5, 0.5),
+                mab_transitions(5),
+                vec![0.2; 5],
+            ),
             AgentParams {
                 alpha: 1.0,
-                state_inference: StateInference::MarginalMessagePassing { horizon: 1, iters: 10 },
+                state_inference: StateInference::MarginalMessagePassing {
+                    horizon: 1,
+                    iters: 10,
+                },
                 precision_dynamics: Some(PrecisionDynamics::default()),
                 ..Default::default()
             },
@@ -5900,21 +6418,43 @@ mod tests {
         let g = [12.505, 9.51, 12.5034, 12.505, 12.505];
         let neg_g: Vec<f64> = g.iter().map(|&x| -x).collect();
         let f = [17.0207, 1.7321, 1.7321, 17.0387, 17.0387];
-        let params = PrecisionDynamics { beta_prior: 1.0, psi: 2.0, iters: 16 };
+        let params = PrecisionDynamics {
+            beta_prior: 1.0,
+            psi: 2.0,
+            iters: 16,
+        };
         let (_q, beta, traj) = agent.precision_loop(&f, &neg_g, params);
 
         assert_eq!(traj.len(), 16);
         assert!(traj.iter().all(|x| x.is_finite() && *x > 0.0));
-        assert!((traj[15] - traj[14]).abs() < 1e-6, "γ must converge: {} vs {}", traj[15], traj[14]);
+        assert!(
+            (traj[15] - traj[14]).abs() < 1e-6,
+            "γ must converge: {} vs {}",
+            traj[15],
+            traj[14]
+        );
         assert!((traj[0] - 1.0).abs() > 1e-3, "γ must move off its prior");
 
         // Fixed point: recompute G_error at the converged γ and check β = β₀ − G_error.
         let gamma = 1.0 / beta;
-        let ln_e = (0..5).map(|i| agent.e_vector[i].max(1e-16).ln()).collect::<Vec<_>>();
-        let pi0 = super::softmax_slice(&(0..5).map(|i| ln_e[i] + gamma * neg_g[i]).collect::<Vec<_>>());
-        let pi = super::softmax_slice(&(0..5).map(|i| ln_e[i] - f[i] + gamma * neg_g[i]).collect::<Vec<_>>());
+        let ln_e = (0..5)
+            .map(|i| agent.e_vector[i].max(1e-16).ln())
+            .collect::<Vec<_>>();
+        let pi0 = super::softmax_slice(
+            &(0..5)
+                .map(|i| ln_e[i] + gamma * neg_g[i])
+                .collect::<Vec<_>>(),
+        );
+        let pi = super::softmax_slice(
+            &(0..5)
+                .map(|i| ln_e[i] - f[i] + gamma * neg_g[i])
+                .collect::<Vec<_>>(),
+        );
         let g_error: f64 = (0..5).map(|i| (pi[i] - pi0[i]) * neg_g[i]).sum();
-        assert!((beta - (1.0 - g_error)).abs() < 1e-5, "β must sit at the fixed point");
+        assert!(
+            (beta - (1.0 - g_error)).abs() < 1e-5,
+            "β must sit at the fixed point"
+        );
         Ok(())
     }
 
@@ -5923,18 +6463,32 @@ mod tests {
         // When F favors the policy that G disfavors, G_error < 0 ⇒ β rises ⇒ γ falls.
         // neg_g = [0, −5] (G prefers policy 0); F = [10, 0] (low F prefers policy 1).
         let agent = POMDPAgent::from_model(
-            single_factor_model(DMatrix::from_element(2, 2, 0.5), mab_transitions(2), vec![0.5, 0.5]),
+            single_factor_model(
+                DMatrix::from_element(2, 2, 0.5),
+                mab_transitions(2),
+                vec![0.5, 0.5],
+            ),
             AgentParams {
                 alpha: 1.0,
-                state_inference: StateInference::MarginalMessagePassing { horizon: 1, iters: 10 },
+                state_inference: StateInference::MarginalMessagePassing {
+                    horizon: 1,
+                    iters: 10,
+                },
                 precision_dynamics: Some(PrecisionDynamics::default()),
                 ..Default::default()
             },
         )?;
         let neg_g = [0.0, -5.0];
         let f = [10.0, 0.0];
-        let (_q, beta, traj) =
-            agent.precision_loop(&f, &neg_g, PrecisionDynamics { beta_prior: 1.0, psi: 2.0, iters: 1 });
+        let (_q, beta, traj) = agent.precision_loop(
+            &f,
+            &neg_g,
+            PrecisionDynamics {
+                beta_prior: 1.0,
+                psi: 2.0,
+                iters: 1,
+            },
+        );
         assert!(beta > 1.0, "β must rise when G_error < 0: {beta}");
         assert!(traj[0] < 1.0, "γ must fall when β rises: {}", traj[0]);
         Ok(())
@@ -5952,17 +6506,25 @@ mod tests {
             agent.record_action(acts[i - 1]);
             agent.action_probabilities(obs[i]);
         }
-        let fpi = agent.policy_free_energies().expect("invariant: MMP surfaces F_π");
+        let fpi = agent
+            .policy_free_energies()
+            .expect("invariant: MMP surfaces F_π");
         assert_eq!(fpi.len(), agent.n_actions().pow(2)); // depth 2 ⇒ 4 policies
         assert!(fpi.iter().all(|x| x.is_finite()));
         let max = fpi.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let min = fpi.iter().copied().fold(f64::INFINITY, f64::min);
-        assert!(max - min > 1e-6, "F_π must vary across policies: spread {}", max - min);
+        assert!(
+            max - min > 1e-6,
+            "F_π must vary across policies: spread {}",
+            max - min
+        );
 
         // BMA marginals are proper distributions.
         let w = 3; // window capped at horizon
         for tau in 1..=w {
-            let x = agent.bma_state_belief(tau).expect("invariant: node present");
+            let x = agent
+                .bma_state_belief(tau)
+                .expect("invariant: node present");
             assert_relative_eq!(x[0].sum(), 1.0, epsilon = 1e-9);
         }
         Ok(())
@@ -5981,7 +6543,10 @@ mod tests {
             AgentParams {
                 alpha: 1.0,
                 policy_depth: 2,
-                state_inference: StateInference::MarginalMessagePassing { horizon: 3, iters: 500 },
+                state_inference: StateInference::MarginalMessagePassing {
+                    horizon: 3,
+                    iters: 500,
+                },
                 precision_dynamics: Some(PrecisionDynamics::default()),
                 ..Default::default()
             },
@@ -6016,7 +6581,11 @@ mod tests {
             agent.action_probabilities(obs[i]);
         }
         assert!(agent.beta().is_some());
-        assert!((agent.gamma() - 1.0).abs() > 1e-9, "γ must evolve off its prior: {}", agent.gamma());
+        assert!(
+            (agent.gamma() - 1.0).abs() > 1e-9,
+            "γ must evolve off its prior: {}",
+            agent.gamma()
+        );
         assert!(!agent.gamma_trajectory().is_empty());
 
         agent.reset_window();
@@ -6081,7 +6650,10 @@ mod tests {
             AgentParams {
                 alpha: 1.0,
                 policy_depth: 2,
-                state_inference: StateInference::MarginalMessagePassing { horizon: 3, iters: 500 },
+                state_inference: StateInference::MarginalMessagePassing {
+                    horizon: 3,
+                    iters: 500,
+                },
                 ..Default::default()
             },
         )?;
@@ -6102,37 +6674,72 @@ mod tests {
                 vec![0.5, 0.5],
             )
         };
-        let mmp = StateInference::MarginalMessagePassing { horizon: 2, iters: 5 };
+        let mmp = StateInference::MarginalMessagePassing {
+            horizon: 2,
+            iters: 5,
+        };
 
         // MeanField + dynamics rejected.
         assert!(matches!(
             POMDPAgent::from_model(
                 base(),
-                AgentParams { alpha: 1.0, precision_dynamics: Some(PrecisionDynamics::default()), ..Default::default() }
+                AgentParams {
+                    alpha: 1.0,
+                    precision_dynamics: Some(PrecisionDynamics::default()),
+                    ..Default::default()
+                }
             ),
             Err(AifError::InvalidDistribution(_))
         ));
         // β₀ / ψ / iters domain rejections (all with MMP so only the target field fails).
         for pd in [
-            PrecisionDynamics { beta_prior: 0.0, psi: 2.0, iters: 16 },
-            PrecisionDynamics { beta_prior: 1.0, psi: 0.0, iters: 16 },
-            PrecisionDynamics { beta_prior: 1.0, psi: 2.0, iters: 0 },
-            PrecisionDynamics { beta_prior: f64::NAN, psi: 2.0, iters: 16 },
+            PrecisionDynamics {
+                beta_prior: 0.0,
+                psi: 2.0,
+                iters: 16,
+            },
+            PrecisionDynamics {
+                beta_prior: 1.0,
+                psi: 0.0,
+                iters: 16,
+            },
+            PrecisionDynamics {
+                beta_prior: 1.0,
+                psi: 2.0,
+                iters: 0,
+            },
+            PrecisionDynamics {
+                beta_prior: f64::NAN,
+                psi: 2.0,
+                iters: 16,
+            },
         ] {
             assert!(matches!(
                 POMDPAgent::from_model(
                     base(),
-                    AgentParams { alpha: 1.0, state_inference: mmp, precision_dynamics: Some(pd), ..Default::default() }
+                    AgentParams {
+                        alpha: 1.0,
+                        state_inference: mmp,
+                        precision_dynamics: Some(pd),
+                        ..Default::default()
+                    }
                 ),
                 Err(AifError::InvalidDistribution(_))
             ));
         }
         // MMP + valid dynamics accepted.
-        assert!(POMDPAgent::from_model(
-            base(),
-            AgentParams { alpha: 1.0, state_inference: mmp, precision_dynamics: Some(PrecisionDynamics::default()), ..Default::default() }
-        )
-        .is_ok());
+        assert!(
+            POMDPAgent::from_model(
+                base(),
+                AgentParams {
+                    alpha: 1.0,
+                    state_inference: mmp,
+                    precision_dynamics: Some(PrecisionDynamics::default()),
+                    ..Default::default()
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -6187,7 +6794,10 @@ mod tests {
                 policy_depth: 2,
                 learn_a: true,
                 initial_precision: Some(vec![1.0, 1.0]),
-                state_inference: StateInference::MarginalMessagePassing { horizon: 3, iters: 500 },
+                state_inference: StateInference::MarginalMessagePassing {
+                    horizon: 3,
+                    iters: 500,
+                },
                 precision_dynamics: Some(PrecisionDynamics::default()),
                 ..Default::default()
             },
@@ -6198,7 +6808,8 @@ mod tests {
         let a_pre = agent.a[0].clone();
         agent.act(1)?; // learns (A changes) → precision_step runs under post-update A
         let a_post = agent.a[0].clone();
-        let a_changed = (0..2).any(|r| (0..2).any(|c| (a_post[(r, c)] - a_pre[(r, c)]).abs() > 1e-9));
+        let a_changed =
+            (0..2).any(|r| (0..2).any(|c| (a_post[(r, c)] - a_pre[(r, c)]).abs() > 1e-9));
         assert!(a_changed, "learn_a must have moved A this step");
 
         let (policies, _q) = agent
@@ -6215,8 +6826,12 @@ mod tests {
         agent.a[0] = a_pre;
         let fresh_entering = agent.enumerate_policies();
         agent.a[0] = a_post;
-        let differs = (0..policies.len()).any(|i| (policies[i].1 - fresh_entering[i].1).abs() > 1e-9);
-        assert!(differs, "post-update posterior must differ from the entering-model one");
+        let differs =
+            (0..policies.len()).any(|i| (policies[i].1 - fresh_entering[i].1).abs() > 1e-9);
+        assert!(
+            differs,
+            "post-update posterior must differ from the entering-model one"
+        );
         Ok(())
     }
 
@@ -6239,7 +6854,10 @@ mod tests {
                 policy_depth: 2,
                 learn_d: true,
                 initial_precision_d: Some(1.0),
-                state_inference: StateInference::MarginalMessagePassing { horizon: 2, iters: 500 },
+                state_inference: StateInference::MarginalMessagePassing {
+                    horizon: 2,
+                    iters: 500,
+                },
                 precision_dynamics: Some(PrecisionDynamics::default()),
                 ..Default::default()
             },
@@ -6268,7 +6886,10 @@ mod tests {
                 None => {}
             }
         }
-        assert!(pd_after_first_slide.is_some(), "pd must have accumulated at a slide");
+        assert!(
+            pd_after_first_slide.is_some(),
+            "pd must have accumulated at a slide"
+        );
 
         // D syncs at the trial boundary.
         agent.reset_window();

@@ -66,8 +66,11 @@ const MASTER_SEED: u64 = 0xE2B_2026;
 const CELLS: [(f64, f64); 4] = [(0.5, 1.5), (0.5, 4.0), (2.0, 1.5), (2.0, 4.0)];
 
 fn params_at(beta0: f64, psi: f64) -> ModelParams {
-    ModelParams::new(ALPHA_TRUE, GAMMA_STD, 0.8)
-        .with_dynamics(DynamicsParams { hazard: HAZARD, beta0, psi })
+    ModelParams::new(ALPHA_TRUE, GAMMA_STD, 0.8).with_dynamics(DynamicsParams {
+        hazard: HAZARD,
+        beta0,
+        psi,
+    })
 }
 
 /// One rep's recovery summary: recovered marginals, two candidate ridge
@@ -89,8 +92,18 @@ fn rep(beta0_t: f64, psi_t: f64, seed: u64) -> Result<RunMetrics, AifError> {
     let config = McmcVecConfig::new(
         seed,
         vec![
-            McmcDim { initial_sd: 0.5, lo: 0.01, hi: f64::INFINITY, init_spread: PRIOR_SD },
-            McmcDim { initial_sd: 0.5, lo: PSI_LO, hi: f64::INFINITY, init_spread: PRIOR_SD },
+            McmcDim {
+                initial_sd: 0.5,
+                lo: 0.01,
+                hi: f64::INFINITY,
+                init_spread: PRIOR_SD,
+            },
+            McmcDim {
+                initial_sd: 0.5,
+                lo: PSI_LO,
+                hi: f64::INFINITY,
+                init_spread: PRIOR_SD,
+            },
         ],
     )?
     .with_chains(N_CHAINS)

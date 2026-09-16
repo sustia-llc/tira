@@ -445,10 +445,7 @@ impl Aggregator for AgreementAggregator {
         AgreementAggregator::aggregate(self, votes)
     }
 
-    fn aggregate_weighted(
-        &mut self,
-        distributions: &[DVector<f64>],
-    ) -> Result<usize, AifError> {
+    fn aggregate_weighted(&mut self, distributions: &[DVector<f64>]) -> Result<usize, AifError> {
         AgreementAggregator::aggregate_weighted(self, distributions)
     }
 
@@ -588,8 +585,7 @@ mod tests {
         let voter = VotingAgent::with_seed(N_ARMS, VotingMode::Probabilistic, gseed);
         match q {
             None => {
-                let mut group =
-                    build_ext4_group(CopyAgent, voter, TEST_N, TEST_ALPHA, gseed)?;
+                let mut group = build_ext4_group(CopyAgent, voter, TEST_N, TEST_ALPHA, gseed)?;
                 run_group_simulation(&mut group, &mut env, TEST_TRIALS)
             }
             Some(q) => {
@@ -644,7 +640,10 @@ mod tests {
             (&a.observations, &a.actions),
             "G2: q = 0.7 must distort the blanket stream"
         );
-        assert_eq!(a.observations, b.observations, "G2: seeded runs must repeat");
+        assert_eq!(
+            a.observations, b.observations,
+            "G2: seeded runs must repeat"
+        );
         assert_eq!(a.actions, b.actions, "G2: seeded runs must repeat");
         Ok(())
     }
@@ -768,7 +767,11 @@ mod tests {
         let mut filter = SensoryFilter::new(1.0, 7)?;
         for t in 0..40 {
             let obs = [0usize, 1, 1, 0][t % 4];
-            assert_eq!(filter.act(obs)?, obs, "q = 1 must relay verbatim at step {t}");
+            assert_eq!(
+                filter.act(obs)?,
+                obs,
+                "q = 1 must relay verbatim at step {t}"
+            );
         }
         Ok(())
     }
@@ -828,7 +831,10 @@ mod tests {
         let mut ok = AgreementAggregator::new(0.85, 0.85, 1).expect("valid aggregator");
         assert!(matches!(
             Aggregator::aggregate(&mut ok, &[]),
-            Err(AifError::InvalidLength { expected: 1, got: 0 })
+            Err(AifError::InvalidLength {
+                expected: 1,
+                got: 0
+            })
         ));
         assert!(matches!(
             Aggregator::aggregate(&mut ok, &[0, 3]),
@@ -836,7 +842,10 @@ mod tests {
         ));
         assert!(matches!(
             Aggregator::aggregate_weighted(&mut ok, &[DVector::from_vec(vec![0.5, 0.5])]),
-            Err(AifError::InvalidLength { expected: 3, got: 2 })
+            Err(AifError::InvalidLength {
+                expected: 3,
+                got: 2
+            })
         ));
         assert_eq!(ok.mode(), VotingMode::Probabilistic);
     }
@@ -846,7 +855,11 @@ mod tests {
         assert_eq!(majority_vote(&[0, 0, 1, 2])?, 0);
         assert_eq!(majority_vote(&[1, 1, 2, 2])?, 1, "tie ⇒ lowest index");
         assert_eq!(majority_vote(&[2, 2, 0, 1])?, 2);
-        assert_eq!(majority_vote(&[0, 1, 2])?, 0, "three-way tie ⇒ lowest index");
+        assert_eq!(
+            majority_vote(&[0, 1, 2])?,
+            0,
+            "three-way tie ⇒ lowest index"
+        );
         Ok(())
     }
 
@@ -900,7 +913,11 @@ mod tests {
         let mut agg = AgreementAggregator::new(0.9, 0.9, 5150)?;
         let dist = Aggregator::aggregate_distribution(&mut agg, &votes)?
             .expect("invariant: A1 overrides the trait's Ok(None) default");
-        assert_eq!(dist.len(), N_ARMS, "the twin must span the group action space");
+        assert_eq!(
+            dist.len(),
+            N_ARMS,
+            "the twin must span the group action space"
+        );
         assert!(
             dist.iter().all(|p| p.is_finite() && *p >= 0.0),
             "twin must be a non-negative, finite distribution: {dist:?}"
@@ -992,7 +1009,11 @@ mod tests {
     #[test]
     fn first_step_observes_disagreement() -> Result<(), AifError> {
         let mut active = AgreementAggregator::new(0.9, 0.9, 99)?;
-        assert_eq!(active.last_action(), None, "no announcement before the first call");
+        assert_eq!(
+            active.last_action(),
+            None,
+            "no announcement before the first call"
+        );
         let action = Aggregator::aggregate(&mut active, &[1, 1, 0])?;
         assert_eq!(active.last_action(), Some(action));
         Ok(())

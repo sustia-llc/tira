@@ -431,7 +431,10 @@ mod tests {
     #[test]
     fn test_coalition_history_roundtrip() {
         let mut h = CoalitionHistory::new();
-        assert!(h.get(&[0, 1, 2]).is_none(), "unseen coalition has no record");
+        assert!(
+            h.get(&[0, 1, 2]).is_none(),
+            "unseen coalition has no record"
+        );
 
         h.record(&[2, 0, 1], 0.75);
         // Membership order does not matter for lookup.
@@ -556,7 +559,10 @@ mod tests {
         let params = ObsPrecisionParams::default();
         let a = competence_efe(0.4, params)?;
         let b = competence_efe(0.4, params)?;
-        assert!((a - b).abs() < 1e-12, "equal competence must give equal G: {a} vs {b}");
+        assert!(
+            (a - b).abs() < 1e-12,
+            "equal competence must give equal G: {a} vs {b}"
+        );
         Ok(())
     }
 
@@ -565,9 +571,18 @@ mod tests {
         // Competence must be a finite value in [0, 1]; out-of-range is rejected rather than
         // silently producing a result (consistent with the engine's validate-don't-clamp posture).
         let params = ObsPrecisionParams::default();
-        assert!(competence_efe(5.0, params).is_err(), "competence > 1 must be rejected");
-        assert!(competence_efe(-0.5, params).is_err(), "negative competence must be rejected");
-        assert!(competence_efe(f64::NAN, params).is_err(), "NaN competence must be rejected");
+        assert!(
+            competence_efe(5.0, params).is_err(),
+            "competence > 1 must be rejected"
+        );
+        assert!(
+            competence_efe(-0.5, params).is_err(),
+            "negative competence must be rejected"
+        );
+        assert!(
+            competence_efe(f64::NAN, params).is_err(),
+            "NaN competence must be rejected"
+        );
         // The valid boundary values are accepted.
         assert!(competence_efe(0.0, params).is_ok() && competence_efe(1.0, params).is_ok());
     }
@@ -584,9 +599,15 @@ mod tests {
         // max_precision must lie in the OPEN interval (0.5, 1.0). At 0.4 the mapping
         // p = 0.5 + (max_precision - 0.5)·c would DECREASE with competence, inverting the
         // "more competence ⇒ more informative" monotonicity the primitive guarantees.
-        let bad_prec = ObsPrecisionParams { max_precision: 0.4, ..Default::default() };
+        let bad_prec = ObsPrecisionParams {
+            max_precision: 0.4,
+            ..Default::default()
+        };
         assert!(
-            matches!(competence_efe(0.5, bad_prec), Err(AifError::InvalidDistribution(_))),
+            matches!(
+                competence_efe(0.5, bad_prec),
+                Err(AifError::InvalidDistribution(_))
+            ),
             "max_precision = 0.4 must be rejected (would invert monotonicity)"
         );
 
@@ -594,7 +615,11 @@ mod tests {
         // (uninformative), so validate() rejects it directly too.
         assert!(
             matches!(
-                ObsPrecisionParams { max_precision: 0.5, ..Default::default() }.validate(),
+                ObsPrecisionParams {
+                    max_precision: 0.5,
+                    ..Default::default()
+                }
+                .validate(),
                 Err(AifError::InvalidDistribution(_))
             ),
             "max_precision = 0.5 must be rejected (constant / uninformative boundary)"
@@ -602,26 +627,56 @@ mod tests {
 
         // success_preference must be in the OPEN interval (0.5, 1.0); the boundary 1.0 is
         // degenerate (zero mass on the other outcome → -inf log-preference downstream).
-        let bad_pref = ObsPrecisionParams { success_preference: 1.0, ..Default::default() };
+        let bad_pref = ObsPrecisionParams {
+            success_preference: 1.0,
+            ..Default::default()
+        };
         assert!(
-            matches!(competence_efe(0.5, bad_pref), Err(AifError::InvalidDistribution(_))),
+            matches!(
+                competence_efe(0.5, bad_pref),
+                Err(AifError::InvalidDistribution(_))
+            ),
             "success_preference = 1.0 must be rejected (degenerate boundary)"
         );
 
         // alpha must be finite and strictly positive; 0.0 is rejected via InvalidDistribution.
-        let bad_alpha = ObsPrecisionParams { alpha: 0.0, ..Default::default() };
+        let bad_alpha = ObsPrecisionParams {
+            alpha: 0.0,
+            ..Default::default()
+        };
         assert!(
-            matches!(competence_efe(0.5, bad_alpha), Err(AifError::InvalidDistribution(_))),
+            matches!(
+                competence_efe(0.5, bad_alpha),
+                Err(AifError::InvalidDistribution(_))
+            ),
             "alpha = 0.0 must be rejected"
         );
 
         // NaN in any field is rejected.
-        let nan_prec = ObsPrecisionParams { max_precision: f64::NAN, ..Default::default() };
-        let nan_pref = ObsPrecisionParams { success_preference: f64::NAN, ..Default::default() };
-        let nan_alpha = ObsPrecisionParams { alpha: f64::NAN, ..Default::default() };
-        assert!(competence_efe(0.5, nan_prec).is_err(), "NaN max_precision must be rejected");
-        assert!(competence_efe(0.5, nan_pref).is_err(), "NaN success_preference must be rejected");
-        assert!(competence_efe(0.5, nan_alpha).is_err(), "NaN alpha must be rejected");
+        let nan_prec = ObsPrecisionParams {
+            max_precision: f64::NAN,
+            ..Default::default()
+        };
+        let nan_pref = ObsPrecisionParams {
+            success_preference: f64::NAN,
+            ..Default::default()
+        };
+        let nan_alpha = ObsPrecisionParams {
+            alpha: f64::NAN,
+            ..Default::default()
+        };
+        assert!(
+            competence_efe(0.5, nan_prec).is_err(),
+            "NaN max_precision must be rejected"
+        );
+        assert!(
+            competence_efe(0.5, nan_pref).is_err(),
+            "NaN success_preference must be rejected"
+        );
+        assert!(
+            competence_efe(0.5, nan_alpha).is_err(),
+            "NaN alpha must be rejected"
+        );
 
         // The defaults remain valid.
         assert!(
@@ -639,10 +694,16 @@ mod tests {
         let g_half = competence_efe(0.5, params)?;
         let g1 = competence_efe(1.0, params)?;
         assert!((g0 - 1.203_973).abs() < 1e-3, "G(0.0) anchor drifted: {g0}");
-        assert!((g_half - 0.709_597).abs() < 1e-3, "G(0.5) anchor drifted: {g_half}");
+        assert!(
+            (g_half - 0.709_597).abs() < 1e-3,
+            "G(0.5) anchor drifted: {g_half}"
+        );
         assert!((g1 - 0.215_222).abs() < 1e-3, "G(1.0) anchor drifted: {g1}");
         // Ordering the anchors encode: more competence ⇒ lower G.
-        assert!(g0 > g_half && g_half > g1, "anchors must stay monotone: {g0} {g_half} {g1}");
+        assert!(
+            g0 > g_half && g_half > g1,
+            "anchors must stay monotone: {g0} {g_half} {g1}"
+        );
         Ok(())
     }
 
@@ -650,7 +711,10 @@ mod tests {
     fn test_competence_efe_monotonic_with_transition_noise() -> Result<(), AifError> {
         // With ε > 0 the epistemic term is live, but the pragmatic driver still dominates:
         // more competence ⇒ lower G is preserved.
-        let params = ObsPrecisionParams { transition_noise: 0.1, ..Default::default() };
+        let params = ObsPrecisionParams {
+            transition_noise: 0.1,
+            ..Default::default()
+        };
         let g0 = competence_efe(0.0, params)?;
         let g_half = competence_efe(0.5, params)?;
         let g1 = competence_efe(1.0, params)?;
@@ -673,7 +737,10 @@ mod tests {
         // the info-gain bonus, so G RISES with ε. We pin that direction at competence 0.5,
         // where the effect is unambiguous.
         let base = ObsPrecisionParams::default();
-        let noisy = ObsPrecisionParams { transition_noise: 0.1, ..Default::default() };
+        let noisy = ObsPrecisionParams {
+            transition_noise: 0.1,
+            ..Default::default()
+        };
         for &c in &[0.5, 1.0] {
             let g_det = competence_efe(c, base)?;
             let g_noisy = competence_efe(c, noisy)?;
@@ -704,11 +771,17 @@ mod tests {
     fn test_competence_efe_transition_noise_zero_matches_new_path() -> Result<(), AifError> {
         // ε = 0.0 must take the deterministic `new` path and match the anchors byte-for-byte
         // (the explicit-0.0 struct and the default agree).
-        let explicit = ObsPrecisionParams { transition_noise: 0.0, ..Default::default() };
+        let explicit = ObsPrecisionParams {
+            transition_noise: 0.0,
+            ..Default::default()
+        };
         for &c in &[0.0, 0.5, 1.0] {
             let a = competence_efe(c, explicit)?;
             let b = competence_efe(c, ObsPrecisionParams::default())?;
-            assert!((a - b).abs() < 1e-12, "ε = 0.0 must equal default at {c}: {a} vs {b}");
+            assert!(
+                (a - b).abs() < 1e-12,
+                "ε = 0.0 must equal default at {c}: {a} vs {b}"
+            );
         }
         Ok(())
     }
@@ -717,9 +790,15 @@ mod tests {
     fn test_competence_efe_rejects_bad_transition_noise() {
         // transition_noise must be finite and in [0.0, 0.5). ε = 0.5 inverts/destroys the
         // action→state coupling; negative and non-finite values are nonsensical.
-        let at_half = ObsPrecisionParams { transition_noise: 0.5, ..Default::default() };
+        let at_half = ObsPrecisionParams {
+            transition_noise: 0.5,
+            ..Default::default()
+        };
         assert!(
-            matches!(competence_efe(0.5, at_half), Err(AifError::InvalidDistribution(_))),
+            matches!(
+                competence_efe(0.5, at_half),
+                Err(AifError::InvalidDistribution(_))
+            ),
             "transition_noise = 0.5 must be rejected (coupling inverts at the boundary)"
         );
         assert!(
@@ -727,20 +806,35 @@ mod tests {
             "validate() must reject transition_noise = 0.5 directly"
         );
 
-        let negative = ObsPrecisionParams { transition_noise: -0.1, ..Default::default() };
+        let negative = ObsPrecisionParams {
+            transition_noise: -0.1,
+            ..Default::default()
+        };
         assert!(
-            matches!(competence_efe(0.5, negative), Err(AifError::InvalidDistribution(_))),
+            matches!(
+                competence_efe(0.5, negative),
+                Err(AifError::InvalidDistribution(_))
+            ),
             "negative transition_noise must be rejected"
         );
 
-        let nan = ObsPrecisionParams { transition_noise: f64::NAN, ..Default::default() };
+        let nan = ObsPrecisionParams {
+            transition_noise: f64::NAN,
+            ..Default::default()
+        };
         assert!(
             competence_efe(0.5, nan).is_err(),
             "NaN transition_noise must be rejected"
         );
 
         // A valid interior value is accepted.
-        let ok = ObsPrecisionParams { transition_noise: 0.2, ..Default::default() };
-        assert!(competence_efe(0.5, ok).is_ok(), "transition_noise = 0.2 must be accepted");
+        let ok = ObsPrecisionParams {
+            transition_noise: 0.2,
+            ..Default::default()
+        };
+        assert!(
+            competence_efe(0.5, ok).is_ok(),
+            "transition_noise = 0.2 must be accepted"
+        );
     }
 }

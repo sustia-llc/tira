@@ -37,8 +37,8 @@ pub use coalition::{
 };
 #[cfg(feature = "communication")]
 pub use communication::{
-    AgentMessage, CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel, InfoRequestType,
-    Message, MessageContent,
+    AgentMessage, CommunicatingAgent, CommunicatingPOMDPAgent, CommunicationChannel,
+    InfoRequestType, Message, MessageContent,
 };
 pub use group::{Aggregator, GroupAgent, GroupAgentBuilder, VotingAgent, VotingMode};
 pub use topology::{RoutedAggregator, Topology};

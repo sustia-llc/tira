@@ -1,6 +1,4 @@
-use reproduce::{
-    Agent, MultiAgentEnvironment, AifError, POMDPAgent, SharedBanditEnvironment,
-};
+use reproduce::{Agent, AifError, MultiAgentEnvironment, POMDPAgent, SharedBanditEnvironment};
 
 struct AgentTracker {
     actions: Vec<usize>,
@@ -64,9 +62,8 @@ fn test_competitive_multi_agent() -> Result<(), AifError> {
 
     for _ in 0..50 {
         let action0 = agent0.act(prev_obs0)?;
-        let (reward0, _) = <SharedBanditEnvironment as MultiAgentEnvironment>::step(
-            &mut env, 0, action0,
-        )?;
+        let (reward0, _) =
+            <SharedBanditEnvironment as MultiAgentEnvironment>::step(&mut env, 0, action0)?;
         tracker0.record(action0, reward0);
         prev_obs0 = reward0;
 
@@ -160,16 +157,14 @@ fn test_non_competitive_multi_agent() -> Result<(), AifError> {
 
     for _ in 0..50 {
         let action0 = agent0.act(prev_obs0)?;
-        let (reward0, _) = <SharedBanditEnvironment as MultiAgentEnvironment>::step(
-            &mut env, 0, action0,
-        )?;
+        let (reward0, _) =
+            <SharedBanditEnvironment as MultiAgentEnvironment>::step(&mut env, 0, action0)?;
         tracker0.record(action0, reward0);
         prev_obs0 = reward0;
 
         let action1 = agent1.act(prev_obs1)?;
-        let (reward1, _) = <SharedBanditEnvironment as MultiAgentEnvironment>::step(
-            &mut env, 1, action1,
-        )?;
+        let (reward1, _) =
+            <SharedBanditEnvironment as MultiAgentEnvironment>::step(&mut env, 1, action1)?;
         tracker1.record(action1, reward1);
         prev_obs1 = reward1;
     }
@@ -226,11 +221,8 @@ fn test_sequential_communication() -> Result<(), AifError> {
 
     for _ in 0..60 {
         let leader_action = leader.act(leader_obs)?;
-        let (leader_reward, _) = <SharedBanditEnvironment as MultiAgentEnvironment>::step(
-            &mut env,
-            0,
-            leader_action,
-        )?;
+        let (leader_reward, _) =
+            <SharedBanditEnvironment as MultiAgentEnvironment>::step(&mut env, 0, leader_action)?;
         leader_tracker.record(leader_action, leader_reward);
         leader_obs = leader_reward;
 

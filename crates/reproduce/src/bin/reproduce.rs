@@ -1,10 +1,10 @@
-use reproduce::{
-    experiment_certainty_weighted, experiment_deterministic, experiment_identical,
-    experiment_varying_alpha, experiment_varying_preferences, parameter_recovery_single,
-    plot_figure4, plot_figure5, plot_figure6, substream, AifError, ExperimentOpts, RecoveryResult,
-    TrialData,
-};
 use rayon::prelude::*;
+use reproduce::{
+    AifError, ExperimentOpts, RecoveryResult, TrialData, experiment_certainty_weighted,
+    experiment_deterministic, experiment_identical, experiment_varying_alpha,
+    experiment_varying_preferences, parameter_recovery_single, plot_figure4, plot_figure5,
+    plot_figure6, substream,
+};
 use std::time::Instant;
 
 /// Master seed for the whole reproduction. Every run derives a deterministic
@@ -75,13 +75,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // stream index 55 is retired and must not be reused (see Figure 6 below).
     let exp2_base = substream(MASTER_SEED, 52);
 
-    let (exp1_results, exp1_dropped) = run_experiment("Experiment 1: Identical agents", &n_agents_list, &alpha_steps, n_trials, substream(MASTER_SEED, 51), experiment_identical);
+    let (exp1_results, exp1_dropped) = run_experiment(
+        "Experiment 1: Identical agents",
+        &n_agents_list,
+        &alpha_steps,
+        n_trials,
+        substream(MASTER_SEED, 51),
+        experiment_identical,
+    );
 
-    let (exp2_results, exp2_dropped) = run_experiment("Experiment 2: Varying alphas", &n_agents_list, &alpha_steps, n_trials, exp2_base, experiment_varying_alpha);
+    let (exp2_results, exp2_dropped) = run_experiment(
+        "Experiment 2: Varying alphas",
+        &n_agents_list,
+        &alpha_steps,
+        n_trials,
+        exp2_base,
+        experiment_varying_alpha,
+    );
 
-    let (exp3_results, exp3_dropped) = run_experiment("Experiment 3: Deterministic voting", &n_agents_list, &alpha_steps, n_trials, substream(MASTER_SEED, 53), experiment_deterministic);
+    let (exp3_results, exp3_dropped) = run_experiment(
+        "Experiment 3: Deterministic voting",
+        &n_agents_list,
+        &alpha_steps,
+        n_trials,
+        substream(MASTER_SEED, 53),
+        experiment_deterministic,
+    );
 
-    let (exp4_results, exp4_dropped) = run_experiment("Experiment 4: Varying preferences", &n_agents_list, &alpha_steps, n_trials, substream(MASTER_SEED, 54), experiment_varying_preferences);
+    let (exp4_results, exp4_dropped) = run_experiment(
+        "Experiment 4: Varying preferences",
+        &n_agents_list,
+        &alpha_steps,
+        n_trials,
+        substream(MASTER_SEED, 54),
+        experiment_varying_preferences,
+    );
 
     // -----------------------------------------------------------------------
     // Figure 6: Extension — Certainty-weighted voting vs simple voting
@@ -90,7 +118,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // cell draws the *same* Dirichlet alphas, the *same* internal-agent streams, and the
     // *same* environment as its Experiment-2 counterpart — the two panels differ only in
     // voting mode (probabilistic vs certainty-weighted), isolating the aggregation effect.
-    let (exp5_results, exp5_dropped) = run_experiment("Experiment 5: Certainty-weighted voting", &n_agents_list, &alpha_steps, n_trials, exp2_base, experiment_certainty_weighted);
+    let (exp5_results, exp5_dropped) = run_experiment(
+        "Experiment 5: Certainty-weighted voting",
+        &n_agents_list,
+        &alpha_steps,
+        n_trials,
+        exp2_base,
+        experiment_certainty_weighted,
+    );
 
     // -----------------------------------------------------------------------
     // Generate plots
@@ -124,7 +159,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  Experiment 3 (Deterministic voting): {exp3_dropped} dropped");
         eprintln!("  Experiment 4 (Varying preferences): {exp4_dropped} dropped");
         eprintln!("  Experiment 5 (Certainty-weighted voting): {exp5_dropped} dropped");
-        eprintln!("  Total: {total_dropped} run(s) dropped — figures above are thinned, not failed outright");
+        eprintln!(
+            "  Total: {total_dropped} run(s) dropped — figures above are thinned, not failed outright"
+        );
         // Terse on purpose — the runtime prints this Err after the summary block
         // above, so anything longer would duplicate it (PR #35 review observation).
         return Err(format!("{total_dropped} dropped run(s); see summary above").into());

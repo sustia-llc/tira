@@ -75,8 +75,11 @@ fn switching_model(n: usize, hazard: f64, slip: Slip) -> GenerativeModel {
                     Slip::None => m[(u, from)] = 1.0,
                     Slip::Uniform(eps) => {
                         for to in 0..n {
-                            m[(to, from)] =
-                                if to == u { 1.0 - eps } else { eps / (n as f64 - 1.0) };
+                            m[(to, from)] = if to == u {
+                                1.0 - eps
+                            } else {
+                                eps / (n as f64 - 1.0)
+                            };
                         }
                     }
                     Slip::Sticky(eps) => {
@@ -96,7 +99,11 @@ fn switching_model(n: usize, hazard: f64, slip: Slip) -> GenerativeModel {
     let mut h = DMatrix::zeros(n, n);
     for from in 0..n {
         for to in 0..n {
-            h[(to, from)] = if to == from { 1.0 - hazard } else { hazard / (n as f64 - 1.0) };
+            h[(to, from)] = if to == from {
+                1.0 - hazard
+            } else {
+                hazard / (n as f64 - 1.0)
+            };
         }
     }
     GenerativeModel {
@@ -111,7 +118,10 @@ fn dynamics_params(seed: u64) -> AgentParams {
     AgentParams {
         alpha: 1.0,
         policy_depth: 2,
-        state_inference: StateInference::MarginalMessagePassing { horizon: 3, iters: 16 },
+        state_inference: StateInference::MarginalMessagePassing {
+            horizon: 3,
+            iters: 16,
+        },
         precision_dynamics: Some(PrecisionDynamics::default()),
         seed: Some(seed),
         ..Default::default()
@@ -127,7 +137,9 @@ struct Trace {
 impl Trace {
     fn push(&mut self, agent: &POMDPAgent) {
         self.steps.push((
-            agent.beta().expect("invariant: dynamics on in every Phase-0 agent"),
+            agent
+                .beta()
+                .expect("invariant: dynamics on in every Phase-0 agent"),
             agent.gamma(),
             agent.variational_free_energy(),
         ));
@@ -158,7 +170,10 @@ fn drive_replay(agent: &mut POMDPAgent, fed: &[usize], actions: &[usize]) -> Tra
     let mut trace = Trace::default();
     for (i, &obs) in fed.iter().enumerate() {
         let probs = agent.action_probabilities(obs);
-        assert!(probs.iter().all(|p| p.is_finite()), "replay probs must be finite");
+        assert!(
+            probs.iter().all(|p| p.is_finite()),
+            "replay probs must be finite"
+        );
         agent.record_action(actions[i]);
         trace.push(agent);
     }
@@ -183,7 +198,9 @@ fn spike_drive(model: GenerativeModel) -> Result<(f64, f64), AifError> {
         agent.record_action(acts[i - 1]);
         agent.action_probabilities(obs[i]);
     }
-    let fpi = agent.policy_free_energies().expect("invariant: MMP surfaces F_π");
+    let fpi = agent
+        .policy_free_energies()
+        .expect("invariant: MMP surfaces F_π");
     assert_eq!(fpi.len(), agent.n_actions().pow(2));
     assert!(fpi.iter().all(|x| x.is_finite()));
     let max = fpi.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -224,7 +241,10 @@ fn spike_sticky_slip_makes_precision_loop_live() -> Result<(), AifError> {
     // ≥ 2), which is the property per-policy F actually requires. With the
     // hazard factor present this is the ext-2b encoding of record.
     let (spread, gamma_dev) = spike_drive(switching_model(2, 0.2, Slip::Sticky(0.1)))?;
-    assert!(spread > 1e-6, "D1′ GATE FAIL: F_π policy-constant (spread {spread})");
+    assert!(
+        spread > 1e-6,
+        "D1′ GATE FAIL: F_π policy-constant (spread {spread})"
+    );
     assert!(gamma_dev > 1e-9, "D1′ GATE FAIL: γ pinned at its prior");
     Ok(())
 }
@@ -234,7 +254,10 @@ fn spike_sticky_only_no_hazard_characterization() -> Result<(), AifError> {
     // Sticky slip without hazard: characterizes whether the hazard factor
     // contributes to the precision loop or only to the environment's dynamics.
     let (spread, gamma_dev) = spike_drive(switching_model(2, 0.0, Slip::Sticky(0.1)))?;
-    assert!(spread > 1e-6, "sticky alone should already vary F_π (spread {spread})");
+    assert!(
+        spread > 1e-6,
+        "sticky alone should already vary F_π (spread {spread})"
+    );
     assert!(gamma_dev > 1e-9, "sticky alone should drive the loop");
     Ok(())
 }
@@ -273,7 +296,11 @@ fn positional_model(n: usize, hazard: f64, slip: f64) -> GenerativeModel {
     let mut h = DMatrix::zeros(n, n);
     for from in 0..n {
         for to in 0..n {
-            h[(to, from)] = if to == from { 1.0 - hazard } else { hazard / (n as f64 - 1.0) };
+            h[(to, from)] = if to == from {
+                1.0 - hazard
+            } else {
+                hazard / (n as f64 - 1.0)
+            };
         }
     }
     GenerativeModel {
@@ -300,7 +327,9 @@ fn explore_encoding_candidates() -> Result<(), AifError> {
             agent.record_action(acts[i - 1] % n_actions);
             agent.action_probabilities(obs[i]);
         }
-        let fpi = agent.policy_free_energies().expect("invariant: MMP surfaces F_π");
+        let fpi = agent
+            .policy_free_energies()
+            .expect("invariant: MMP surfaces F_π");
         assert!(fpi.iter().all(|x| x.is_finite()));
         let max = fpi.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let min = fpi.iter().copied().fold(f64::INFINITY, f64::min);
@@ -308,11 +337,31 @@ fn explore_encoding_candidates() -> Result<(), AifError> {
     };
 
     let candidates: [(&str, GenerativeModel, usize); 5] = [
-        ("C1 sticky n=3 (eps=0.1, h=0.2)   ", switching_model(3, 0.2, Slip::Sticky(0.1)), 3),
-        ("C2 positional DETERMINISTIC h=0.2", positional_model(3, 0.2, 0.0), 3),
-        ("C2b positional determ.     h=0   ", positional_model(3, 0.0, 0.0), 3),
-        ("C3 positional slip=0.1     h=0.2 ", positional_model(3, 0.2, 0.1), 3),
-        ("C1b sticky n=2 (eps=0.1, h=0.2)  ", switching_model(2, 0.2, Slip::Sticky(0.1)), 2),
+        (
+            "C1 sticky n=3 (eps=0.1, h=0.2)   ",
+            switching_model(3, 0.2, Slip::Sticky(0.1)),
+            3,
+        ),
+        (
+            "C2 positional DETERMINISTIC h=0.2",
+            positional_model(3, 0.2, 0.0),
+            3,
+        ),
+        (
+            "C2b positional determ.     h=0   ",
+            positional_model(3, 0.0, 0.0),
+            3,
+        ),
+        (
+            "C3 positional slip=0.1     h=0.2 ",
+            positional_model(3, 0.2, 0.1),
+            3,
+        ),
+        (
+            "C1b sticky n=2 (eps=0.1, h=0.2)  ",
+            switching_model(2, 0.2, Slip::Sticky(0.1)),
+            2,
+        ),
     ];
     for (name, model, n_actions) in candidates {
         let (spread, gamma_dev) = drive(model, n_actions)?;
@@ -336,11 +385,17 @@ fn spike_positional_deterministic_loop_live() -> Result<(), AifError> {
         agent.record_action(acts[i - 1]);
         agent.action_probabilities(obs[i]);
     }
-    let fpi = agent.policy_free_energies().expect("invariant: MMP surfaces F_π");
+    let fpi = agent
+        .policy_free_energies()
+        .expect("invariant: MMP surfaces F_π");
     assert_eq!(fpi.len(), agent.n_actions().pow(2));
     let max = fpi.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let min = fpi.iter().copied().fold(f64::INFINITY, f64::min);
-    assert!(max - min > 1e-2, "C2 GATE FAIL: F_π spread collapsed ({})", max - min);
+    assert!(
+        max - min > 1e-2,
+        "C2 GATE FAIL: F_π spread collapsed ({})",
+        max - min
+    );
     assert!(
         (agent.gamma() - 1.0).abs() > 1e-4,
         "C2 GATE FAIL: γ pinned at its prior (γ = {})",
@@ -355,7 +410,10 @@ fn spike_fully_deterministic_is_inert() -> Result<(), AifError> {
     // (Factor-1 identity B is deterministic but not rank-1, so this is pinned
     // empirically, not assumed from the theorem.)
     let (spread, gamma_dev) = spike_drive(switching_model(2, 0.0, Slip::None))?;
-    assert!(spread < 1e-9, "h = 0, slip = None: expected F_π constant, got {spread}");
+    assert!(
+        spread < 1e-9,
+        "h = 0, slip = None: expected F_π constant, got {spread}"
+    );
     assert!(gamma_dev < 1e-12, "h = 0, slip = None: expected inert γ");
     Ok(())
 }
@@ -377,7 +435,10 @@ fn dynamics_replay_matches_generation_bit_identically() -> Result<(), AifError> 
     let mut replayer = POMDPAgent::from_model(model, params)?;
     let replay_trace = drive_replay(&mut replayer, &fed, &actions);
 
-    assert_eq!(gen_trace, replay_trace, "β/γ/F must be bit-identical per step");
+    assert_eq!(
+        gen_trace, replay_trace,
+        "β/γ/F must be bit-identical per step"
+    );
     assert_eq!(
         generator.gamma_trajectory(),
         replayer.gamma_trajectory(),
@@ -403,7 +464,9 @@ fn dynamics_replay_reset_window_beta_semantics_match() -> Result<(), AifError> {
     let (fed_a, acts_a, gen_a) = drive_generation(&mut generator, first)?;
     generator.reset_window();
     assert_eq!(
-        generator.beta().expect("invariant: dynamics on in this fixture"),
+        generator
+            .beta()
+            .expect("invariant: dynamics on in this fixture"),
         1.0,
         "β must reset to β₀"
     );
@@ -414,13 +477,24 @@ fn dynamics_replay_reset_window_beta_semantics_match() -> Result<(), AifError> {
     let mut replayer = POMDPAgent::from_model(model, params)?;
     let rep_a = drive_replay(&mut replayer, &fed_a, &acts_a);
     replayer.reset_window();
-    assert_eq!(replayer.beta().expect("invariant: dynamics on in this fixture"), 1.0);
+    assert_eq!(
+        replayer
+            .beta()
+            .expect("invariant: dynamics on in this fixture"),
+        1.0
+    );
     assert_eq!(replayer.gamma(), 1.0);
     assert!(replayer.gamma_trajectory().is_empty());
     let rep_b = drive_replay(&mut replayer, &fed_b, &acts_b);
 
-    assert_eq!(gen_a, rep_a, "pre-boundary trajectories must be bit-identical");
-    assert_eq!(gen_b, rep_b, "post-boundary trajectories must be bit-identical");
+    assert_eq!(
+        gen_a, rep_a,
+        "pre-boundary trajectories must be bit-identical"
+    );
+    assert_eq!(
+        gen_b, rep_b,
+        "post-boundary trajectories must be bit-identical"
+    );
     Ok(())
 }
 
@@ -441,11 +515,21 @@ fn dynamics_with_learning_replay_matches_generation() -> Result<(), AifError> {
     let mut replayer = POMDPAgent::from_model(model, params)?;
     let replay_trace = drive_replay(&mut replayer, &fed, &actions);
 
-    assert_eq!(gen_trace, replay_trace, "β/γ/F must be bit-identical per step");
-    let (gen_pa, rep_pa) = (
-        generator.pa().expect("invariant: learn_a on in this fixture"),
-        replayer.pa().expect("invariant: learn_a on in this fixture"),
+    assert_eq!(
+        gen_trace, replay_trace,
+        "β/γ/F must be bit-identical per step"
     );
-    assert_eq!(gen_pa, rep_pa, "learned Dirichlet counts must be bit-identical");
+    let (gen_pa, rep_pa) = (
+        generator
+            .pa()
+            .expect("invariant: learn_a on in this fixture"),
+        replayer
+            .pa()
+            .expect("invariant: learn_a on in this fixture"),
+    );
+    assert_eq!(
+        gen_pa, rep_pa,
+        "learned Dirichlet counts must be bit-identical"
+    );
     Ok(())
 }

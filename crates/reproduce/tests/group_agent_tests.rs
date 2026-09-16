@@ -1,5 +1,5 @@
 use reproduce::{
-    Agent, BanditEnvironment, Environment, GroupAgentBuilder, AifError, env_seed, group_seed,
+    Agent, AifError, BanditEnvironment, Environment, GroupAgentBuilder, env_seed, group_seed,
 };
 
 /// Experiment 1 setup: identical agents, verify group behaves coherently.

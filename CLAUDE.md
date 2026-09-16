@@ -123,6 +123,10 @@ is the paper-reproduction harness and depends on `aif`.
 # Full reproduction (~30s release)
 cargo run --release -p reproduce --bin reproduce
 
+# Formatting — clean at every tag (owner rule, all Rust projects): run `cargo fmt --all`
+# before tagging, commit what moves as its own `style:` commit, then this prints nothing
+cargo fmt --all -- --check
+
 # Tests (whole workspace)
 cargo test
 

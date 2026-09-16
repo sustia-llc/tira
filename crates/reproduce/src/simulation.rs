@@ -1,8 +1,8 @@
+use crate::{BanditEnvironment, Environment, PositionalBanditEnvironment};
 use aif::{
-    Agent, AgentParams, GenerativeModel, GroupAgentBuilder, AifError, POMDPAgent,
+    Agent, AgentParams, AifError, GenerativeModel, GroupAgentBuilder, POMDPAgent,
     PrecisionDynamics, StateInference,
 };
-use crate::{BanditEnvironment, Environment, PositionalBanditEnvironment};
 use nalgebra::{Cholesky, DMatrix};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -221,7 +221,9 @@ pub fn recover_alpha(
     observation_probs: &[f64],
     preferences: &[f64],
 ) -> Result<RecoveryResult, AifError> {
-    recover_alpha_with(|alpha| log_likelihood(data, alpha, n_bandits, observation_probs, preferences))
+    recover_alpha_with(|alpha| {
+        log_likelihood(data, alpha, n_bandits, observation_probs, preferences)
+    })
 }
 
 /// Reject a pA precision vector whose length ≠ `n_bandits` (one Dirichlet concentration
@@ -321,7 +323,13 @@ impl McmcConfig {
     /// 2000 post-burn-in samples/chain, 500 burn-in, initial proposal SD 0.3.
     #[must_use]
     pub fn new(seed: u64) -> Self {
-        Self { seed, n_chains: 4, n_samples: 2000, burn_in: 500, proposal_sd: 0.3 }
+        Self {
+            seed,
+            n_chains: 4,
+            n_samples: 2000,
+            burn_in: 500,
+            proposal_sd: 0.3,
+        }
     }
 
     #[must_use]
@@ -395,7 +403,11 @@ fn gelman_rubin(chains: &[Vec<f64>]) -> f64 {
     let mf = m as f64;
     let chain_means: Vec<f64> = chains.iter().map(|c| c.iter().sum::<f64>() / nf).collect();
     let grand = chain_means.iter().sum::<f64>() / mf;
-    let b = nf / (mf - 1.0) * chain_means.iter().map(|&cm| (cm - grand).powi(2)).sum::<f64>();
+    let b = nf / (mf - 1.0)
+        * chain_means
+            .iter()
+            .map(|&cm| (cm - grand).powi(2))
+            .sum::<f64>();
     let w = chains
         .iter()
         .zip(&chain_means)
@@ -527,7 +539,10 @@ impl McmcVecConfig {
     #[allow(clippy::missing_errors_doc)]
     pub fn new(seed: u64, dims: Vec<McmcDim>) -> Result<Self, AifError> {
         if dims.is_empty() {
-            return Err(AifError::InvalidLength { expected: 1, got: 0 });
+            return Err(AifError::InvalidLength {
+                expected: 1,
+                got: 0,
+            });
         }
         for d in &dims {
             // `hi` may be +∞; everything else must be finite and positive. `lo.is_finite()`
@@ -676,7 +691,11 @@ where
     let mut cur = vec![0.0_f64; n];
     for (d, dim) in config.dims.iter().enumerate() {
         // DRAW ORDER (load-bearing): one init normal per dim, in dims order.
-        cur[d] = reflect(dim.init_spread * std_normal.sample(&mut rng), dim.lo, dim.hi);
+        cur[d] = reflect(
+            dim.init_spread * std_normal.sample(&mut rng),
+            dim.lo,
+            dim.hi,
+        );
     }
     let mut cur_lp = logpost(&cur)?;
     let mut log_sd: Vec<f64> = config.dims.iter().map(|d| d.initial_sd.ln()).collect();
@@ -685,7 +704,11 @@ where
     for i in 0..config.burn_in {
         for (d, dim) in config.dims.iter().enumerate() {
             // DRAW ORDER (load-bearing): one proposal normal per dim, in dims order.
-            prop[d] = reflect(cur[d] + log_sd[d].exp() * std_normal.sample(&mut rng), dim.lo, dim.hi);
+            prop[d] = reflect(
+                cur[d] + log_sd[d].exp() * std_normal.sample(&mut rng),
+                dim.lo,
+                dim.hi,
+            );
         }
         let prop_lp = logpost(&prop)?;
         // DRAW ORDER (load-bearing): accept uniform is short-circuited — drawn only when
@@ -721,7 +744,11 @@ where
         samples.push(cur.clone());
     }
 
-    Ok(VecChainOutput { samples, accepts, adapted_sd: sd })
+    Ok(VecChainOutput {
+        samples,
+        accepts,
+        adapted_sd: sd,
+    })
 }
 
 // --- Covariance-adapted proposal (#30) -------------------------------------------------
@@ -893,7 +920,11 @@ where
     let mut cur_x = vec![0.0_f64; n];
     let mut cur_u = vec![0.0_f64; n];
     for (d, dim) in config.dims.iter().enumerate() {
-        let raw = reflect(dim.init_spread * std_normal.sample(&mut rng), dim.lo, dim.hi);
+        let raw = reflect(
+            dim.init_spread * std_normal.sample(&mut rng),
+            dim.lo,
+            dim.hi,
+        );
         let scale = if dim.hi.is_finite() {
             (dim.hi - dim.lo).max(dim.lo.abs()).max(1.0)
         } else {
@@ -991,7 +1022,12 @@ where
     // increment, which no proposal ever used. With `burn_in == 0` this is the seed diagonal
     // at the initial λ — still exactly the frozen proposal.
     let adapted_sd: Vec<f64> = (0..n)
-        .map(|d| (0..=d).map(|k| factor[(d, k)] * factor[(d, k)]).sum::<f64>().sqrt())
+        .map(|d| {
+            (0..=d)
+                .map(|k| factor[(d, k)] * factor[(d, k)])
+                .sum::<f64>()
+                .sqrt()
+        })
         .collect();
     let mut samples = Vec::with_capacity(config.n_samples);
     let mut accepts = 0usize;
@@ -1017,7 +1053,11 @@ where
         samples.push(cur_x.clone());
     }
 
-    Ok(VecChainOutput { samples, accepts, adapted_sd })
+    Ok(VecChainOutput {
+        samples,
+        accepts,
+        adapted_sd,
+    })
 }
 
 /// Vector Metropolis-Hastings recovery (extension 2 / #29): the parameter-agnostic kernel.
@@ -1055,8 +1095,10 @@ where
 
     let mut dims = Vec::with_capacity(n_dims);
     for d in 0..n_dims {
-        let per_chain: Vec<Vec<f64>> =
-            chains.iter().map(|c| c.iter().map(|t| t[d]).collect()).collect();
+        let per_chain: Vec<Vec<f64>> = chains
+            .iter()
+            .map(|c| c.iter().map(|t| t[d]).collect())
+            .collect();
         let pooled: Vec<f64> = per_chain.concat();
         dims.push(DimResult {
             median: crate::stats::median(pooled),
@@ -1066,7 +1108,11 @@ where
     }
 
     let denom = (config.n_chains * config.n_samples) as f64;
-    Ok(McmcVecResult { dims, acceptance_rate: accepts as f64 / denom, chains })
+    Ok(McmcVecResult {
+        dims,
+        acceptance_rate: accepts as f64 / denom,
+        chains,
+    })
 }
 
 /// Build the dim-1 [`McmcVecConfig`] the scalar α recovery delegates through. Bounds
@@ -1098,7 +1144,11 @@ fn collapse_scalar(res: McmcVecResult) -> McmcResult {
         r_hat: d.r_hat,
         acceptance_rate: res.acceptance_rate,
         adapted_sd: d.adapted_sd,
-        chains: res.chains.into_iter().map(|c| c.into_iter().map(|t| t[0]).collect()).collect(),
+        chains: res
+            .chains
+            .into_iter()
+            .map(|c| c.into_iter().map(|t| t[0]).collect())
+            .collect(),
     }
 }
 
@@ -1120,8 +1170,10 @@ pub fn recover_alpha_mcmc(
 ) -> Result<McmcResult, AifError> {
     let res = recover_mcmc_vec(
         |theta| {
-            Ok(log_likelihood(data, theta[0], n_bandits, observation_probs, preferences)?
-                + half_normal_log_prior(theta[0]))
+            Ok(
+                log_likelihood(data, theta[0], n_bandits, observation_probs, preferences)?
+                    + half_normal_log_prior(theta[0]),
+            )
         },
         &scalar_to_vec_config(config),
     )?;
@@ -1216,7 +1268,13 @@ impl ModelParams {
     /// Fixed-A params at `(α, γ, good_arm_p)`.
     #[must_use]
     pub fn new(alpha: f64, gamma: f64, good_arm_p: f64) -> Self {
-        Self { alpha, gamma, good_arm_p, learning: None, dynamics: None }
+        Self {
+            alpha,
+            gamma,
+            good_arm_p,
+            learning: None,
+            dynamics: None,
+        }
     }
 
     /// Opt into A-learning with the given η/ω/precision.
@@ -1285,11 +1343,20 @@ const DYNAMICS_MMP_ITERS: usize = 16;
 /// probability. D is the WELL-SPECIFIED delta prior matching
 /// [`PositionalBanditEnvironment`]'s deterministic start (position 0; good arm
 /// at the argmax of [`BANDIT_PROBS`], i.e. 0).
-fn build_positional_model(n: usize, good_arm_p: f64, preferences: &[f64], hazard: f64) -> GenerativeModel {
+fn build_positional_model(
+    n: usize,
+    good_arm_p: f64,
+    preferences: &[f64],
+    hazard: f64,
+) -> GenerativeModel {
     let mut a = DMatrix::zeros(2, n * n);
     for good in 0..n {
         for pos in 0..n {
-            let p = if pos == good { good_arm_p } else { BAD_ARM_PROB };
+            let p = if pos == good {
+                good_arm_p
+            } else {
+                BAD_ARM_PROB
+            };
             a[(0, pos + n * good)] = p;
             a[(1, pos + n * good)] = 1.0 - p;
         }
@@ -1311,7 +1378,11 @@ fn build_positional_model(n: usize, good_arm_p: f64, preferences: &[f64], hazard
     let mut h = DMatrix::zeros(n, n);
     for from in 0..n {
         for to in 0..n {
-            h[(to, from)] = if to == from { 1.0 - hazard } else { hazard / (n as f64 - 1.0) };
+            h[(to, from)] = if to == from {
+                1.0 - hazard
+            } else {
+                hazard / (n as f64 - 1.0)
+            };
         }
     }
     let mut d_pos = vec![0.0; n];
@@ -1379,8 +1450,7 @@ fn build_params_agent(params: &ModelParams) -> Result<POMDPAgent, AifError> {
         // `gamma` is passed through but IGNORED under dynamics (0.9.0 contract);
         // depth 2 gives the per-policy future windows the γ/β loop needs.
         (learning, Some(dp)) => {
-            let generative =
-                build_positional_model(n, params.good_arm_p, &PREFERENCES, dp.hazard);
+            let generative = build_positional_model(n, params.good_arm_p, &PREFERENCES, dp.hazard);
             let mut agent_params = AgentParams {
                 alpha: params.alpha,
                 gamma: params.gamma,
@@ -1470,11 +1540,7 @@ fn run_seeded_agent_in(
 /// for a given seed; the dynamics route shares the agent-side seeding via
 /// [`run_seeded_agent_in`]. (Agent and env RNGs are independent, so the construction
 /// order here does not affect the draws.)
-fn run_seeded_agent(
-    agent: POMDPAgent,
-    n_trials: usize,
-    seed: u64,
-) -> Result<TrialData, AifError> {
+fn run_seeded_agent(agent: POMDPAgent, n_trials: usize, seed: u64) -> Result<TrialData, AifError> {
     let mut env = make_env(seed)?;
     run_seeded_agent_in(agent, &mut env, n_trials, seed)
 }
@@ -1513,7 +1579,10 @@ impl ExperimentOpts {
     /// Fixed-A run seeded with `seed` (mandatory — the harness has no entropy arm).
     #[must_use]
     pub fn new(seed: u64) -> Self {
-        Self { seed, learn_a: None }
+        Self {
+            seed,
+            learn_a: None,
+        }
     }
 
     /// Opt into A-learning with the given per-bandit pA concentration
@@ -1990,7 +2059,11 @@ mod tests {
         // decorrelated realizations rather than three views of one lucky stream.
         const SEED: u64 = 20_260_202;
         for (case_idx, &true_alpha) in [0.2_f64, 0.5].iter().enumerate() {
-            let r = parameter_recovery_single(true_alpha, 300, &ExperimentOpts::new(substream(SEED, case_idx as u64)))?;
+            let r = parameter_recovery_single(
+                true_alpha,
+                300,
+                &ExperimentOpts::new(substream(SEED, case_idx as u64)),
+            )?;
             println!("true α={true_alpha}, recovered α={:.3}", r.estimated_alpha);
             assert!(
                 (r.estimated_alpha - true_alpha).abs() < 0.25,
@@ -2004,7 +2077,10 @@ mod tests {
         // BELOW the true value by identifiability + the half-normal(0, SD=4) prior
         // (prior shrinkage), rather than landing at 1.5. Distinct seed (case index 2).
         let high = parameter_recovery_single(1.5, 300, &ExperimentOpts::new(substream(SEED, 2)))?;
-        println!("true α=1.5 (degenerate), recovered α={:.3}", high.estimated_alpha);
+        println!(
+            "true α=1.5 (degenerate), recovered α={:.3}",
+            high.estimated_alpha
+        );
         assert!(
             high.estimated_alpha > 0.8,
             "α=1.5 should still recover as high (saturated), got {:.3}",
@@ -2024,7 +2100,8 @@ mod tests {
         // 4 internal agents bit-identical to the n=4 group (the builder derives agent i at
         // s₁+1+i), so the two checks would not be independent.
         const SEED: u64 = 20_260_203;
-        let (data, result) = experiment_identical(4, 0.5, 200, &ExperimentOpts::new(substream(SEED, 0)))?;
+        let (data, result) =
+            experiment_identical(4, 0.5, 200, &ExperimentOpts::new(substream(SEED, 0)))?;
         assert_eq!(data.len(), 200);
         println!(
             "Exp1: n=4, true α=0.5, group α={:.3}",
@@ -2050,7 +2127,10 @@ mod tests {
     /// inside the `recover_alpha` grid `[0.00, 5.00]`. Shared by the four
     /// per-experiment smoke tests below so the grid contract is stated once.
     fn assert_recovered_alpha_in_grid(label: &str, seed: u64, alpha: f64) {
-        assert!(alpha.is_finite(), "{label} (seed {seed}): recovered α must be finite, got {alpha}");
+        assert!(
+            alpha.is_finite(),
+            "{label} (seed {seed}): recovered α must be finite, got {alpha}"
+        );
         assert!(
             (0.0..=5.0).contains(&alpha),
             "{label} (seed {seed}): recovered α must lie in the recover_alpha grid [0, 5], got {alpha:.3}"
@@ -2106,7 +2186,8 @@ mod tests {
         // toward 0 — members pull in opposite directions, so the blanket stream reads as
         // near-random. Band is measured 0.040 + 0.15 (floored at the grid's 0.0 edge).
         const SEED: u64 = 20_260_206;
-        let (data, result) = experiment_varying_preferences(8, 0.5, 200, &ExperimentOpts::new(SEED))?;
+        let (data, result) =
+            experiment_varying_preferences(8, 0.5, 200, &ExperimentOpts::new(SEED))?;
         assert_eq!(data.len(), 200);
         println!(
             "Exp4: n=8, α=0.5 (varying prefs), group α={:.3}",
@@ -2126,7 +2207,8 @@ mod tests {
         // Exp 5 / Fig 6 (extension 5): certainty-weighted mixing of the same
         // Dirichlet-varying αs as Exp 2. Band is ±0.15 around the measured 0.290.
         const SEED: u64 = 20_260_207;
-        let (data, result) = experiment_certainty_weighted(8, 0.5, 200, &ExperimentOpts::new(SEED))?;
+        let (data, result) =
+            experiment_certainty_weighted(8, 0.5, 200, &ExperimentOpts::new(SEED))?;
         assert_eq!(data.len(), 200);
         println!(
             "Exp5-CW: n=8, mean α=0.5 (certainty-weighted), group α={:.3}",
@@ -2167,8 +2249,10 @@ mod tests {
         const MEAN_ALPHA: f64 = 0.5;
         const N_TRIALS: usize = 300;
 
-        let (_, exp2) = experiment_varying_alpha(N, MEAN_ALPHA, N_TRIALS, &ExperimentOpts::new(SEED))?;
-        let (_, exp3) = experiment_deterministic(N, MEAN_ALPHA, N_TRIALS, &ExperimentOpts::new(SEED))?;
+        let (_, exp2) =
+            experiment_varying_alpha(N, MEAN_ALPHA, N_TRIALS, &ExperimentOpts::new(SEED))?;
+        let (_, exp3) =
+            experiment_deterministic(N, MEAN_ALPHA, N_TRIALS, &ExperimentOpts::new(SEED))?;
         let (_, exp4) =
             experiment_varying_preferences(N, MEAN_ALPHA, N_TRIALS, &ExperimentOpts::new(SEED))?;
 
@@ -2263,8 +2347,10 @@ mod tests {
 
         let mut wins = 0;
         for &seed in &SEEDS {
-            let (_, prob) = experiment_varying_alpha(N, MEAN_ALPHA, N_TRIALS, &ExperimentOpts::new(seed))?;
-            let (_, cw) = experiment_certainty_weighted(N, MEAN_ALPHA, N_TRIALS, &ExperimentOpts::new(seed))?;
+            let (_, prob) =
+                experiment_varying_alpha(N, MEAN_ALPHA, N_TRIALS, &ExperimentOpts::new(seed))?;
+            let (_, cw) =
+                experiment_certainty_weighted(N, MEAN_ALPHA, N_TRIALS, &ExperimentOpts::new(seed))?;
             let prob_err = (prob.estimated_alpha - MEAN_ALPHA).abs();
             let cw_err = (cw.estimated_alpha - MEAN_ALPHA).abs();
             println!(
@@ -2292,16 +2378,8 @@ mod tests {
     #[test]
     fn substream_streams_are_well_separated() {
         for &s in &[
-            2026u64,
-            0xE11_2026,
-            0xE3_2026,
-            0xE1_2026,
-            0xE2_2026,
-            0xE2B_2026,
-            0xE4_2026,
-            0xE8_2026,
-            0xE6_2026,
-            9001,
+            2026u64, 0xE11_2026, 0xE3_2026, 0xE1_2026, 0xE2_2026, 0xE2B_2026, 0xE4_2026, 0xE8_2026,
+            0xE6_2026, 9001,
         ] {
             let streams: [u64; 7] = [
                 substream(s, 0),
@@ -2316,7 +2394,10 @@ mod tests {
             // Pairwise distinct.
             for i in 0..streams.len() {
                 for j in (i + 1)..streams.len() {
-                    assert_ne!(streams[i], streams[j], "streams {i},{j} collide for master {s}");
+                    assert_ne!(
+                        streams[i], streams[j],
+                        "streams {i},{j} collide for master {s}"
+                    );
                 }
             }
 
@@ -2332,9 +2413,21 @@ mod tests {
             // seed neighborhood (agent seeds b..=b+200 and the group RNG at b+0x9E37_79B9).
             let b = group_seed(s);
             assert_eq!(b, streams[1], "group_seed must equal substream(s, 1)");
-            assert_eq!(switch_seed(s), streams[4], "switch_seed must equal substream(s, 4)");
-            assert_eq!(sensory_seed(s), streams[5], "sensory_seed must equal substream(s, 5)");
-            assert_eq!(active_seed(s), streams[6], "active_seed must equal substream(s, 6)");
+            assert_eq!(
+                switch_seed(s),
+                streams[4],
+                "switch_seed must equal substream(s, 4)"
+            );
+            assert_eq!(
+                sensory_seed(s),
+                streams[5],
+                "sensory_seed must equal substream(s, 5)"
+            );
+            assert_eq!(
+                active_seed(s),
+                streams[6],
+                "active_seed must equal substream(s, 6)"
+            );
             for k in [0usize, 2, 3, 4, 5, 6] {
                 let v = streams[k];
                 assert!(
@@ -2351,18 +2444,28 @@ mod tests {
             // The MCMC chain seeds (substream(mcmc_base_seed(s), k)) must be clear of ALL
             // role streams and of the builder neighborhood — the #25 chain-seed-collision
             // guard (a chain must never replay the action-sampler or env stream).
-            assert_eq!(mcmc_base_seed(s), streams[3], "mcmc_base_seed must equal substream(s, 3)");
-            let chain_seeds: Vec<u64> =
-                (0..4).map(|k| substream(mcmc_base_seed(s), k)).collect();
+            assert_eq!(
+                mcmc_base_seed(s),
+                streams[3],
+                "mcmc_base_seed must equal substream(s, 3)"
+            );
+            let chain_seeds: Vec<u64> = (0..4).map(|k| substream(mcmc_base_seed(s), k)).collect();
             for (k, &cs) in chain_seeds.iter().enumerate() {
                 for (r, &role) in streams.iter().enumerate() {
-                    assert_ne!(cs, role, "chain seed {k} collides with role stream {r} for master {s}");
+                    assert_ne!(
+                        cs, role,
+                        "chain seed {k} collides with role stream {r} for master {s}"
+                    );
                 }
                 assert!(
                     !(b..=b.wrapping_add(200)).contains(&cs),
                     "chain seed {k} = {cs} collides with builder agent-seed neighborhood of b={b}"
                 );
-                assert_ne!(cs, b.wrapping_add(0x9E37_79B9), "chain seed {k} collides with the group-RNG seed");
+                assert_ne!(
+                    cs,
+                    b.wrapping_add(0x9E37_79B9),
+                    "chain seed {k} collides with the group-RNG seed"
+                );
                 for (j, &other) in chain_seeds.iter().enumerate() {
                     if j != k {
                         assert_ne!(cs, other, "chain seeds {k},{j} collide for master {s}");
@@ -2401,12 +2504,18 @@ mod tests {
             sd > 0.25,
             "Dirichlet αs must be genuinely dispersed (measured sd 0.4261), got {sd:.4}"
         );
-        assert!(min < max, "Dirichlet αs must not be degenerate: min={min:.4} max={max:.4}");
+        assert!(
+            min < max,
+            "Dirichlet αs must not be degenerate: min={min:.4} max={max:.4}"
+        );
         assert!(
             min < 0.5 && max > 0.5,
             "the dispersion must straddle the target mean: min={min:.4} max={max:.4}"
         );
-        assert!(alphas.iter().all(|a| a.is_finite() && *a > 0.0), "αs must be finite and positive");
+        assert!(
+            alphas.iter().all(|a| a.is_finite() && *a > 0.0),
+            "αs must be finite and positive"
+        );
 
         // Early-return path (n < 2): no Dirichlet draw at all, just the target repeated.
         let mut rng0 = StdRng::seed_from_u64(20_260_208);
@@ -2519,11 +2628,28 @@ mod tests {
         let mut env = BanditEnvironment::new(vec![0.8, 0.2, 0.2])?;
         let data = run_single_simulation(&mut agent, &mut env, 200)?;
 
-        let ll = log_likelihood_learning(&data, 0.5, 3, &[0.8, 0.2, 0.2], &[0.7, 0.3], &[1.0, 1.0, 1.0])?;
-        assert!(ll.is_finite() && ll < 0.0, "learning LL must be finite and negative: {ll}");
+        let ll = log_likelihood_learning(
+            &data,
+            0.5,
+            3,
+            &[0.8, 0.2, 0.2],
+            &[0.7, 0.3],
+            &[1.0, 1.0, 1.0],
+        )?;
+        assert!(
+            ll.is_finite() && ll < 0.0,
+            "learning LL must be finite and negative: {ll}"
+        );
 
         // Discriminates over α: a near-uniform α=0 differs from the generating α=0.5.
-        let ll_flat = log_likelihood_learning(&data, 0.0, 3, &[0.8, 0.2, 0.2], &[0.7, 0.3], &[1.0, 1.0, 1.0])?;
+        let ll_flat = log_likelihood_learning(
+            &data,
+            0.0,
+            3,
+            &[0.8, 0.2, 0.2],
+            &[0.7, 0.3],
+            &[1.0, 1.0, 1.0],
+        )?;
         assert!(
             (ll - ll_flat).abs() > 1e-6,
             "learning LL must vary with α: {ll} vs {ll_flat}"
@@ -2558,9 +2684,17 @@ mod tests {
             150,
             &ExperimentOpts::new(SEED).with_learn_a(EXT3_INITIAL_PRECISION.to_vec()),
         )?;
-        let aware =
-            recover_alpha_learning(&data, 3, &BANDIT_PROBS, &PREFERENCES, &EXT3_INITIAL_PRECISION)?;
-        println!("single-agent learning-aware recovered α = {:.3}", aware.estimated_alpha);
+        let aware = recover_alpha_learning(
+            &data,
+            3,
+            &BANDIT_PROBS,
+            &PREFERENCES,
+            &EXT3_INITIAL_PRECISION,
+        )?;
+        println!(
+            "single-agent learning-aware recovered α = {:.3}",
+            aware.estimated_alpha
+        );
         assert!(
             (aware.estimated_alpha - 0.5).abs() <= 0.3,
             "learning-aware recovery should land near true α=0.5, got {:.3}",
@@ -2585,11 +2719,19 @@ mod tests {
             150,
             &ExperimentOpts::new(SEED).with_learn_a(EXT3_INITIAL_PRECISION.to_vec()),
         )?;
-        let aware =
-            recover_alpha_learning(&data, 3, &BANDIT_PROBS, &PREFERENCES, &EXT3_INITIAL_PRECISION)?;
+        let aware = recover_alpha_learning(
+            &data,
+            3,
+            &BANDIT_PROBS,
+            &PREFERENCES,
+            &EXT3_INITIAL_PRECISION,
+        )?;
         println!(
             "learning data: aware α={:.3} (lp {:.2}) vs misspec α={:.3} (lp {:.2})",
-            aware.estimated_alpha, aware.log_posterior, misspec.estimated_alpha, misspec.log_posterior
+            aware.estimated_alpha,
+            aware.log_posterior,
+            misspec.estimated_alpha,
+            misspec.log_posterior
         );
         assert!(
             aware.log_posterior > misspec.log_posterior,
@@ -2605,22 +2747,46 @@ mod tests {
     #[test]
     fn test_wrong_length_learning_precision_rejected() {
         // Group factory path (via base_builder).
-        let err = experiment_identical(4, 0.5, 10, &ExperimentOpts::new(1).with_learn_a(vec![1.0, 1.0]));
+        let err = experiment_identical(
+            4,
+            0.5,
+            10,
+            &ExperimentOpts::new(1).with_learn_a(vec![1.0, 1.0]),
+        );
         assert!(
-            matches!(err, Err(AifError::InvalidLength { expected: 3, got: 2 })),
+            matches!(
+                err,
+                Err(AifError::InvalidLength {
+                    expected: 3,
+                    got: 2
+                })
+            ),
             "group factory should reject a length-2 precision, got {err:?}"
         );
         // Single-agent recovery path (via single_agent_data).
-        let err = parameter_recovery_single(0.5, 10, &ExperimentOpts::new(1).with_learn_a(vec![1.0; 4]));
+        let err =
+            parameter_recovery_single(0.5, 10, &ExperimentOpts::new(1).with_learn_a(vec![1.0; 4]));
         assert!(
-            matches!(err, Err(AifError::InvalidLength { expected: 3, got: 4 })),
+            matches!(
+                err,
+                Err(AifError::InvalidLength {
+                    expected: 3,
+                    got: 4
+                })
+            ),
             "parameter_recovery_single should reject a length-4 precision, got {err:?}"
         );
         // Learning-aware recovery path (initial_precision arg).
         let data = TrialData::new();
         let err = recover_alpha_learning(&data, 3, &BANDIT_PROBS, &PREFERENCES, &[1.0, 1.0]);
         assert!(
-            matches!(err, Err(AifError::InvalidLength { expected: 3, got: 2 })),
+            matches!(
+                err,
+                Err(AifError::InvalidLength {
+                    expected: 3,
+                    got: 2
+                })
+            ),
             "recover_alpha_learning should reject a length-2 precision, got {err:?}"
         );
     }
@@ -2646,10 +2812,16 @@ mod tests {
         let a = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &test_mcmc_config(77))?;
         let b = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &test_mcmc_config(77))?;
         assert_eq!(a.median, b.median, "same config must reproduce the median");
-        assert_eq!(a.chains, b.chains, "same config must reproduce every sample");
+        assert_eq!(
+            a.chains, b.chains,
+            "same config must reproduce every sample"
+        );
 
         let c = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &test_mcmc_config(99))?;
-        assert!(a.chains != c.chains, "a different seed should produce different samples");
+        assert!(
+            a.chains != c.chains,
+            "a different seed should produce different samples"
+        );
         Ok(())
     }
 
@@ -2660,14 +2832,27 @@ mod tests {
     fn test_mcmc_identifiable_region_recovers() -> Result<(), AifError> {
         const SEED: u64 = 20_250_101;
         let data = single_agent_data(0.5, 150, &ExperimentOpts::new(SEED))?;
-        let r = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &test_mcmc_config(SEED))?;
-        println!("identifiable α=0.5: median={:.3}, r_hat={:.3}", r.median, r.r_hat);
+        let r = recover_alpha_mcmc(
+            &data,
+            3,
+            &BANDIT_PROBS,
+            &PREFERENCES,
+            &test_mcmc_config(SEED),
+        )?;
+        println!(
+            "identifiable α=0.5: median={:.3}, r_hat={:.3}",
+            r.median, r.r_hat
+        );
         assert!(
             (r.median - 0.5).abs() <= 0.3,
             "MCMC median should land near true α=0.5, got {:.3}",
             r.median
         );
-        assert!(r.converged(), "chains should converge (R-hat < {R_HAT_THRESHOLD}), got {:.3}", r.r_hat);
+        assert!(
+            r.converged(),
+            "chains should converge (R-hat < {R_HAT_THRESHOLD}), got {:.3}",
+            r.r_hat
+        );
         Ok(())
     }
 
@@ -2680,7 +2865,13 @@ mod tests {
         const SEED: u64 = 20_250_102;
         let data = single_agent_data(3.0, 150, &ExperimentOpts::new(SEED))?;
         let grid = recover_alpha(&data, 3, &BANDIT_PROBS, &PREFERENCES)?;
-        let mcmc = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &test_mcmc_config(SEED))?;
+        let mcmc = recover_alpha_mcmc(
+            &data,
+            3,
+            &BANDIT_PROBS,
+            &PREFERENCES,
+            &test_mcmc_config(SEED),
+        )?;
         println!(
             "degenerate α=3.0: grid MAP={:.3}, MCMC median={:.3}",
             grid.estimated_alpha, mcmc.median
@@ -2712,7 +2903,13 @@ mod tests {
             &test_mcmc_config(1),
         );
         assert!(
-            matches!(err, Err(AifError::InvalidLength { expected: 3, got: 2 })),
+            matches!(
+                err,
+                Err(AifError::InvalidLength {
+                    expected: 3,
+                    got: 2
+                })
+            ),
             "recover_alpha_mcmc_learning should reject a length-2 precision, got {err:?}"
         );
     }
@@ -2722,14 +2919,31 @@ mod tests {
     #[test]
     fn test_mcmc_rhat_edge_cases() -> Result<(), AifError> {
         let data = single_agent_data(0.5, 60, &ExperimentOpts::new(5))?;
-        let one_chain = McmcConfig::new(5).with_chains(1).with_burn_in(50).with_samples(200);
+        let one_chain = McmcConfig::new(5)
+            .with_chains(1)
+            .with_burn_in(50)
+            .with_samples(200);
         let r = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &one_chain)?;
-        assert!(r.r_hat.is_nan(), "single-chain R-hat is undefined (NaN), got {:.3}", r.r_hat);
-        assert!(r.median.is_finite(), "median must still be finite with one chain");
+        assert!(
+            r.r_hat.is_nan(),
+            "single-chain R-hat is undefined (NaN), got {:.3}",
+            r.r_hat
+        );
+        assert!(
+            r.median.is_finite(),
+            "median must still be finite with one chain"
+        );
 
-        let one_sample = McmcConfig::new(5).with_chains(2).with_burn_in(10).with_samples(1);
+        let one_sample = McmcConfig::new(5)
+            .with_chains(2)
+            .with_burn_in(10)
+            .with_samples(1);
         let r = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &one_sample)?;
-        assert!(r.r_hat.is_nan(), "one-sample-per-chain R-hat is undefined (NaN), got {:.3}", r.r_hat);
+        assert!(
+            r.r_hat.is_nan(),
+            "one-sample-per-chain R-hat is undefined (NaN), got {:.3}",
+            r.r_hat
+        );
         Ok(())
     }
 
@@ -2771,28 +2985,73 @@ mod tests {
             initial_precision: vec![1.0, 1.0], // len 2 ≠ 3 bandits
         });
         assert!(
-            matches!(log_likelihood_params(&data, &bad), Err(AifError::InvalidLength { expected: 3, got: 2 })),
+            matches!(
+                log_likelihood_params(&data, &bad),
+                Err(AifError::InvalidLength {
+                    expected: 3,
+                    got: 2
+                })
+            ),
             "learning likelihood should reject a length-2 precision"
         );
         assert!(
-            matches!(McmcVecConfig::new(1, vec![]), Err(AifError::InvalidLength { .. })),
+            matches!(
+                McmcVecConfig::new(1, vec![]),
+                Err(AifError::InvalidLength { .. })
+            ),
             "empty dims should be rejected"
         );
         // lo ≥ hi, non-finite lo, non-positive/non-finite init_spread or initial_sd are all
         // rejected at construction (hi = +∞ is the one permitted infinity).
-        let base = McmcDim { initial_sd: 0.3, lo: 0.0, hi: 1.0, init_spread: 0.3 };
+        let base = McmcDim {
+            initial_sd: 0.3,
+            lo: 0.0,
+            hi: 1.0,
+            init_spread: 0.3,
+        };
         for bad in [
-            McmcDim { lo: 1.0, hi: 0.5, ..base },              // lo ≥ hi
-            McmcDim { lo: f64::NEG_INFINITY, ..base },         // non-finite lo
-            McmcDim { hi: f64::NAN, ..base },                  // NaN hi
-            McmcDim { init_spread: 0.0, ..base },              // non-positive init_spread
-            McmcDim { init_spread: f64::INFINITY, ..base },    // non-finite init_spread
-            McmcDim { initial_sd: 0.0, ..base },               // non-positive initial_sd
+            McmcDim {
+                lo: 1.0,
+                hi: 0.5,
+                ..base
+            }, // lo ≥ hi
+            McmcDim {
+                lo: f64::NEG_INFINITY,
+                ..base
+            }, // non-finite lo
+            McmcDim {
+                hi: f64::NAN,
+                ..base
+            }, // NaN hi
+            McmcDim {
+                init_spread: 0.0,
+                ..base
+            }, // non-positive init_spread
+            McmcDim {
+                init_spread: f64::INFINITY,
+                ..base
+            }, // non-finite init_spread
+            McmcDim {
+                initial_sd: 0.0,
+                ..base
+            }, // non-positive initial_sd
         ] {
-            assert!(McmcVecConfig::new(1, vec![bad]).is_err(), "invalid dim {bad:?} should be rejected");
+            assert!(
+                McmcVecConfig::new(1, vec![bad]).is_err(),
+                "invalid dim {bad:?} should be rejected"
+            );
         }
         // hi = +∞ is allowed.
-        assert!(McmcVecConfig::new(1, vec![McmcDim { hi: f64::INFINITY, ..base }]).is_ok());
+        assert!(
+            McmcVecConfig::new(
+                1,
+                vec![McmcDim {
+                    hi: f64::INFINITY,
+                    ..base
+                }]
+            )
+            .is_ok()
+        );
     }
 
     /// Same vector config twice ⇒ bit-identical chains; a bounded dimension's samples never
@@ -2802,16 +3061,31 @@ mod tests {
         let data = single_agent_data(0.5, 80, &ExperimentOpts::new(4242))?;
         // Two dims: α in [0, ∞), and a bounded p in [0.2, 0.9].
         let dims = vec![
-            McmcDim { initial_sd: 0.4, lo: 0.0, hi: f64::INFINITY, init_spread: 4.0 },
-            McmcDim { initial_sd: 0.1, lo: 0.2, hi: 0.9, init_spread: 0.2 },
+            McmcDim {
+                initial_sd: 0.4,
+                lo: 0.0,
+                hi: f64::INFINITY,
+                init_spread: 4.0,
+            },
+            McmcDim {
+                initial_sd: 0.1,
+                lo: 0.2,
+                hi: 0.9,
+                init_spread: 0.2,
+            },
         ];
         let logpost = |t: &[f64]| -> Result<f64, AifError> {
-            Ok(log_likelihood_params(&data, &ModelParams::new(t[0], 16.0, t[1]))?
-                + half_normal_log_prior_sd(t[0], 4.0))
+            Ok(
+                log_likelihood_params(&data, &ModelParams::new(t[0], 16.0, t[1]))?
+                    + half_normal_log_prior_sd(t[0], 4.0),
+            )
         };
         let a = recover_mcmc_vec(logpost, &test_vec_config(7, dims.clone()))?;
         let b = recover_mcmc_vec(logpost, &test_vec_config(7, dims.clone()))?;
-        assert_eq!(a.chains, b.chains, "same config must reproduce every sample");
+        assert_eq!(
+            a.chains, b.chains,
+            "same config must reproduce every sample"
+        );
 
         // Bounded dim (index 1) stays within [0.2, 0.9] for every sample.
         for chain in &a.chains {
@@ -2834,23 +3108,40 @@ mod tests {
     /// makes the marginals wander — not a unit invariant, so no near-truth assertion.)
     #[test]
     fn test_vec_2d_alpha_gamma_smoke() -> Result<(), AifError> {
-        let data =
-            generate_params_data(&ModelParams::new(0.5, 16.0, 0.8), 120, 20_250_201)?;
+        let data = generate_params_data(&ModelParams::new(0.5, 16.0, 0.8), 120, 20_250_201)?;
         let dims = vec![
-            McmcDim { initial_sd: 0.5, lo: 0.0, hi: f64::INFINITY, init_spread: 4.0 },
-            McmcDim { initial_sd: 4.0, lo: 0.0, hi: f64::INFINITY, init_spread: 32.0 },
+            McmcDim {
+                initial_sd: 0.5,
+                lo: 0.0,
+                hi: f64::INFINITY,
+                init_spread: 4.0,
+            },
+            McmcDim {
+                initial_sd: 4.0,
+                lo: 0.0,
+                hi: f64::INFINITY,
+                init_spread: 32.0,
+            },
         ];
         let res = recover_mcmc_vec(
             |t| {
-                Ok(log_likelihood_params(&data, &ModelParams::new(t[0], t[1], 0.8))?
-                    + half_normal_log_prior_sd(t[0], 4.0)
-                    + half_normal_log_prior_sd(t[1], 32.0))
+                Ok(
+                    log_likelihood_params(&data, &ModelParams::new(t[0], t[1], 0.8))?
+                        + half_normal_log_prior_sd(t[0], 4.0)
+                        + half_normal_log_prior_sd(t[1], 32.0),
+                )
             },
             &test_vec_config(20_250_201, dims),
         )?;
         assert_eq!(res.dims.len(), 2);
-        assert!(res.dims.iter().all(|d| d.median.is_finite()), "medians must be finite");
-        assert!(res.correlation(0, 1).is_finite(), "α–γ correlation must be finite");
+        assert!(
+            res.dims.iter().all(|d| d.median.is_finite()),
+            "medians must be finite"
+        );
+        assert!(
+            res.correlation(0, 1).is_finite(),
+            "α–γ correlation must be finite"
+        );
         // converged() is just the per-dim R-hat gate — computable without panic.
         let _ = res.converged();
         Ok(())
@@ -2863,7 +3154,11 @@ mod tests {
     #[test]
     fn test_log_likelihood_params_learning_matches_scalar() -> Result<(), AifError> {
         let prec = vec![1.0, 1.0, 1.0];
-        let data = single_agent_data(0.5, 120, &ExperimentOpts::new(51).with_learn_a(prec.clone()))?;
+        let data = single_agent_data(
+            0.5,
+            120,
+            &ExperimentOpts::new(51).with_learn_a(prec.clone()),
+        )?;
         for &alpha in &[0.3_f64, 0.8] {
             let generalized = log_likelihood_params(
                 &data,
@@ -2873,7 +3168,8 @@ mod tests {
                     initial_precision: prec.clone(),
                 }),
             )?;
-            let scalar = log_likelihood_learning(&data, alpha, 3, &BANDIT_PROBS, &PREFERENCES, &prec)?;
+            let scalar =
+                log_likelihood_learning(&data, alpha, 3, &BANDIT_PROBS, &PREFERENCES, &prec)?;
             assert!(
                 (generalized - scalar).abs() < 1e-12,
                 "params-learning(α={alpha}) {generalized} != scalar {scalar}"
@@ -2885,8 +3181,11 @@ mod tests {
     // ----- extension 2b (#33, Phase 2): dynamics path -----
 
     fn dynamics_test_params(beta0: f64, psi: f64) -> ModelParams {
-        ModelParams::new(0.5, 16.0, 0.8)
-            .with_dynamics(DynamicsParams { hazard: 0.2, beta0, psi })
+        ModelParams::new(0.5, 16.0, 0.8).with_dynamics(DynamicsParams {
+            hazard: 0.2,
+            beta0,
+            psi,
+        })
     }
 
     #[test]
@@ -2894,9 +3193,15 @@ mod tests {
         let p = dynamics_test_params(1.0, 2.0);
         let a = generate_params_data(&p, 60, 20_260_730)?;
         let b = generate_params_data(&p, 60, 20_260_730)?;
-        assert_eq!(a.observations, b.observations, "same seed must reproduce observations");
+        assert_eq!(
+            a.observations, b.observations,
+            "same seed must reproduce observations"
+        );
         assert_eq!(a.actions, b.actions, "same seed must reproduce actions");
-        assert!(a.actions.iter().all(|&x| x < 3), "positional actions are {{left, stay, right}}");
+        assert!(
+            a.actions.iter().all(|&x| x < 3),
+            "positional actions are {{left, stay, right}}"
+        );
         let c = generate_params_data(&p, 60, 20_260_731)?;
         assert!(
             a.observations != c.observations || a.actions != c.actions,
@@ -2940,7 +3245,11 @@ mod tests {
     fn test_dynamics_learning_combo_and_precision_len() -> Result<(), AifError> {
         // learn_a composes with the dynamics path (Phase-0 fidelity pinned it);
         // the precision length contract switches to the joint state count n².
-        let lp = |len: usize| LearningParams { eta: 1.0, omega: 1.0, initial_precision: vec![1.0; len] };
+        let lp = |len: usize| LearningParams {
+            eta: 1.0,
+            omega: 1.0,
+            initial_precision: vec![1.0; len],
+        };
         let good = dynamics_test_params(1.0, 2.0).with_learning(lp(9));
         let data = generate_params_data(&good, 30, 20_260_730)?;
         assert!(log_likelihood_params(&data, &good)?.is_finite());
@@ -2949,7 +3258,10 @@ mod tests {
         assert!(
             matches!(
                 log_likelihood_params(&data, &bad),
-                Err(AifError::InvalidLength { expected: 9, got: 3 })
+                Err(AifError::InvalidLength {
+                    expected: 9,
+                    got: 3
+                })
             ),
             "MAB-length precision must be rejected on the positional model"
         );
@@ -2989,20 +3301,42 @@ mod tests {
         // sample 4). So the pin depends jointly on the init draw, the per-iter proposal normal,
         // AND the short-circuited accept uniform: reordering or shifting ANY of those draws
         // moves at least one value. burn_in = 0 ⇒ the samples are the raw post-init walk.
-        let cfg = McmcConfig::new(0).with_chains(1).with_burn_in(0).with_samples(8).with_proposal_sd(0.5);
+        let cfg = McmcConfig::new(0)
+            .with_chains(1)
+            .with_burn_in(0)
+            .with_samples(8)
+            .with_proposal_sd(0.5);
         let r = recover_alpha_mcmc(&data, 3, &BANDIT_PROBS, &PREFERENCES, &cfg)?;
-        let got: Vec<f64> = r.chains[0].iter().map(|&x| (x * 1e9).round() / 1e9).collect();
+        let got: Vec<f64> = r.chains[0]
+            .iter()
+            .map(|&x| (x * 1e9).round() / 1e9)
+            .collect();
         let want = [
-            6.884_148_141, 5.607_902_918, 5.269_027_445, 6.126_933_458, 6.343_628_103, 6.343_628_103,
-            7.313_531_378, 7.383_831_249,
+            6.884_148_141,
+            5.607_902_918,
+            5.269_027_445,
+            6.126_933_458,
+            6.343_628_103,
+            6.343_628_103,
+            7.313_531_378,
+            7.383_831_249,
         ];
         assert_eq!(got.len(), want.len());
         // Sanity: the window genuinely mixes accepts and rejects (so a proposal-draw change
         // would be caught, not masked by all-reject).
-        assert!(got[4] == got[5], "expected a rejected proposal at sample 5 (a stationary step)");
-        assert!(got[0] != got[1] && got[6] != got[7], "expected accepted proposals (moving steps)");
+        assert!(
+            got[4] == got[5],
+            "expected a rejected proposal at sample 5 (a stationary step)"
+        );
+        assert!(
+            got[0] != got[1] && got[6] != got[7],
+            "expected accepted proposals (moving steps)"
+        );
         for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
-            assert!((g - w).abs() < 1e-9, "dim-1 draw order changed at sample {i}: {g} != {w}");
+            assert!(
+                (g - w).abs() < 1e-9,
+                "dim-1 draw order changed at sample {i}: {g} != {w}"
+            );
         }
         Ok(())
     }
@@ -3025,9 +3359,18 @@ mod tests {
     /// The additive proposal mode defaults to the pre-#30 behavior.
     #[test]
     fn test_proposal_mode_default_is_joint_scale() {
-        let dims = vec![McmcDim { initial_sd: 0.3, lo: 0.0, hi: f64::INFINITY, init_spread: 1.0 }];
+        let dims = vec![McmcDim {
+            initial_sd: 0.3,
+            lo: 0.0,
+            hi: f64::INFINITY,
+            init_spread: 1.0,
+        }];
         let cfg = McmcVecConfig::new(1, dims).expect("valid dims");
-        assert_eq!(cfg.proposal, ProposalMode::JointScale, "default must stay JointScale");
+        assert_eq!(
+            cfg.proposal,
+            ProposalMode::JointScale,
+            "default must stay JointScale"
+        );
         assert_eq!(ProposalMode::default(), ProposalMode::JointScale);
         assert_eq!(
             cfg.with_proposal(ProposalMode::Covariance).proposal,
@@ -3043,23 +3386,39 @@ mod tests {
     fn test_covariance_mode_deterministic() -> Result<(), AifError> {
         // 2-D correlated Gaussian in (ln θ₀, ln θ₁), ρ = 0.8. Written in θ space (the
         // −ln θ terms) as the kernel's contract requires.
-        let logpost = |t: &[f64]| -> Result<f64, AifError> {
-            Ok(log_bivariate_lognormal(t, 0.8))
-        };
+        let logpost = |t: &[f64]| -> Result<f64, AifError> { Ok(log_bivariate_lognormal(t, 0.8)) };
         let dims = vec![
-            McmcDim { initial_sd: 0.4, lo: 0.0, hi: f64::INFINITY, init_spread: 1.5 },
-            McmcDim { initial_sd: 0.4, lo: 0.0, hi: f64::INFINITY, init_spread: 1.5 },
+            McmcDim {
+                initial_sd: 0.4,
+                lo: 0.0,
+                hi: f64::INFINITY,
+                init_spread: 1.5,
+            },
+            McmcDim {
+                initial_sd: 0.4,
+                lo: 0.0,
+                hi: f64::INFINITY,
+                init_spread: 1.5,
+            },
         ];
-        let cfg = cov_config(31, dims.clone()).with_chains(2).with_burn_in(150).with_samples(300);
+        let cfg = cov_config(31, dims.clone())
+            .with_chains(2)
+            .with_burn_in(150)
+            .with_samples(300);
         let a = recover_mcmc_vec(logpost, &cfg)?;
         let b = recover_mcmc_vec(logpost, &cfg)?;
         assert_eq!(a.chains, b.chains, "same seed must reproduce every sample");
         for (da, db) in a.dims.iter().zip(&b.dims) {
             assert_eq!(da.median, db.median, "medians must be bit-identical");
-            assert_eq!(da.adapted_sd, db.adapted_sd, "frozen scales must be bit-identical");
+            assert_eq!(
+                da.adapted_sd, db.adapted_sd,
+                "frozen scales must be bit-identical"
+            );
         }
-        let other =
-            cov_config(32, dims).with_chains(2).with_burn_in(150).with_samples(300);
+        let other = cov_config(32, dims)
+            .with_chains(2)
+            .with_burn_in(150)
+            .with_samples(300);
         let c = recover_mcmc_vec(logpost, &other)?;
         assert!(a.chains != c.chains, "a different seed should diverge");
         Ok(())
@@ -3070,13 +3429,23 @@ mod tests {
     /// wrong log-Jacobian tilts the whole density by a factor of θ and shifts this median.
     #[test]
     fn test_covariance_dim1_halfnormal_matches_theory() -> Result<(), AifError> {
-        let dims =
-            vec![McmcDim { initial_sd: 1.0, lo: 0.0, hi: f64::INFINITY, init_spread: PRIOR_SD }];
+        let dims = vec![McmcDim {
+            initial_sd: 1.0,
+            lo: 0.0,
+            hi: f64::INFINITY,
+            init_spread: PRIOR_SD,
+        }];
         let res = recover_mcmc_vec(
             |t: &[f64]| Ok(half_normal_log_prior_sd(t[0], PRIOR_SD)),
-            &cov_config(30_001, dims).with_burn_in(1000).with_samples(5000),
+            &cov_config(30_001, dims)
+                .with_burn_in(1000)
+                .with_samples(5000),
         )?;
-        assert!(res.converged(), "half-normal target should mix: r_hat = {}", res.dims[0].r_hat);
+        assert!(
+            res.converged(),
+            "half-normal target should mix: r_hat = {}",
+            res.dims[0].r_hat
+        );
         let want = PRIOR_SD * PROBIT_075;
         let got = res.dims[0].median;
         assert!(
@@ -3093,12 +3462,23 @@ mod tests {
     #[test]
     fn test_covariance_finite_bounds_uniform_median() -> Result<(), AifError> {
         let (lo, hi) = (0.2, 0.9);
-        let dims = vec![McmcDim { initial_sd: 1.0, lo, hi, init_spread: 0.3 }];
+        let dims = vec![McmcDim {
+            initial_sd: 1.0,
+            lo,
+            hi,
+            init_spread: 0.3,
+        }];
         let res = recover_mcmc_vec(
             |_t: &[f64]| Ok(0.0),
-            &cov_config(30_002, dims).with_burn_in(1000).with_samples(5000),
+            &cov_config(30_002, dims)
+                .with_burn_in(1000)
+                .with_samples(5000),
         )?;
-        assert!(res.converged(), "uniform target should mix: r_hat = {}", res.dims[0].r_hat);
+        assert!(
+            res.converged(),
+            "uniform target should mix: r_hat = {}",
+            res.dims[0].r_hat
+        );
         let got = res.dims[0].median;
         assert!(
             (got - 0.55).abs() < 0.03,
@@ -3130,8 +3510,18 @@ mod tests {
         const RHO: f64 = 0.99;
         let logpost = |t: &[f64]| -> Result<f64, AifError> { Ok(log_bivariate_lognormal(t, RHO)) };
         let dims = vec![
-            McmcDim { initial_sd: 0.3, lo: 0.0, hi: f64::INFINITY, init_spread: 2.0 },
-            McmcDim { initial_sd: 0.3, lo: 0.0, hi: f64::INFINITY, init_spread: 2.0 },
+            McmcDim {
+                initial_sd: 0.3,
+                lo: 0.0,
+                hi: f64::INFINITY,
+                init_spread: 2.0,
+            },
+            McmcDim {
+                initial_sd: 0.3,
+                lo: 0.0,
+                hi: f64::INFINITY,
+                init_spread: 2.0,
+            },
         ];
         // Matched budget for both arms — only `proposal` differs.
         let base = McmcVecConfig::new(30_003, dims)
@@ -3140,7 +3530,10 @@ mod tests {
             .with_burn_in(1500)
             .with_samples(3000);
 
-        let cov = recover_mcmc_vec(logpost, &base.clone().with_proposal(ProposalMode::Covariance))?;
+        let cov = recover_mcmc_vec(
+            logpost,
+            &base.clone().with_proposal(ProposalMode::Covariance),
+        )?;
         assert!(
             cov.converged(),
             "covariance mode should mix on the ρ={RHO} ridge: r_hat = {:?}",

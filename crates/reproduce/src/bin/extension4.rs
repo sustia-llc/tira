@@ -142,20 +142,17 @@ fn generate(cell: Cell, rep_master: u64) -> Result<TrialData, AifError> {
     let voter = || VotingAgent::with_seed(3, VotingMode::Probabilistic, gseed);
     match cell {
         Cell::Baseline => {
-            let mut group =
-                build_ext4_group(CopyAgent, voter(), N_INTERNAL, MEMBER_ALPHA, gseed)?;
+            let mut group = build_ext4_group(CopyAgent, voter(), N_INTERNAL, MEMBER_ALPHA, gseed)?;
             run_group_simulation(&mut group, &mut env, N_TRIALS)
         }
         Cell::Sensory(q) => {
             let filter = SensoryFilter::new(q, sensory_seed(rep_master))?;
-            let mut group =
-                build_ext4_group(filter, voter(), N_INTERNAL, MEMBER_ALPHA, gseed)?;
+            let mut group = build_ext4_group(filter, voter(), N_INTERNAL, MEMBER_ALPHA, gseed)?;
             run_group_simulation(&mut group, &mut env, N_TRIALS)
         }
         Cell::Active => {
             let active = AgreementAggregator::new(P_V, P_AGR, active_seed(rep_master))?;
-            let mut group =
-                build_ext4_group(CopyAgent, active, N_INTERNAL, MEMBER_ALPHA, gseed)?;
+            let mut group = build_ext4_group(CopyAgent, active, N_INTERNAL, MEMBER_ALPHA, gseed)?;
             run_group_simulation(&mut group, &mut env, N_TRIALS)
         }
         Cell::Both(q) => {

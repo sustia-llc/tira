@@ -61,7 +61,10 @@ const COLORS: [plotters::style::RGBColor; 4] = [
 const LABELS: [&str; 4] = ["4 agents", "8 agents", "16 agents", "100 agents"];
 
 fn plot_panel(
-    area: &plotters::prelude::DrawingArea<plotters::prelude::BitMapBackend<'_>, plotters::coord::Shift>,
+    area: &plotters::prelude::DrawingArea<
+        plotters::prelude::BitMapBackend<'_>,
+        plotters::coord::Shift,
+    >,
     title: &str,
     data: &[(f64, f64, usize)],
     show_legend: bool,

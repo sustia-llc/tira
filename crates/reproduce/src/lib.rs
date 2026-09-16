@@ -33,15 +33,12 @@ pub use ext8::{
 
 pub use simulation::{
     BANDIT_PROBS, DimResult, DynamicsParams, EXT3_INITIAL_PRECISION, ExperimentOpts,
-    LearningParams, McmcConfig,
-    McmcDim, McmcResult, McmcVecConfig, McmcVecResult, ModelParams, PREFERENCES, PRIOR_SD,
-    ProposalMode, R_HAT_THRESHOLD,
-    RecoveryResult, TrialData, active_seed, env_seed, experiment_certainty_weighted,
-    experiment_deterministic,
-    experiment_identical, experiment_varying_alpha, experiment_varying_preferences, group_seed,
-    generate_params_data, half_normal_log_prior_sd, heterogeneity_seed, log_likelihood,
-    log_likelihood_learning, log_likelihood_params, mcmc_base_seed, parameter_recovery_single,
-    recover_alpha,
+    LearningParams, McmcConfig, McmcDim, McmcResult, McmcVecConfig, McmcVecResult, ModelParams,
+    PREFERENCES, PRIOR_SD, ProposalMode, R_HAT_THRESHOLD, RecoveryResult, TrialData, active_seed,
+    env_seed, experiment_certainty_weighted, experiment_deterministic, experiment_identical,
+    experiment_varying_alpha, experiment_varying_preferences, generate_params_data, group_seed,
+    half_normal_log_prior_sd, heterogeneity_seed, log_likelihood, log_likelihood_learning,
+    log_likelihood_params, mcmc_base_seed, parameter_recovery_single, recover_alpha,
     recover_alpha_learning, recover_alpha_mcmc, recover_alpha_mcmc_learning, recover_mcmc_vec,
     run_group_simulation, run_single_simulation, run_sweep, sensory_seed, single_agent_data,
     substream, switch_seed,
@@ -63,7 +60,10 @@ pub mod stats {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     #[must_use]
     pub fn percentile(sorted: &[f64], p: f64) -> f64 {
-        debug_assert!((0.0..=1.0).contains(&p), "percentile precondition: p ∈ [0, 1], got {p}");
+        debug_assert!(
+            (0.0..=1.0).contains(&p),
+            "percentile precondition: p ∈ [0, 1], got {p}"
+        );
         match sorted.len() {
             0 => f64::NAN,
             1 => sorted[0],
@@ -81,7 +81,10 @@ pub mod stats {
     #[must_use]
     pub fn median_iqr(mut v: Vec<f64>) -> (f64, f64) {
         v.sort_by(f64::total_cmp);
-        (percentile(&v, 0.5), percentile(&v, 0.75) - percentile(&v, 0.25))
+        (
+            percentile(&v, 0.5),
+            percentile(&v, 0.75) - percentile(&v, 0.25),
+        )
     }
 
     /// Median over a sample (consumed, sorted with `total_cmp`).
@@ -246,7 +249,10 @@ impl PositionalBanditEnvironment {
         switch_rng: StdRng,
     ) -> Result<Self, AifError> {
         if probabilities.len() < 2 {
-            return Err(AifError::InvalidLength { expected: 2, got: probabilities.len() });
+            return Err(AifError::InvalidLength {
+                expected: 2,
+                got: probabilities.len(),
+            });
         }
         validate_probabilities(&probabilities)?;
         if !(0.0..=1.0).contains(&hazard) {
@@ -258,7 +264,14 @@ impl PositionalBanditEnvironment {
             .max_by(|(_, a), (_, b)| a.total_cmp(b))
             .map(|(i, _)| i)
             .expect("invariant: len >= 2 checked above");
-        Ok(Self { probabilities, hazard, position: 0, good_arm, reward_rng, switch_rng })
+        Ok(Self {
+            probabilities,
+            hazard,
+            position: 0,
+            good_arm,
+            reward_rng,
+            switch_rng,
+        })
     }
 
     #[allow(clippy::missing_errors_doc)]
@@ -407,7 +420,8 @@ impl SharedBanditEnvironment {
         self.bandit_selection = vec![None; self.base_probabilities.len()];
         self.agents_acted = vec![false; self.n_agents];
         self.step_counter += 1;
-        self.current_probabilities.clone_from(&self.base_probabilities);
+        self.current_probabilities
+            .clone_from(&self.base_probabilities);
     }
 
     #[must_use]
@@ -458,7 +472,8 @@ impl MultiAgentEnvironment for SharedBanditEnvironment {
     fn reset(&mut self) {
         self.bandit_selection = vec![None; self.base_probabilities.len()];
         self.agents_acted = vec![false; self.n_agents];
-        self.current_probabilities.clone_from(&self.base_probabilities);
+        self.current_probabilities
+            .clone_from(&self.base_probabilities);
         self.step_counter = 0;
     }
 
@@ -473,8 +488,7 @@ impl MultiAgentEnvironment for SharedBanditEnvironment {
 
 impl Environment for SharedBanditEnvironment {
     fn step(&mut self, action: usize) -> Result<usize, AifError> {
-        let (observation, _) =
-            <Self as MultiAgentEnvironment>::step(self, 0, action)?;
+        let (observation, _) = <Self as MultiAgentEnvironment>::step(self, 0, action)?;
         Ok(observation)
     }
 }
@@ -490,8 +504,7 @@ mod tests {
         // hazard = 0 skips the switch draw entirely, so an agent standing still
         // at the good arm sees BIT-IDENTICAL rewards to a fixed-arm
         // BanditEnvironment pulling that arm under the same reward seed.
-        let mut pos =
-            PositionalBanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 0.0, 777, 999)?;
+        let mut pos = PositionalBanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 0.0, 777, 999)?;
         let mut fixed = BanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 777)?;
         for _ in 0..40 {
             assert_eq!(pos.step(1)?, fixed.step(0)?); // stay at 0 vs pull arm 0
@@ -515,8 +528,7 @@ mod tests {
 
     #[test]
     fn positional_edge_clamp() -> Result<(), AifError> {
-        let mut env =
-            PositionalBanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 0.0, 5, 6)?;
+        let mut env = PositionalBanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 0.0, 5, 6)?;
         env.step(0)?; // left at 0 clamps
         assert_eq!(env.position(), 0);
         env.step(2)?;
@@ -560,12 +572,8 @@ mod tests {
         // (the jump target is always ≠ current), h = 0.5 ⇒ a count deep inside
         // the binomial bulk (400..600 over 1000 steps is ±6σ).
         let count_switches = |hazard: f64| -> Result<usize, AifError> {
-            let mut env = PositionalBanditEnvironment::with_seed(
-                vec![0.8, 0.2, 0.2],
-                hazard,
-                777,
-                999,
-            )?;
+            let mut env =
+                PositionalBanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], hazard, 777, 999)?;
             let mut switches = 0;
             let mut prev = env.good_arm();
             for _ in 0..1000 {
@@ -580,7 +588,10 @@ mod tests {
         assert_eq!(count_switches(0.0)?, 0);
         assert_eq!(count_switches(1.0)?, 1000);
         let mid = count_switches(0.5)?;
-        assert!((400..=600).contains(&mid), "h = 0.5 switch count {mid} outside band");
+        assert!(
+            (400..=600).contains(&mid),
+            "h = 0.5 switch count {mid} outside band"
+        );
         Ok(())
     }
 
@@ -592,7 +603,10 @@ mod tests {
         assert!(matches!(env.step(3), Err(AifError::InvalidAction(3))));
         assert!(matches!(
             PositionalBanditEnvironment::with_seed(vec![0.8], 0.1, 1, 2),
-            Err(AifError::InvalidLength { expected: 2, got: 1 })
+            Err(AifError::InvalidLength {
+                expected: 2,
+                got: 1
+            })
         ));
         assert!(matches!(
             PositionalBanditEnvironment::with_seed(vec![0.8, 0.2], 1.5, 1, 2),
@@ -610,15 +624,30 @@ mod tests {
         let actions = [0usize, 1, 2, 0, 1, 2, 0, 0, 1, 2, 2, 1, 0, 1, 2];
         let mut a = BanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 777)?;
         let mut b = BanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 777)?;
-        let obs_a: Vec<usize> = actions.iter().map(|&x| a.step(x)).collect::<Result<_, _>>()?;
-        let obs_b: Vec<usize> = actions.iter().map(|&x| b.step(x)).collect::<Result<_, _>>()?;
-        assert_eq!(obs_a, obs_b, "same seed must reproduce the observation sequence");
+        let obs_a: Vec<usize> = actions
+            .iter()
+            .map(|&x| a.step(x))
+            .collect::<Result<_, _>>()?;
+        let obs_b: Vec<usize> = actions
+            .iter()
+            .map(|&x| b.step(x))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(
+            obs_a, obs_b,
+            "same seed must reproduce the observation sequence"
+        );
 
         // A different seed should diverge on this sequence (sanity, not a guarantee
         // for every seed pair, but overwhelmingly likely across 15 draws).
         let mut c = BanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 778)?;
-        let obs_c: Vec<usize> = actions.iter().map(|&x| c.step(x)).collect::<Result<_, _>>()?;
-        assert_ne!(obs_a, obs_c, "distinct seeds should diverge on the reward stream");
+        let obs_c: Vec<usize> = actions
+            .iter()
+            .map(|&x| c.step(x))
+            .collect::<Result<_, _>>()?;
+        assert_ne!(
+            obs_a, obs_c,
+            "distinct seeds should diverge on the reward stream"
+        );
         Ok(())
     }
 
@@ -635,8 +664,16 @@ mod tests {
     #[test]
     fn shared_with_seed_reproduces_observation_and_reward_sequences() -> Result<(), AifError> {
         // (agent 0 arm, agent 1 arm) per round — never equal.
-        const SCRIPT: [(usize, usize); 8] =
-            [(0, 1), (1, 2), (2, 0), (0, 2), (1, 0), (2, 1), (0, 1), (1, 2)];
+        const SCRIPT: [(usize, usize); 8] = [
+            (0, 1),
+            (1, 2),
+            (2, 0),
+            (0, 2),
+            (1, 0),
+            (2, 1),
+            (0, 1),
+            (1, 2),
+        ];
 
         fn run(seed: u64) -> Result<(Vec<usize>, Vec<bool>), AifError> {
             let mut env = SharedBanditEnvironment::with_seed(vec![0.8, 0.2, 0.2], 2, seed)?;
@@ -648,17 +685,31 @@ mod tests {
                         &mut env, agent_id, action,
                     )?;
                     obs.push(o);
-                    rewards.push(change.expect("shared env always reports a StateChange").reward_obtained);
+                    rewards.push(
+                        change
+                            .expect("shared env always reports a StateChange")
+                            .reward_obtained,
+                    );
                 }
             }
-            assert_eq!(env.rounds(), SCRIPT.len(), "every round must complete (both agents acted)");
+            assert_eq!(
+                env.rounds(),
+                SCRIPT.len(),
+                "every round must complete (both agents acted)"
+            );
             Ok((obs, rewards))
         }
 
         let (obs_a, rew_a) = run(4242)?;
         let (obs_b, rew_b) = run(4242)?;
-        assert_eq!(obs_a, obs_b, "same seed must reproduce the shared observation sequence");
-        assert_eq!(rew_a, rew_b, "same seed must reproduce the shared reward sequence");
+        assert_eq!(
+            obs_a, obs_b,
+            "same seed must reproduce the shared observation sequence"
+        );
+        assert_eq!(
+            rew_a, rew_b,
+            "same seed must reproduce the shared reward sequence"
+        );
 
         // Sanity: the stream is not degenerate (all draws identical would make the
         // equality above vacuous).
@@ -669,7 +720,10 @@ mod tests {
 
         // A different seed must diverge over these 16 draws.
         let (obs_c, _) = run(4243)?;
-        assert_ne!(obs_a, obs_c, "distinct seeds should diverge on the shared reward stream");
+        assert_ne!(
+            obs_a, obs_c,
+            "distinct seeds should diverge on the shared reward stream"
+        );
         Ok(())
     }
 }

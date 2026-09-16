@@ -4,7 +4,7 @@
 #![allow(clippy::cast_precision_loss)]
 
 use reproduce::{
-    Agent, BanditEnvironment, Environment, GroupAgentBuilder, AifError, VotingMode, env_seed,
+    Agent, AifError, BanditEnvironment, Environment, GroupAgentBuilder, VotingMode, env_seed,
     group_seed,
 };
 
@@ -72,8 +72,7 @@ fn test_group_agent_certainty_weighted_mode() -> Result<(), AifError> {
 ///   4242     → simple max  85, CW max 123
 ///   20260211 → simple max  98, CW max 136
 #[test]
-fn test_certainty_weighted_conflicting_prefs_less_noisy_than_simple() -> Result<(), AifError>
-{
+fn test_certainty_weighted_conflicting_prefs_less_noisy_than_simple() -> Result<(), AifError> {
     const SEED: u64 = 2026;
     const N_TRIALS: usize = 200;
 

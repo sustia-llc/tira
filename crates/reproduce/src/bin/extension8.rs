@@ -374,12 +374,8 @@ fn main() -> Result<(), AifError> {
                 .enumerate()
                 .map(|(i, &cell)| CellResult {
                     cell,
-                    meta_alpha: median_iqr(
-                        per_rep.iter().map(|r| r[f][i].meta_alpha).collect(),
-                    ),
-                    inner_alpha: median_iqr(
-                        per_rep.iter().map(|r| r[f][i].inner_alpha).collect(),
-                    ),
+                    meta_alpha: median_iqr(per_rep.iter().map(|r| r[f][i].meta_alpha).collect()),
+                    inner_alpha: median_iqr(per_rep.iter().map(|r| r[f][i].inner_alpha).collect()),
                     divergence: mean(
                         &per_rep
                             .iter()
