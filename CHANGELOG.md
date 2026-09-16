@@ -2,6 +2,49 @@
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-16
+
+Engine release for extension 6 (#46, topology-mediated voting), the arm of koalisi's
+`K7-1` registration ([koalisi #90](https://github.com/sustia-llc/koalisi/issues/90)).
+Additive: no existing surface changes what it computes, `InternalAgent` and
+`Aggregator` gain no required methods, `AifError` gains no variant. First release to
+declare `rust-version` (1.89, the measured floor — see `Cargo.toml`).
+
+### aif engine
+
+- **Added: `Topology`** (`topology.rs`, default build, no channel) — a member-indexed
+  row-stochastic adjacency over the group's internal slot. `from_adjacency(rows,
+  readout, hops)` validates (finite, non-negative entries; positive row totals;
+  square; non-empty, duplicate-free, in-range readout; `hops ≥ 1`), normalizes each row
+  and stores `W^hops`; `all_to_active(n)` is the paper's construction (identity rows,
+  every member read out); `route(outputs)` returns the readout rows of `W^hops · P`,
+  accumulated from `0.0` so an identity row reproduces its member's output bit-exactly.
+  Index `i` is position `i` in the internal slot: a roster mutation must re-key the
+  adjacency (the seam extension 9 / #48 inherits).
+- **Added: `RoutedAggregator<X: Aggregator = VotingAgent>`** — an active-slot wrapper
+  that routes member outputs through a `Topology` before the inner aggregator sees
+  them. Votes are one-hot encoded, routed, and decoded back to votes (a row with a sole
+  positive entry by its index with **no** RNG draw; a mixed row by a `WeightedIndex`
+  draw on the wrapper's own seeded RNG — `with_seed`/`reseed`, separate from the
+  inner's); distributions are routed as they are. Its `Aggregator` distribution twins
+  decode by lowest-index argmax and are RNG-free, so `GroupAgent::group_distribution`
+  (#53) works through it. `all_to_active` wrapping is byte-identical to the bare
+  aggregator in all three `VotingMode`s, pinned including RNG non-consumption
+  (`crates/aif/tests/topology_tests.rs`). A routed group is flat-only: `InternalAgent
+  for GroupAgent` stays `VotingAgent`-scoped (#51).
+- `group::argmax_index` is `pub(crate)` (shared with the twins). Crate-level
+  `#[allow(clippy::manual_midpoint)]` with reason (clippy 1.98 drift on bit-pinned
+  `0.5 * (a + b)` expressions).
+- `communication` docs: the module is the optional carrier for a message-passing
+  variant of extension 6, not the shipped routing; the feature stays default-off.
+
+### reproduce (0.6.0)
+
+- Extension 6 study: `ext6.rs` (`routing_seed`, `path_topology` / `layered_topology`
+  / `ring_topology`, `build_ext6_group`, gates G1–G3) and `bin/extension6.rs`
+  (master seed `0xE6_2026`, 4 topologies × 2 voting modes × 2 fixtures × 30 reps);
+  report `docs/extension6-topology.md`.
+
 ## [0.13.0] - 2026-08-08
 
 Engine release cut for the deterministic group read (#53), which koalisi

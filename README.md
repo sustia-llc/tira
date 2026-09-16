@@ -163,6 +163,21 @@ analogue of extension 4's active-slot dominance). Report:
 [extension8-nesting.md](docs/extension8-nesting.md); run with
 `cargo run --release -p reproduce --bin extension8` (~70 s).
 
+### Extension 6 — topology-mediated voting (study, no figure)
+
+Only some internal agents talk to the active agent directly; the rest reach it through
+intermediaries. `Topology` (a member-indexed row-stochastic adjacency, raised to `hops`)
++ `RoutedAggregator` (an active-slot wrapper routing member votes or distributions before
+any `Aggregator`) ship in the default build with no channel. Result: **the topology moves
+recovered α only under majority (`Deterministic`) voting, where it scales with readout
+size** — on the contested fixture a single-member readout recovers 0.34× the
+all-to-active α, and path < layered < ring < all-to-active is strictly ordered. Under
+`Probabilistic` voting α is topology-invariant (the tally draws one member's vote;
+routing only reweights that draw) even while up to 60% of the emitted actions change,
+and under `CertaintyWeighted` routing is the exact identity for identical fixed-A
+members. Report: [extension6-topology.md](docs/extension6-topology.md); run with
+`cargo run --release -p reproduce --bin extension6` (~36 s).
+
 ## Architecture
 
 ```
@@ -188,7 +203,8 @@ Environment (BanditEnvironment)
 | `crates/aif/src/agent.rs` | POMDP active inference agent: A–E matrices (multi-factor/multi-modality via `GenerativeModel`), expected free energy G (pragmatic + info-gain + novelty), α/γ precision, Dirichlet learning (pA/pB/pD/pE, η/ω, `parameter_free_energies()`), `StateInference` (MeanField / marginal message passing), `variational_free_energy()`, opt-in `PrecisionDynamics` (Smith Table 2 γ/β loop) |
 | `crates/aif/src/group.rs` | VotingMode, GroupAgent (generic blanket slots since #39; nests via `InternalAgent for GroupAgent`, #41; deterministic RNG-free read `group_distribution`/`group_distribution_recording`/`record_group_action` since #53), VotingAgent (discrete + certainty-weighted), Aggregator (sampling methods + defaulted no-draw distribution twins), GroupAgentBuilder |
 | `crates/aif/src/coalition.rs` | `competence_efe` + `ObsPrecisionParams` (the coalition-value primitive, opt-in `transition_noise` since 0.6.0), `TrustBeliefs` / `CompatibilityBeliefs` / `CoalitionHistory`, `belief_weighted_preference` |
-| `crates/aif/src/communication.rs` | Flume-based inter-agent messaging — latent scaffolding for extension 6, behind the default-off `communication` feature (#5) |
+| `crates/aif/src/topology.rs` | Topology-mediated voting (extension 6 / #46): `Topology` (member-indexed row-stochastic adjacency, `W^hops`, readout set) + `RoutedAggregator` (active-slot wrapper routing member votes/distributions before any `Aggregator`; RNG-free distribution twins) — default build, no channel |
+| `crates/aif/src/communication.rs` | Flume-based inter-agent messaging — the optional carrier for a message-passing variant of extension 6, behind the default-off `communication` feature (#5) |
 | `crates/reproduce/src/simulation.rs` | Simulation runner, parameter recovery (grid MAP: `recover_alpha[_learning]`; MCMC: `recover_alpha_mcmc[_learning]`, #25; vector MH `recover_mcmc_vec` + `McmcVecConfig`/`ModelParams`/`log_likelihood_params` with `ProposalMode` JointScale/Covariance proposals, extension 2 / #29+#30), 5 experiment factories taking `&ExperimentOpts` (seed + optional A-learning) |
 | `crates/reproduce/src/plotter.rs` | Figure rendering for `bin/reproduce.rs` — `plot_figure4`/`plot_figure5`/`plot_figure6` (consolidated per #7; the binary is orchestration-only) |
 | `crates/reproduce/src/bin/reproduce.rs` | Full paper reproduction binary — computes the recovery/experiment data, renders via `plotter.rs`, and (#7) exits nonzero with a stderr summary if any run was dropped |
@@ -201,6 +217,8 @@ Environment (BanditEnvironment)
 | `crates/reproduce/src/bin/extension4.rs` | POMDP sensory/active blanket-slot study (extension 4 / #40) |
 | `crates/reproduce/src/ext8.rs` | Extension-8 nesting harness: collision-free `inner_group_seed`, instrumented meta loop, gates G1–G3 |
 | `crates/reproduce/src/bin/extension8.rs` | Nested groups / recursive recovery study (extension 8 / #41) |
+| `crates/reproduce/src/ext6.rs` | Extension-6 routing harness: `routing_seed` (avalanche-mixed role 200), `path_topology` / `layered_topology` / `ring_topology`, `build_ext6_group`, gates G1–G3 |
+| `crates/reproduce/src/bin/extension6.rs` | Topology-mediated voting study: 4 topologies × 3 voting modes × 2 fixtures (extension 6 / #46) |
 
 ## Usage
 

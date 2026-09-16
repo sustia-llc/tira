@@ -6,6 +6,16 @@ members = ["crates/aif", "crates/reproduce"]
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sustia-llc/tira"
+# Measured floor, declared exactly (re-measured at every `aif-v*` tag; first
+# declared at `aif-v0.14.0`, 2026-09-16, on the current lock):
+#   1.89  `aif` default, `aif --features serde`, `aif --features communication`,
+#         and the whole workspace with `--all-targets`
+#         (1.88 fails on the dependency floor: nalgebra 0.35 / safe_arch 1.0 /
+#         wide 1.4 declare 1.89)
+# To re-measure: set this to 1.85.0 temporarily, run
+# `cargo +<v> check --locked --all-targets` per feature set, restore, diff the
+# manifest. Never `--ignore-rust-version`: it also suppresses the dependency checks.
+rust-version = "1.89"
 
 [workspace.dependencies]
 nalgebra = "0.35"

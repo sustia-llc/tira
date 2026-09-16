@@ -1,8 +1,8 @@
-//! Reserved infrastructure for the paper's §4.1 network-communication extension
-//! (extension 6, tracked as issue #46): network topologies where only some internal
-//! agents communicate directly with the active agent, with influence routed through
-//! intermediate connections. This module is currently exercised only by tests — it is
-//! not wired into the group-agent pipeline.
+//! Message transport for a message-passing variant of the paper's §4.1
+//! network-communication extension (extension 6, issue #46). The shipped extension-6
+//! routing is [`crate::Topology`] / [`crate::RoutedAggregator`] — a channel-free pure
+//! function in the default build; this module is exercised only by tests and is not
+//! wired into the group-agent pipeline.
 //!
 //! Behind the default-off `communication` feature since issue #5, so that downstream
 //! consumers of the engine do not carry a channel dependency for a module they never
@@ -14,7 +14,8 @@
 //! that previously suggested otherwise were unreachable — `current_beliefs` was never
 //! populated, `share_rewards` was stored and never read, and the received-action
 //! belief map was a write-only sink — so they were removed rather than left as an
-//! implied contract. Wiring messages into inference is issue #46's subject.
+//! implied contract. Wiring messages into inference belongs to the message-passing
+//! variant, which has no issue of its own.
 
 use crate::{Agent, AifError};
 use flume::{Receiver, Sender};

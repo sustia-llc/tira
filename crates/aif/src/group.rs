@@ -52,7 +52,7 @@ fn max_count_winners(counts: &[usize]) -> Vec<usize> {
 /// there is no such entry at all — an empty slice, or one that is entirely `NaN`
 /// — which callers report as an error rather than resolving to an arbitrary
 /// index.
-fn argmax_index(dist: &[f64]) -> Option<usize> {
+pub(crate) fn argmax_index(dist: &[f64]) -> Option<usize> {
     let mut best: Option<(usize, f64)> = None;
     for (i, &p) in dist.iter().enumerate() {
         if p.is_nan() {
