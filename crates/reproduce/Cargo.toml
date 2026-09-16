@@ -1,15 +1,16 @@
 [package]
 name = "reproduce"
-version = "0.5.0"
+version = "0.6.0"
 edition.workspace = true
+rust-version.workspace = true
 description = "Paper-reproduction harness for the aif active-inference engine"
 license.workspace = true
 repository.workspace = true
 publish = false
 
 [dependencies]
-# The harness opts into `communication` so the extension-6 scaffolding stays compiled
-# and tested in-tree (issue #5); the feature exists to spare *external* consumers.
+# The harness opts into `communication` so the message transport stays compiled and
+# tested in-tree (issue #5); the feature exists to spare *external* consumers.
 aif = { path = "../aif", features = ["communication"] }
 nalgebra = { workspace = true }
 rand = { workspace = true }

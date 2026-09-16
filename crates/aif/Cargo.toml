@@ -1,7 +1,8 @@
 [package]
 name = "aif"
-version = "0.13.0"
+version = "0.14.0"
 edition.workspace = true
+rust-version.workspace = true
 description = "Active-inference engine: POMDP agents, Markov-blanket group composition, and coalition-value primitives (Waade et al., Entropy 2025)"
 license.workspace = true
 repository.workspace = true
@@ -19,9 +20,10 @@ flume = { workspace = true, optional = true }
 # without `communication` would compile serde + serde_derive for zero effect and expose
 # no serializable types at all. It therefore implies `communication`.
 serde = ["dep:serde", "communication"]
-# Latent extension-6 scaffolding (`communication`). Default-off since issue #5: the
-# module is not wired into the group-agent pipeline, so downstream consumers should not
-# carry `flume` for it.
+# Message transport (`communication.rs`): the optional carrier for a message-passing
+# variant of extension 6. Default-off since issue #5 — the shipped topology routing
+# (`topology.rs`, #46) is channel-free and lives in the default build, so downstream
+# consumers do not carry `flume`.
 communication = ["dep:flume"]
 
 [dev-dependencies]
