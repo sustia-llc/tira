@@ -12,17 +12,6 @@ conversion for equation-level anchoring) live outside this repository at
 Paper summary: [abstract.md](docs/abstract.md). Paper→code coverage and canonical-AIF
 parity: [aif-coverage.md](docs/aif-coverage.md).
 
-## Plugin skills
-
-The `math` plugin has up-to-date skills for nalgebra v0.35.0 (the version used by this project):
-- `math:nalgebra-core` — Matrix type system, construction, BLAS ops, norms, views
-- `math:nalgebra-linalg` — Decompositions (Cholesky, LU, QR, SVD, eigenvalues, LBLT)
-- `math:nalgebra-transforms` — Isometry3, UnitQuaternion, Rotation3, geometric types
-- `math:nalgebra-sparse` — COO/CSR/CSC sparse matrices, sparse Cholesky
-- `math:nalgebra-glm` — GLM-style graphics math API
-
-Use these when working on matrix-heavy extensions (continuous state-space models, information-theoretic measures, sparse representations for large agent networks).
-
 ## Project state
 
 All 5 paper implementation phases complete. Extensions done: **1** (MCMC α recovery,
