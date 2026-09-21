@@ -37,7 +37,7 @@ is topology-invariant, CW routing is the identity for identical members), **11**
 Now a **Cargo workspace** (`crates/aif` engine + `crates/reproduce` harness) serving as
 the reference active-inference engine for the koalisi coalition runtime, which consumes
 the coalition-value primitive `competence_efe` and, since koalisi's K4-v3 arm, builds a
-multi-modality `GenerativeModel` directly (koalisi pins git tag `aif-v0.13.0`; the
+multi-modality `GenerativeModel` directly (koalisi pins git tag `aif-v0.14.0`; the
 current release is **`aif-v0.14.0`, cut 2026-09-16** — #46 topology-mediated voting
 (`Topology` + `RoutedAggregator`, default build), the arm of koalisi's `K7-1`
 registration (koalisi #90), additive, and the first tag to declare `rust-version`
@@ -51,7 +51,7 @@ never matches on the enum. Earlier: **`aif-v0.12.0`,
 cut 2026-08-01** — #39 generic blanket slots +
 `InternalAgent`/`Aggregator` traits, #41 nesting `InternalAgent for GroupAgent`, #9
 serde default-off gating (the one breaking rider; grep-verified no-op for koalisi),
-#11 hardening; adoption is scheduled pre-EQ4 per the stack decision. Earlier: 0.10.0
+#11 hardening. Earlier: 0.10.0
 (#10 seed API, #21 B-novelty, #3/#6 hardening), 0.10.1
 (read-only generative-model accessors), 0.11.0 (direct Dirichlet-count injection
 `initial_pa`/`initial_pb`) — those three cut 2026-07-17 for koalisi's
@@ -66,8 +66,8 @@ v3 (koalisi #43) `FALSIFIED (multimodality)` — decision-equivalence theorem; v
 performance while genuinely escaping the v3 theorem (act divergence 30/30); v5
 (koalisi #53) **`VALIDATED (gap closed)`** — the E1-only configuration (persistent
 learned per-bit precisions + novelty at fixed γ, no precision dynamics) beat the
-magnitude arm 0.4406 vs 0.2720 out-of-sample, the first arm to do so; arm choice is
-now koalisi #54 (cost-quality tradeoff)).
+magnitude arm 0.4406 vs 0.2720 out-of-sample, the first arm to do so; the arm choice
+was koalisi #54 (cost-quality tradeoff), closed 2026-07-18).
 
 - **291 tests** (290 `#[test]` + 1 doctest), edition 2024, `rust-version = "1.89"` (the
   measured floor, declared since 0.14.0 — see `Cargo.toml`), 0 clippy warnings under both
