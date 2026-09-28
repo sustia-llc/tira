@@ -402,6 +402,40 @@ pub struct ParameterFreeEnergies {
     pub fe: Option<f64>,
 }
 
+/// Per-policy expected-free-energy decomposition, returned by
+/// [`POMDPAgent::policy_efe`] for each enumerated policy.
+///
+/// Every value is in the neg-G convention (higher = more preferred) and is summed
+/// over the policy's steps. `neg_g` is the value the policy posterior softmaxes; the
+/// four components sum to it up to floating-point reassociation.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolicyEfe {
+    /// The policy's action sequence (flat joint-control indices, one per step).
+    pub actions: Vec<usize>,
+    /// Total neg-G of the policy, bit-identical to the value in the policy posterior.
+    pub neg_g: f64,
+    /// Pragmatic value `Σ_τ Σ_m q(o_m)·C_m`.
+    pub pragmatic: f64,
+    /// Epistemic value: the exact state–observation mutual information `Σ_τ Σ_m I(s;o_m)`.
+    pub epistemic: f64,
+    /// A-novelty (observation-model parameter information gain), summed over modalities.
+    pub a_novelty: f64,
+    /// B-novelty (transition-model parameter information gain), summed over factors.
+    pub b_novelty: f64,
+}
+
+/// One step of the neg-G rollout split into its terms, with the per-factor
+/// predicted beliefs.
+struct StepEfe {
+    neg_g: f64,
+    pragmatic: f64,
+    epistemic: f64,
+    a_novelty: f64,
+    b_novelty: f64,
+    next: Vec<DVector<f64>>,
+}
+
 /// POMDP active inference agent following Waade et al. (Entropy 2025, 27, 143),
 /// generalized to a factorized generative model.
 ///
@@ -2120,6 +2154,15 @@ impl POMDPAgent {
     /// per factor, favoring policies expected to sharpen the transition model; it is
     /// exactly zero for a deterministic B.
     fn efe_step(&self, beliefs: &[DVector<f64>], action_flat: usize) -> (f64, Vec<DVector<f64>>) {
+        let step = self.efe_step_components(beliefs, action_flat);
+        (step.neg_g, step.next)
+    }
+
+    /// The [`Self::efe_step`] computation with its terms tracked separately: the
+    /// step's pragmatic value, epistemic value (exact mutual information), A-novelty
+    /// and B-novelty, alongside the neg-G itself (accumulated in `efe_step`'s float
+    /// order, so it is the `efe_step` value) and the per-factor predicted beliefs.
+    fn efe_step_components(&self, beliefs: &[DVector<f64>], action_flat: usize) -> StepEfe {
         let controls = flat_to_multi(action_flat, &self.n_controls);
         let next: Vec<DVector<f64>> = (0..beliefs.len())
             .map(|f| &self.b[f][controls[f]] * &beliefs[f])
@@ -2128,6 +2171,9 @@ impl POMDPAgent {
 
         let mut pragmatic = 0.0;
         let mut info_gain = 0.0;
+        let mut epistemic = 0.0;
+        let mut a_nov = 0.0;
+        let mut b_nov = 0.0;
         let novelty_on = self.use_param_info_gain && self.pa.is_some();
         for m in 0..self.n_obs.len() {
             let qo = &self.a[m] * &joint;
@@ -2156,7 +2202,9 @@ impl POMDPAgent {
                     joint[j] * h_col
                 })
                 .sum();
-            info_gain += obs_entropy - expected_conditional_entropy;
+            let mutual_info = obs_entropy - expected_conditional_entropy;
+            info_gain += mutual_info;
+            epistemic += mutual_info;
 
             // Novelty (parameter information gain, Smith Eq. 39/40).
             if novelty_on {
@@ -2164,7 +2212,9 @@ impl POMDPAgent {
                     .pa
                     .as_ref()
                     .expect("invariant: pa is Some (novelty_on)");
-                info_gain += a_novelty(&pa[m], &qo, &joint);
+                let nov = a_novelty(&pa[m], &qo, &joint);
+                info_gain += nov;
+                a_nov += nov;
             }
         }
 
@@ -2174,11 +2224,20 @@ impl POMDPAgent {
             && let Some(pb) = &self.pb
         {
             for f in 0..next.len() {
-                info_gain += b_novelty(&pb[f][controls[f]], &next[f], &beliefs[f]);
+                let nov = b_novelty(&pb[f][controls[f]], &next[f], &beliefs[f]);
+                info_gain += nov;
+                b_nov += nov;
             }
         }
 
-        (info_gain + pragmatic, next)
+        StepEfe {
+            neg_g: info_gain + pragmatic,
+            pragmatic,
+            epistemic,
+            a_novelty: a_nov,
+            b_novelty: b_nov,
+            next,
+        }
     }
 
     /// Enumerate all length-`depth` policy action sequences (each entry a flat
@@ -2317,6 +2376,57 @@ impl POMDPAgent {
             .sum();
 
         -expected_neg_g
+    }
+
+    /// Per-policy expected-free-energy decomposition over the enumerated policy
+    /// space (`n_actions^policy_depth` entries, in the same order and with the same
+    /// action sequences as the policy posterior). Each [`PolicyEfe`] carries the
+    /// policy's pragmatic, epistemic, A-novelty and B-novelty values summed over its
+    /// steps, plus `neg_g`, the exact value the policy posterior softmaxes. Under
+    /// [`PrecisionDynamics`], once an observation of the current window has been
+    /// processed, each policy rolls from its own smoothed current-node belief (the
+    /// belief the `β`/`γ` loop scored); otherwise every policy rolls from the shared
+    /// current belief. The components sum to `neg_g` up to floating-point
+    /// reassociation, and bit-identically when both novelty flags are off and
+    /// `policy_depth == 1`. `a_novelty` is `0.0` unless
+    /// [`AgentParams::use_param_info_gain`] is set and pA exists; `b_novelty` is
+    /// `0.0` unless [`AgentParams::use_b_info_gain`] is set and pB exists.
+    #[must_use]
+    pub fn policy_efe(&self) -> Vec<PolicyEfe> {
+        let per_policy_start =
+            self.precision_dynamics.is_some() && self.cached_policy_posterior.is_some();
+        let w = self.mmp_obs_hist.len();
+        self.policy_sequences()
+            .into_iter()
+            .enumerate()
+            .map(|(i, actions)| {
+                let start: &[DVector<f64>] = if per_policy_start {
+                    &self.mmp_policy_traj[i][w - 1]
+                } else {
+                    &self.beliefs
+                };
+                let mut beliefs = start.to_vec();
+                let mut efe = PolicyEfe {
+                    actions: Vec::new(),
+                    neg_g: 0.0,
+                    pragmatic: 0.0,
+                    epistemic: 0.0,
+                    a_novelty: 0.0,
+                    b_novelty: 0.0,
+                };
+                for &a in &actions {
+                    let step = self.efe_step_components(&beliefs, a);
+                    efe.neg_g += step.neg_g;
+                    efe.pragmatic += step.pragmatic;
+                    efe.epistemic += step.epistemic;
+                    efe.a_novelty += step.a_novelty;
+                    efe.b_novelty += step.b_novelty;
+                    beliefs = step.next;
+                }
+                efe.actions = actions;
+                efe
+            })
+            .collect()
     }
 
     /// Marginalize a policy posterior to next-action probabilities under α
@@ -6898,6 +7008,697 @@ mod tests {
             "learn_d must write D at reset, got {}",
             agent.d[0][0]
         );
+        Ok(())
+    }
+
+    // ----- Per-policy EFE decomposition (policy_efe) -----
+
+    /// Single-factor, two-control `policy_efe` fixture: non-uniform A and a
+    /// stochastic column-varying B injected as Dirichlet counts, learning A and B.
+    fn policy_efe_agent(
+        state_inference: StateInference,
+        dynamics: bool,
+        a_flag: bool,
+        b_flag: bool,
+        depth: usize,
+    ) -> Result<POMDPAgent, AifError> {
+        POMDPAgent::from_model(
+            GenerativeModel {
+                a: vec![DMatrix::from_row_slice(2, 2, &[0.8, 0.3, 0.2, 0.7])],
+                b: vec![vec![
+                    DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8]),
+                    DMatrix::from_row_slice(2, 2, &[0.55, 0.6, 0.45, 0.4]),
+                ]],
+                c: vec![vec![0.7, 0.3]],
+                d: vec![vec![0.6, 0.4]],
+            },
+            AgentParams {
+                alpha: 1.0,
+                policy_depth: depth,
+                learn_a: true,
+                learn_b: true,
+                use_param_info_gain: a_flag,
+                use_b_info_gain: b_flag,
+                initial_pa: Some(vec![DMatrix::from_row_slice(2, 2, &[8.0, 3.0, 2.0, 7.0])]),
+                initial_pb: Some(vec![vec![
+                    DMatrix::from_row_slice(2, 2, &[9.0, 2.0, 1.0, 8.0]),
+                    DMatrix::from_row_slice(2, 2, &[5.5, 6.0, 4.5, 4.0]),
+                ]]),
+                state_inference,
+                precision_dynamics: dynamics.then(PrecisionDynamics::default),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Largest magnitude of each term observed across a lane, and the largest
+    /// per-policy start-belief deviation from the shared belief under dynamics, for
+    /// the non-vacuity asserts.
+    #[derive(Default)]
+    struct PolicyEfeEvidence {
+        epistemic: f64,
+        a_novelty: f64,
+        b_novelty: f64,
+        start_belief_diff: f64,
+    }
+
+    /// Asserts, at `agent`'s current state, that every `policy_efe` entry carries
+    /// the posterior's action sequence and bit-identical neg-G (P1), zero novelty
+    /// with both flags off (P2), and components summing to `neg_g` within the
+    /// reassociation tolerance, bit-exactly when flags are off at depth 1 (P3).
+    // Exact comparison is the P2 contract: an unflagged novelty term is a hard 0.0.
+    #[allow(clippy::float_cmp)]
+    fn check_policy_efe(agent: &POMDPAgent, lane: &str, step: &str, ev: &mut PolicyEfeEvidence) {
+        let efe = agent.policy_efe();
+        let (policies, _) = agent.policy_posterior();
+        let flags_off = !agent.use_param_info_gain && !agent.use_b_info_gain;
+        assert_eq!(
+            efe.len(),
+            policies.len(),
+            "{lane} {step}: {} policy_efe entries vs {} posterior policies",
+            efe.len(),
+            policies.len()
+        );
+        for (i, (e, (seq, g))) in efe.iter().zip(policies.iter()).enumerate() {
+            assert_eq!(
+                &e.actions, seq,
+                "{lane} {step} policy {i}: actions {:?} vs posterior {seq:?}",
+                e.actions
+            );
+            assert_eq!(
+                e.neg_g.to_bits(),
+                g.to_bits(),
+                "{lane} {step} policy {i}: neg_g bits {:#x} ({}) vs posterior {:#x} ({g})",
+                e.neg_g.to_bits(),
+                e.neg_g,
+                g.to_bits()
+            );
+            if flags_off {
+                assert!(
+                    e.a_novelty == 0.0 && e.b_novelty == 0.0,
+                    "{lane} {step} policy {i}: flags off but a_novelty {} b_novelty {}",
+                    e.a_novelty,
+                    e.b_novelty
+                );
+            }
+            let sum = e.pragmatic + e.epistemic + e.a_novelty + e.b_novelty;
+            let tol = 64.0
+                * f64::EPSILON
+                * (1.0
+                    + e.pragmatic.abs()
+                    + e.epistemic.abs()
+                    + e.a_novelty.abs()
+                    + e.b_novelty.abs());
+            assert!(
+                (sum - e.neg_g).abs() <= tol,
+                "{lane} {step} policy {i}: components sum {sum} vs neg_g {} (|diff| {} > tol {tol}; \
+                 pragmatic {} epistemic {} a_novelty {} b_novelty {})",
+                e.neg_g,
+                (sum - e.neg_g).abs(),
+                e.pragmatic,
+                e.epistemic,
+                e.a_novelty,
+                e.b_novelty
+            );
+            if flags_off && agent.policy_depth == 1 {
+                assert_eq!(
+                    sum.to_bits(),
+                    e.neg_g.to_bits(),
+                    "{lane} {step} policy {i}: flags off, depth 1: sum bits {:#x} ({sum}) vs neg_g {:#x} ({})",
+                    sum.to_bits(),
+                    e.neg_g.to_bits(),
+                    e.neg_g
+                );
+            }
+            ev.epistemic = ev.epistemic.max(e.epistemic.abs());
+            ev.a_novelty = ev.a_novelty.max(e.a_novelty.abs());
+            ev.b_novelty = ev.b_novelty.max(e.b_novelty.abs());
+        }
+        if agent.precision_dynamics.is_some() && agent.cached_policy_posterior.is_some() {
+            let w = agent.mmp_obs_hist.len();
+            for traj in &agent.mmp_policy_traj {
+                for (node, shared) in traj[w - 1].iter().zip(agent.beliefs.iter()) {
+                    let diff = (node - shared).amax();
+                    ev.start_belief_diff = ev.start_belief_diff.max(diff);
+                }
+            }
+        }
+    }
+
+    /// Builds a `policy_efe` fixture from `(state_inference, dynamics, a_flag, b_flag,
+    /// depth)`.
+    type PolicyEfeBuilder =
+        fn(StateInference, bool, bool, bool, usize) -> Result<POMDPAgent, AifError>;
+
+    /// Drives every flag × depth lane of one inference mode through a fixed
+    /// observe/record sequence, checking `policy_efe` before the first observation
+    /// and after each one, then asserts the lane's live terms were exercised.
+    fn run_policy_efe_lanes(
+        state_inference: StateInference,
+        dynamics: bool,
+    ) -> Result<(), AifError> {
+        drive_policy_efe_lanes(
+            policy_efe_agent,
+            &[&[0], &[1], &[1], &[0], &[1], &[0]],
+            &[1, 0, 1, 1, 0],
+            state_inference,
+            dynamics,
+        )
+    }
+
+    /// [`run_policy_efe_lanes`] over an arbitrary fixture and multi-modality
+    /// observation sequence (`obs[t]` holds one index per modality; `acts[t]` is
+    /// the flat joint action recorded after step `t`).
+    fn drive_policy_efe_lanes(
+        build: PolicyEfeBuilder,
+        obs: &[&[usize]],
+        acts: &[usize],
+        state_inference: StateInference,
+        dynamics: bool,
+    ) -> Result<(), AifError> {
+        for depth in [1usize, 2] {
+            for a_flag in [false, true] {
+                for b_flag in [false, true] {
+                    let lane = format!(
+                        "[{state_inference:?} dynamics={dynamics} a_flag={a_flag} \
+                         b_flag={b_flag} depth={depth}]"
+                    );
+                    let mut agent = build(state_inference, dynamics, a_flag, b_flag, depth)?;
+                    let mut ev = PolicyEfeEvidence::default();
+                    check_policy_efe(&agent, &lane, "before first observation", &mut ev);
+                    for (t, &o) in obs.iter().enumerate() {
+                        agent.action_probabilities_multi(o)?;
+                        check_policy_efe(&agent, &lane, &format!("step {t}"), &mut ev);
+                        if let Some(&a) = acts.get(t) {
+                            agent.record_action(a);
+                        }
+                    }
+                    assert!(
+                        ev.epistemic > 0.0,
+                        "{lane}: epistemic is {} at most, for every policy at every step",
+                        ev.epistemic
+                    );
+                    if a_flag {
+                        assert!(
+                            ev.a_novelty > 0.0,
+                            "{lane}: flag on but a_novelty is {} at most",
+                            ev.a_novelty
+                        );
+                    }
+                    if b_flag {
+                        assert!(
+                            ev.b_novelty > 0.0,
+                            "{lane}: flag on but b_novelty is {} at most",
+                            ev.b_novelty
+                        );
+                    }
+                    if dynamics {
+                        assert!(
+                            ev.start_belief_diff > 1e-6,
+                            "{lane}: per-policy start beliefs differ from the shared belief \
+                             by {} at most",
+                            ev.start_belief_diff
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_policy_efe_meanfield() -> Result<(), AifError> {
+        run_policy_efe_lanes(StateInference::MeanField, false)
+    }
+
+    #[test]
+    fn test_policy_efe_mmp() -> Result<(), AifError> {
+        run_policy_efe_lanes(
+            StateInference::MarginalMessagePassing {
+                horizon: 3,
+                iters: 50,
+            },
+            false,
+        )
+    }
+
+    #[test]
+    fn test_policy_efe_precision_dynamics() -> Result<(), AifError> {
+        run_policy_efe_lanes(
+            StateInference::MarginalMessagePassing {
+                horizon: 3,
+                iters: 50,
+            },
+            true,
+        )
+    }
+
+    /// `policy_posterior().0[i].1.to_bits()` recorded at base commit `b65b747`
+    /// (before `efe_step_components` existed) on the [`policy_efe_agent`] fixture at
+    /// depth 2, indexed `[lane][check point][policy]`. Lanes: {`MeanField`, MMP,
+    /// MMP + `PrecisionDynamics`} × {(a-novelty), (b-novelty), (both)}; check points:
+    /// after observations 0, 1 and 5 of the `run_policy_efe_lanes` drive.
+    const POLICY_EFE_NEG_G_GOLDEN: [[[u64; 4]; 3]; 9] = [
+        // MeanField a_flag=true b_flag=false
+        [
+            [
+                0xbfee_6fce_b94a_8787,
+                0xbfef_3f44_6f94_86c3,
+                0xbfef_101a_fc18_df35,
+                0xbfef_87f0_39b4_b76c,
+            ],
+            [
+                0xbff2_79bd_2152_72ca,
+                0xbff0_64ee_2a8b_26b8,
+                0xbff1_e134_bb4d_73f6,
+                0xbff0_a06f_ebbe_6d6e,
+            ],
+            [
+                0xbff0_4715_1700_4f51,
+                0xbff1_120a_36c8_429e,
+                0xbff0_c453_4419_fb74,
+                0xbff1_371b_e28a_ec5c,
+            ],
+        ],
+        // MeanField a_flag=false b_flag=true
+        [
+            [
+                0xbfe9_d1e4_da43_bb8f,
+                0xbfed_f6fb_1c58_4829,
+                0xbfed_d52c_8eed_4f79,
+                0xbff0_dd90_1d82_2162,
+            ],
+            [
+                0xbff0_4ebd_d295_95be,
+                0xbfef_40af_1edb_07ca,
+                0xbff1_6d22_99bf_ff42,
+                0xbff1_a35c_b15a_16d4,
+            ],
+            [
+                0xbfed_6f48_7f9e_e156,
+                0xbff0_99f5_9703_f102,
+                0xbff0_5c75_1386_c80c,
+                0xbff1_f5c5_7412_ed62,
+            ],
+        ],
+        // MeanField a_flag=true b_flag=true
+        [
+            [
+                0xbfe4_811e_1f5a_b691,
+                0xbfe8_91c2_2924_d50c,
+                0xbfe8_751d_e008_1d27,
+                0xbfec_5079_3216_5d78,
+            ],
+            [
+                0xbfeb_8e5b_3063_8d6e,
+                0xbfea_2fe3_2deb_2928,
+                0xbfed_cda0_ab53_ae6a,
+                0xbfee_2f4c_bce2_381e,
+            ],
+            [
+                0xbfe9_3f93_e3ce_947c,
+                0xbfec_e90b_2837_0ca7,
+                0xbfec_7a1b_3bce_4202,
+                0xbfef_9df5_df26_e187,
+            ],
+        ],
+        // MMP a_flag=true b_flag=false
+        [
+            [
+                0xbfec_8fd6_a55f_3644,
+                0xbfee_c72c_77b4_cdc4,
+                0xbfed_c6e4_c34e_8b1f,
+                0xbfee_fffd_717f_cc84,
+            ],
+            [
+                0xbff2_6eba_55fe_4f72,
+                0xbfef_c5e3_edbb_ac44,
+                0xbff1_ac29_3a17_66f7,
+                0xbff0_25b1_d414_0fca,
+            ],
+            [
+                0xbfee_e4f5_336a_b3a0,
+                0xbff0_9663_f69e_62a2,
+                0xbff0_1fa4_c8c0_1086,
+                0xbff0_c110_0deb_5018,
+            ],
+        ],
+        // MMP a_flag=false b_flag=true
+        [
+            [
+                0xbfe8_d65f_8757_8770,
+                0xbfed_453c_4cbd_7d15,
+                0xbfec_fea6_66b2_66a0,
+                0xbff0_7e35_c6da_2631,
+            ],
+            [
+                0xbff0_5d86_e110_9afd,
+                0xbfee_1192_d6db_fe1f,
+                0xbff1_43fc_48d9_e6d8,
+                0xbff1_12a6_ada4_43a4,
+            ],
+            [
+                0xbfeb_8949_2626_937c,
+                0xbfef_f701_572b_740e,
+                0xbfef_4fad_9401_1bfc,
+                0xbff1_78c8_4478_cda4,
+            ],
+        ],
+        // MMP a_flag=true b_flag=true
+        [
+            [
+                0xbfe4_1205_5939_fade,
+                0xbfe8_163e_ba93_3dbe,
+                0xbfe8_07a4_639b_2284,
+                0xbfeb_c90c_3608_4d7c,
+            ],
+            [
+                0xbfeb_d6e5_0dbd_2efd,
+                0xbfe9_297c_f63d_8538,
+                0xbfed_a6a1_f279_805c,
+                0xbfed_3506_a3de_78a2,
+            ],
+            [
+                0xbfe7_8240_9893_7ea7,
+                0xbfeb_baf6_eaf2_c79f,
+                0xbfeb_2d5a_6e96_330e,
+                0xbfee_b225_81ad_691e,
+            ],
+        ],
+        // MMP + PrecisionDynamics a_flag=true b_flag=false
+        [
+            [
+                0xbfec_7c1d_7006_b586,
+                0xbfee_c5ee_50f4_9574,
+                0xbfed_bf36_9a8b_c771,
+                0xbfee_ff3d_f7ef_ce0c,
+            ],
+            [
+                0xbff2_ce94_3e65_06a5,
+                0xbfef_c700_408f_6474,
+                0xbff1_dd2b_d15e_e3f4,
+                0xbff0_2600_638f_d81a,
+            ],
+            [
+                0xbfee_d33b_da15_c54e,
+                0xbff0_95e2_3953_a623,
+                0xbff0_1b74_fe2a_3387,
+                0xbff0_c0b7_b4c8_f3b0,
+            ],
+        ],
+        // MMP + PrecisionDynamics a_flag=false b_flag=true
+        [
+            [
+                0xbfe8_ed3c_b628_44f2,
+                0xbfed_4400_92e8_f1a4,
+                0xbfed_0e1a_fff7_7e1e,
+                0xbff0_7dcd_a3cd_150c,
+            ],
+            [
+                0xbff0_e88d_b2a9_efbe,
+                0xbfee_12ac_41ef_df2a,
+                0xbff1_8e95_0dda_b294,
+                0xbff1_12ff_32cb_ea66,
+            ],
+            [
+                0xbfeb_84da_9e14_4706,
+                0xbfef_f5f1_2057_b1bf,
+                0xbfef_4f87_4223_4303,
+                0xbff1_7867_2b30_5a37,
+            ],
+        ],
+        // MMP + PrecisionDynamics a_flag=true b_flag=true
+        [
+            [
+                0xbfe4_33a0_d4b7_7828,
+                0xbfe8_1518_c710_4d87,
+                0xbfe8_1cbd_bc0b_88b8,
+                0xbfeb_c846_6119_91ba,
+            ],
+            [
+                0xbfec_f652_36e5_6922,
+                0xbfe9_2a82_6b5f_ac0c,
+                0xbfee_422a_b705_9720,
+                0xbfed_35ae_3bde_e5ad,
+            ],
+            [
+                0xbfe7_8183_b32b_9688,
+                0xbfeb_b9ee_c616_d555,
+                0xbfeb_2f61_5a9e_5912,
+                0xbfee_b166_9ee0_a89a,
+            ],
+        ],
+    ];
+
+    /// Appends to `mismatches` one line per policy whose `policy_efe()[i].neg_g` or
+    /// policy-posterior neg-G bits differ from `golden[i]`, printing both hex values.
+    fn collect_neg_g_golden_mismatches(
+        agent: &POMDPAgent,
+        lane: &str,
+        step: &str,
+        golden: &[u64; 4],
+        mismatches: &mut Vec<String>,
+    ) {
+        let efe = agent.policy_efe();
+        let (policies, _) = agent.policy_posterior();
+        assert_eq!(
+            efe.len(),
+            golden.len(),
+            "{lane} {step}: {} policy_efe entries vs {} golden",
+            efe.len(),
+            golden.len()
+        );
+        assert_eq!(
+            policies.len(),
+            golden.len(),
+            "{lane} {step}: {} posterior policies vs {} golden",
+            policies.len(),
+            golden.len()
+        );
+        for (i, ((e, (_, g)), &want)) in efe.iter().zip(policies.iter()).zip(golden).enumerate() {
+            if e.neg_g.to_bits() != want || g.to_bits() != want {
+                mismatches.push(format!(
+                    "{lane} {step} policy {i}: policy_efe neg_g {:#018x} ({}), posterior {:#018x} \
+                     ({g}), base golden {want:#018x} ({})",
+                    e.neg_g.to_bits(),
+                    e.neg_g,
+                    g.to_bits(),
+                    f64::from_bits(want)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn test_policy_efe_neg_g_golden_vs_base() -> Result<(), AifError> {
+        let modes = [
+            (StateInference::MeanField, false),
+            (
+                StateInference::MarginalMessagePassing {
+                    horizon: 3,
+                    iters: 50,
+                },
+                false,
+            ),
+            (
+                StateInference::MarginalMessagePassing {
+                    horizon: 3,
+                    iters: 50,
+                },
+                true,
+            ),
+        ];
+        let flags = [(true, false), (false, true), (true, true)];
+        let obs = [0usize, 1, 1, 0, 1, 0];
+        let acts = [1usize, 0, 1, 1, 0];
+        let check_points = [0usize, 1, 5];
+        let mut mismatches = Vec::new();
+        let mut red_lanes = Vec::new();
+        for (mi, &(state_inference, dynamics)) in modes.iter().enumerate() {
+            for (fi, &(a_flag, b_flag)) in flags.iter().enumerate() {
+                let lane = format!(
+                    "[{state_inference:?} dynamics={dynamics} a_flag={a_flag} b_flag={b_flag} \
+                     depth=2]"
+                );
+                let golden = &POLICY_EFE_NEG_G_GOLDEN[mi * flags.len() + fi];
+                let before = mismatches.len();
+                let mut agent = policy_efe_agent(state_inference, dynamics, a_flag, b_flag, 2)?;
+                for (t, &o) in obs.iter().enumerate() {
+                    agent.action_probabilities(o);
+                    if let Some(k) = check_points.iter().position(|&c| c == t) {
+                        collect_neg_g_golden_mismatches(
+                            &agent,
+                            &lane,
+                            &format!("step {t}"),
+                            &golden[k],
+                            &mut mismatches,
+                        );
+                    }
+                    if let Some(&a) = acts.get(t) {
+                        agent.record_action(a);
+                    }
+                }
+                if mismatches.len() > before {
+                    red_lanes.push(lane);
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "{} of {} lanes differ from the base golden ({} entries):\n{}",
+            red_lanes.len(),
+            modes.len() * flags.len(),
+            mismatches.len(),
+            mismatches.join("\n")
+        );
+        Ok(())
+    }
+
+    /// Two-factor, two-modality `policy_efe` fixture: both factors have two states
+    /// and two controls with stochastic column-varying B; modality 0 has two
+    /// outcomes and modality 1 three, each with a non-uniform A over the four joint
+    /// states; A and B are injected as Dirichlet counts and learned.
+    fn policy_efe_multi_factor_agent(
+        state_inference: StateInference,
+        dynamics: bool,
+        a_flag: bool,
+        b_flag: bool,
+        depth: usize,
+    ) -> Result<POMDPAgent, AifError> {
+        POMDPAgent::from_model(
+            GenerativeModel {
+                a: vec![
+                    DMatrix::from_row_slice(2, 4, &[0.85, 0.3, 0.6, 0.1, 0.15, 0.7, 0.4, 0.9]),
+                    DMatrix::from_row_slice(
+                        3,
+                        4,
+                        &[0.7, 0.2, 0.1, 0.4, 0.2, 0.5, 0.3, 0.4, 0.1, 0.3, 0.6, 0.2],
+                    ),
+                ],
+                b: vec![
+                    vec![
+                        DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8]),
+                        DMatrix::from_row_slice(2, 2, &[0.3, 0.75, 0.7, 0.25]),
+                    ],
+                    vec![
+                        DMatrix::from_row_slice(2, 2, &[0.85, 0.35, 0.15, 0.65]),
+                        DMatrix::from_row_slice(2, 2, &[0.4, 0.9, 0.6, 0.1]),
+                    ],
+                ],
+                c: vec![vec![0.7, 0.3], vec![0.2, 0.3, 0.5]],
+                d: vec![vec![0.6, 0.4], vec![0.3, 0.7]],
+            },
+            AgentParams {
+                alpha: 1.0,
+                policy_depth: depth,
+                learn_a: true,
+                learn_b: true,
+                use_param_info_gain: a_flag,
+                use_b_info_gain: b_flag,
+                initial_pa: Some(vec![
+                    DMatrix::from_row_slice(2, 4, &[8.5, 3.0, 6.0, 1.0, 1.5, 7.0, 4.0, 9.0]),
+                    DMatrix::from_row_slice(
+                        3,
+                        4,
+                        &[7.0, 2.0, 1.0, 4.0, 2.0, 5.0, 3.0, 4.0, 1.0, 3.0, 6.0, 2.0],
+                    ),
+                ]),
+                initial_pb: Some(vec![
+                    vec![
+                        DMatrix::from_row_slice(2, 2, &[9.0, 2.0, 1.0, 8.0]),
+                        DMatrix::from_row_slice(2, 2, &[3.0, 7.5, 7.0, 2.5]),
+                    ],
+                    vec![
+                        DMatrix::from_row_slice(2, 2, &[8.5, 3.5, 1.5, 6.5]),
+                        DMatrix::from_row_slice(2, 2, &[4.0, 9.0, 6.0, 1.0]),
+                    ],
+                ]),
+                state_inference,
+                precision_dynamics: dynamics.then(PrecisionDynamics::default),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn test_policy_efe_multi_factor() -> Result<(), AifError> {
+        let mmp = StateInference::MarginalMessagePassing {
+            horizon: 3,
+            iters: 50,
+        };
+        for (state_inference, dynamics) in [
+            (StateInference::MeanField, false),
+            (mmp, false),
+            (mmp, true),
+        ] {
+            drive_policy_efe_lanes(
+                policy_efe_multi_factor_agent,
+                &[&[0, 2], &[1, 0], &[1, 1], &[0, 2], &[1, 0], &[0, 1]],
+                &[3, 0, 2, 1, 3],
+                state_inference,
+                dynamics,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The single-factor [`policy_efe_agent`] model with every `learn_*` flag off,
+    /// under MMP + `PrecisionDynamics` (the γ/β loop then runs inside
+    /// `belief_step`, not `perceive_and_learn`).
+    fn policy_efe_no_learning_agent(depth: usize) -> Result<POMDPAgent, AifError> {
+        POMDPAgent::from_model(
+            GenerativeModel {
+                a: vec![DMatrix::from_row_slice(2, 2, &[0.8, 0.3, 0.2, 0.7])],
+                b: vec![vec![
+                    DMatrix::from_row_slice(2, 2, &[0.9, 0.2, 0.1, 0.8]),
+                    DMatrix::from_row_slice(2, 2, &[0.55, 0.6, 0.45, 0.4]),
+                ]],
+                c: vec![vec![0.7, 0.3]],
+                d: vec![vec![0.6, 0.4]],
+            },
+            AgentParams {
+                alpha: 1.0,
+                policy_depth: depth,
+                state_inference: StateInference::MarginalMessagePassing {
+                    horizon: 3,
+                    iters: 50,
+                },
+                precision_dynamics: Some(PrecisionDynamics::default()),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn test_policy_efe_precision_dynamics_no_learning() -> Result<(), AifError> {
+        let obs = [0usize, 1, 1, 0, 1, 0];
+        let acts = [1usize, 0, 1, 1, 0];
+        for depth in [1usize, 2] {
+            let lane = format!("[MMP+PrecisionDynamics no-learning depth={depth}]");
+            let mut agent = policy_efe_no_learning_agent(depth)?;
+            assert!(
+                !agent.any_learn(),
+                "{lane}: learn_a {} learn_b {} learn_d {} learn_e {}",
+                agent.learn_a,
+                agent.learn_b,
+                agent.learn_d,
+                agent.learn_e
+            );
+            let mut ev = PolicyEfeEvidence::default();
+            check_policy_efe(&agent, &lane, "before first observation", &mut ev);
+            for (t, &o) in obs.iter().enumerate() {
+                agent.action_probabilities(o);
+                check_policy_efe(&agent, &lane, &format!("step {t}"), &mut ev);
+                if let Some(&a) = acts.get(t) {
+                    agent.record_action(a);
+                }
+            }
+            assert!(
+                ev.start_belief_diff > 1e-6,
+                "{lane}: per-policy start beliefs differ from the shared belief by {} at most",
+                ev.start_belief_diff
+            );
+        }
         Ok(())
     }
 }
