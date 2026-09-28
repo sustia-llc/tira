@@ -29,7 +29,7 @@ mod topology;
 
 pub use agent::{
     Agent, AgentParams, CopyAgent, GenerativeModel, InternalAgent, POMDPAgent,
-    ParameterFreeEnergies, PrecisionDynamics, StateInference,
+    ParameterFreeEnergies, PolicyEfe, PrecisionDynamics, StateInference,
 };
 pub use coalition::{
     AgentId, CoalitionHistory, CompatibilityBeliefs, ObsPrecisionParams, TrustBeliefs,
