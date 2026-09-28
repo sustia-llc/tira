@@ -38,7 +38,9 @@ Now a **Cargo workspace** (`crates/aif` engine + `crates/reproduce` harness) ser
 the reference active-inference engine for the koalisi coalition runtime, which consumes
 the coalition-value primitive `competence_efe` and, since koalisi's K4-v3 arm, builds a
 multi-modality `GenerativeModel` directly (koalisi pins git tag `aif-v0.14.0`; the
-current release is **`aif-v0.14.0`, cut 2026-09-16** — #46 topology-mediated voting
+current release is **`aif-v0.15.0`, cut 2026-09-28** — #57 the per-policy EFE read
+`policy_efe()` / `PolicyEfe`, additive, `rust-version` raised to 1.93.0 to align with
+koalisi; koalisi needs no re-pin. Previous: **`aif-v0.14.0`, cut 2026-09-16** — #46 topology-mediated voting
 (`Topology` + `RoutedAggregator`, default build), the arm of koalisi's `K7-1`
 registration (koalisi #90), additive, and the first tag to declare `rust-version`
 (1.89, measured). Previous: **`aif-v0.13.0`, cut 2026-08-08** — #53 the deterministic
