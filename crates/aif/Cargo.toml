@@ -1,6 +1,6 @@
 [package]
 name = "aif"
-version = "0.14.0"
+version = "0.15.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Active-inference engine: POMDP agents, Markov-blanket group composition, and coalition-value primitives (Waade et al., Entropy 2025)"
