@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-28
+
+Engine release for the per-policy EFE read (#57), for the Sustia DMDU PoC's EFE
+matrix over candidate generative models. Additive: `efe_step`'s value, the policy
+posterior and every existing public signature are unchanged.
+
+### aif engine
+
+- **Added: `POMDPAgent::policy_efe() -> Vec<PolicyEfe>`**, index-aligned with the
+  enumerated policy space (`n_actions^policy_depth` entries, the policy posterior's
+  order). `PolicyEfe` (`#[non_exhaustive]`) carries `actions`, `neg_g` (bit-identical
+  to the value the policy posterior softmaxes) and its terms summed over the policy's
+  steps: `pragmatic`, `epistemic` (exact MI), `a_novelty` (`0.0` unless
+  `use_param_info_gain` and pA), `b_novelty` (`0.0` unless `use_b_info_gain` and pB).
+  Under `PrecisionDynamics`, once the current window's γ/β loop has run, each policy
+  rolls from its own smoothed current-node belief (the one that loop scored);
+  otherwise from the shared current belief. The terms sum to `neg_g` up to
+  floating-point reassociation, bit-identically with both novelty flags off at
+  `policy_depth == 1`.
+- `efe_step` is a wrapper over the private `efe_step_components`, which accumulates
+  neg-G in `efe_step`'s float order and tracks the terms beside it.
+
+### Workspace
+
+- `rust-version` raised 1.89 → 1.93.0, aligned with koalisi's declaration. The
+  declaration is now verified (`cargo +1.93.0 check --all-targets --locked` per
+  feature set) instead of re-measured; 1.89 stays in `Cargo.toml` as the last
+  measured floor.
+
 ## [0.14.0] - 2026-09-16
 
 Engine release for extension 6 (#46, topology-mediated voting), the arm of koalisi's
